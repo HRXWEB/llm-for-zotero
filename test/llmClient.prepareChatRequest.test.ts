@@ -375,7 +375,7 @@ describe("llmClient prepareChatRequest", function () {
     assert.equal(capturedHeaders.get("Authorization"), "Bearer direct-token");
     assert.equal(capturedHeaders.get("ChatGPT-Account-ID"), "account-789");
 
-    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+    for (const effort of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
       await callLLMStream(
         {
           prompt: `Use ${effort}`,
@@ -394,21 +394,6 @@ describe("llmClient prepareChatRequest", function () {
         effort,
       );
     }
-
-    await callLLMStream(
-      {
-        prompt: "Hello again",
-        model: "gpt-codex",
-        authMode: "codex_auth",
-        reasoning: {
-          provider: "openai",
-          level: "default",
-          effort: "ultra",
-        },
-      },
-      () => undefined,
-    );
-    assert.notProperty(capturedBody, "reasoning");
   });
 
   it("keeps image content for DeepSeek vision models in automatic mode", function () {

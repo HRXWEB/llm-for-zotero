@@ -501,7 +501,7 @@ describe("CodexResponsesAgentAdapter", function () {
     assert.notProperty(capturedBody, "custom_advanced_value");
     assert.equal(capturedHeaders.get("Authorization"), "Bearer direct-token");
     assert.equal(capturedHeaders.get("ChatGPT-Account-ID"), "account-456");
-    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+    for (const effort of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
       const effortAdapter = new CodexResponsesAgentAdapter();
       await effortAdapter.runStep({
         request: makeRequest({
@@ -518,9 +518,9 @@ describe("CodexResponsesAgentAdapter", function () {
     }
   });
 
-  it("omits Ultra and stale direct efforts", async function () {
+  it("omits stale direct efforts", async function () {
     await loadDirectCatalog();
-    for (const effort of ["ultra", "stale-effort"]) {
+    for (const effort of ["stale-effort"]) {
       const freshAdapter = new CodexResponsesAgentAdapter();
       let capturedBody: Record<string, unknown> = {};
       (
