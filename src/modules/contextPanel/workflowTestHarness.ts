@@ -27,6 +27,7 @@ import type {
   WorkflowTestDraftRefreshDiagnostics,
   WorkflowTestDuplicatePanelSetupDiagnostics,
   WorkflowTestFixture,
+  WorkflowTestFooterLayout,
   WorkflowTestHighlightAwareRetrievalDiagnostics,
   WorkflowTestNoteFixture,
   WorkflowTestPanel,
@@ -1260,6 +1261,76 @@ async function measurePanelRuntimeGeometry(
   }
 }
 
+async function measurePanelFooterLayout(
+  panelId: string,
+  input: { width: number; statusText: string },
+): Promise<WorkflowTestFooterLayout> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const status = panel.body.querySelector("#llm-status") as HTMLElement | null;
+  const controls = panel.body.querySelector(
+    ".llm-footer-controls",
+  ) as HTMLElement | null;
+  const permissionButton = panel.body.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLElement | null;
+  if (!status || !controls || !permissionButton) {
+    throw new Error("Panel footer layout targets were not rendered");
+  }
+
+  const getFirstTextRect = (element: HTMLElement): DOMRect => {
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    const rects = range.getClientRects();
+    const rect = rects
+      ? Array.from(rects).find(
+          (candidate) => candidate.width > 0 && candidate.height > 0,
+        )
+      : undefined;
+    range.detach();
+    if (!rect) {
+      throw new Error("Panel footer text did not produce a rendered rectangle");
+    }
+    return rect;
+  };
+
+  const previousWidth = panel.body.style.width;
+  const previousStatusText = status.textContent;
+  panel.body.style.width = `${input.width}px`;
+  status.textContent = input.statusText;
+  await Zotero.Promise.delay(50);
+  try {
+    const statusRect = status.getBoundingClientRect();
+    const controlsRect = controls.getBoundingClientRect();
+    const statusTextRect = getFirstTextRect(status);
+    const permissionTextRect = getFirstTextRect(permissionButton);
+    const statusStyle =
+      status.ownerDocument.defaultView?.getComputedStyle(status);
+    const statusLineHeight = Number.parseFloat(statusStyle?.lineHeight || "0");
+    const textGlyphsAligned =
+      Math.abs(permissionTextRect.top - statusTextRect.top) <= 0.5 &&
+      Math.abs(permissionTextRect.bottom - statusTextRect.bottom) <= 0.5;
+    return {
+      statusHeight: statusRect.height,
+      statusLineHeight,
+      statusTop: statusRect.top,
+      controlsTop: controlsRect.top,
+      statusTextTop: statusTextRect.top,
+      permissionTextTop: permissionTextRect.top,
+      statusTextBottom: statusTextRect.bottom,
+      permissionTextBottom: permissionTextRect.bottom,
+      statusWrapped: statusRect.height > statusLineHeight + 0.5,
+      controlsPinnedToFirstLine:
+        textGlyphsAligned &&
+        permissionTextRect.top < statusRect.top + statusLineHeight,
+      textGlyphsAligned,
+    };
+  } finally {
+    panel.body.style.width = previousWidth;
+    status.textContent = previousStatusText;
+  }
+}
+
 async function ask(
   panelId: string,
   text: string,
@@ -2481,6 +2552,40 @@ async function getDiagnostics(
     "#llm-history-toggle",
   ) as HTMLElement | null;
   const chatBox = body?.querySelector("#llm-chat-box") as HTMLElement | null;
+  const statusBar = body?.querySelector(
+    ".llm-status-bar",
+  ) as HTMLElement | null;
+  const permissionControl = body?.querySelector(
+    "#llm-permission-control",
+  ) as HTMLElement | null;
+  const permissionButton = body?.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLElement | null;
+  const statusLine = body?.querySelector("#llm-status") as HTMLElement | null;
+  const contextGauge = body?.querySelector(
+    "#llm-context-gauge",
+  ) as HTMLElement | null;
+  const panelWin = body?.ownerDocument.defaultView;
+  const statusBarStyle =
+    panelWin && statusBar ? panelWin.getComputedStyle(statusBar) : null;
+  const permissionControlStyle =
+    panelWin && permissionControl
+      ? panelWin.getComputedStyle(permissionControl)
+      : null;
+  const permissionButtonStyle =
+    panelWin && permissionButton
+      ? panelWin.getComputedStyle(permissionButton)
+      : null;
+  const statusLineStyle =
+    panelWin && statusLine ? panelWin.getComputedStyle(statusLine) : null;
+  const panelRootStyle =
+    panelWin && panelRoot ? panelWin.getComputedStyle(panelRoot) : null;
+  const contextGaugeStyle =
+    panelWin && contextGauge ? panelWin.getComputedStyle(contextGauge) : null;
+  const contextGaugeInnerStyle =
+    panelWin && contextGauge
+      ? panelWin.getComputedStyle(contextGauge, "::after")
+      : null;
   return {
     panelId,
     activeItemId: parsePositiveInt(mountedItem?.id),
@@ -2542,6 +2647,31 @@ async function getDiagnostics(
     statusText:
       (body?.querySelector("#llm-status") as HTMLElement | null)?.textContent ||
       undefined,
+    startPageActive: panelRoot?.dataset.startPageActive === "true",
+    statusBarVisible: Boolean(
+      statusBarStyle &&
+      statusBarStyle.display !== "none" &&
+      statusBarStyle.visibility !== "hidden",
+    ),
+    permissionControlVisible: Boolean(
+      permissionControlStyle &&
+      permissionControlStyle.display !== "none" &&
+      permissionControlStyle.visibility !== "hidden",
+    ),
+    permissionModeText: permissionButton?.textContent?.trim() || undefined,
+    permissionModeFontSize: permissionButtonStyle?.fontSize,
+    statusFontSize: statusLineStyle?.fontSize,
+    contextGaugeWidth: contextGaugeStyle
+      ? Number.parseFloat(contextGaugeStyle.width)
+      : undefined,
+    contextGaugeHeight: contextGaugeStyle
+      ? Number.parseFloat(contextGaugeStyle.height)
+      : undefined,
+    contextGaugeInnerWidth: contextGaugeInnerStyle
+      ? Number.parseFloat(contextGaugeInnerStyle.width)
+      : undefined,
+    contextGaugeInnerBackground: contextGaugeInnerStyle?.backgroundColor,
+    panelBackground: panelRootStyle?.backgroundColor,
     tokenUsageText:
       (
         body?.querySelector("#llm-token-usage") as HTMLElement | null
@@ -3716,6 +3846,7 @@ export function installWorkflowTestHarness(targetAddon: {
     clickPanelSystemTogglesRapidly,
     clickPanelRuntimeModeToggle,
     measurePanelRuntimeGeometry,
+    measurePanelFooterLayout,
     selectNoteEditorText,
     ask,
     renderAssistantForPanel,

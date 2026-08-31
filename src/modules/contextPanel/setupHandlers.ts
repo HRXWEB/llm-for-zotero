@@ -433,6 +433,7 @@ import { createPdfPaperAttachmentResolver } from "./setupHandlers/controllers/pd
 import { createLocalPdfResourceResolver } from "./setupHandlers/controllers/localPdfResourceResolver";
 import { isZoteroPdfAttachmentCandidate } from "./setupHandlers/controllers/pdfAttachmentPolicy";
 import { resolvePdfModeModelInputs } from "./setupHandlers/controllers/pdfPaperModelInputController";
+import { attachFooterPermissionControl } from "./footerPermissionControl";
 import { createWebChatHistoryController } from "./setupHandlers/controllers/webChatHistoryController";
 import {
   createHistoryLifecycleController,
@@ -737,6 +738,9 @@ export function setupHandlers(
     exportMenuNoteBtn,
     retryModelMenu,
     status,
+    permissionControl,
+    permissionButton,
+    permissionMenu,
     chatBox,
     panelRoot,
   } = panelRefs;
@@ -1153,7 +1157,10 @@ export function setupHandlers(
       lastUsedRuntimeMode: getLastUsedRuntimeMode(),
     });
   };
+  let syncFooterPermissionControl = () => {};
+  let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
+    syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
       ".llm-agent-toggle-indicator",
@@ -1718,9 +1725,11 @@ export function setupHandlers(
     const agentPrefKey = `${config.prefsPrefix}.enableAgentMode`;
     const claudeModePrefKey = `${config.prefsPrefix}.enableClaudeCodeMode`;
     const codexModePrefKey = `${config.prefsPrefix}.enableCodexAppServerMode`;
+    const libraryWriteModePrefKey = `${config.prefsPrefix}.agentLibraryWriteMode`;
     let agentObserverId: symbol | undefined;
     let claudeObserverId: symbol | undefined;
     let codexObserverId: symbol | undefined;
+    let libraryWriteModeObserverId: symbol | undefined;
     const unregister = (observerId: symbol | undefined) => {
       if (observerId === undefined) return;
       try {
@@ -1733,9 +1742,11 @@ export function setupHandlers(
       unregister(agentObserverId);
       unregister(claudeObserverId);
       unregister(codexObserverId);
+      unregister(libraryWriteModeObserverId);
       agentObserverId = undefined;
       claudeObserverId = undefined;
       codexObserverId = undefined;
+      libraryWriteModeObserverId = undefined;
     };
     const isPanelUnavailable = () =>
       !(body as Element).isConnected ||
@@ -1789,6 +1800,13 @@ export function setupHandlers(
       updateRuntimeSystemToggles();
       updateRuntimeModeButton();
     };
+    const onLibraryWriteModePrefChange = () => {
+      if (isPanelUnavailable()) {
+        cleanupPrefObservers?.();
+        return;
+      }
+      syncFooterPermissionControl();
+    };
     try {
       agentObserverId = (Zotero as any).Prefs.registerObserver(
         agentPrefKey,
@@ -1803,6 +1821,11 @@ export function setupHandlers(
       codexObserverId = (Zotero as any).Prefs.registerObserver(
         codexModePrefKey,
         onCodexModePrefChange,
+        true,
+      );
+      libraryWriteModeObserverId = (Zotero as any).Prefs.registerObserver(
+        libraryWriteModePrefKey,
+        onLibraryWriteModePrefChange,
         true,
       );
     } catch {
@@ -2026,6 +2049,19 @@ export function setupHandlers(
   let closeModelMenu = () => {
     setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
   };
+  {
+    const controller = attachFooterPermissionControl({
+      body,
+      control: permissionControl,
+      button: permissionButton,
+      menu: permissionMenu,
+      getConversationSystem,
+      getRuntimeMode: getCurrentRuntimeMode,
+    });
+    syncFooterPermissionControl = controller.sync;
+    disposeFooterPermissionControl = controller.dispose;
+    syncFooterPermissionControl();
+  }
   let openReasoningMenu = () => {};
   let closeReasoningMenu = () => {
     setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
@@ -7934,6 +7970,8 @@ export function setupHandlers(
     disconnectObserverCleanup?.();
     disconnectObserverCleanup = null;
     cleanupPrefObservers?.();
+    disposeFooterPermissionControl?.();
+    disposeFooterPermissionControl = null;
     cleanupMineruPaperSourceObservers?.();
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;

@@ -25,6 +25,7 @@ import {
 } from "./portalScope";
 import { getConversationKey } from "./conversationIdentity";
 import { createRuntimeSystemControls } from "./runtimeSystemControls";
+import { FOOTER_PERMISSION_MODE_OPTIONS } from "./footerPermissionControl";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -201,22 +202,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     },
   });
 
-  const claudeContextGauge = createElement(
-    doc,
-    "div",
-    "llm-claude-context-gauge",
-    {
-      id: "llm-claude-context-gauge",
-    },
-  ) as HTMLDivElement;
-  claudeContextGauge.style.display = "none";
-  claudeContextGauge.setAttribute("aria-hidden", "true");
-
-  headerRuntimeControls.append(
-    modeSwitchWrap,
-    runtimeSystemControls.group,
-    claudeContextGauge,
-  );
+  headerRuntimeControls.append(modeSwitchWrap, runtimeSystemControls.group);
   historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls);
 
   headerInfo.append(title, historyBar);
@@ -964,10 +950,72 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
         : t("Ready")
       : t("Select an item or open a PDF"),
   });
+  const footerControls = createElement(doc, "div", "llm-footer-controls");
+  const permissionControl = createElement(
+    doc,
+    "div",
+    "llm-permission-control",
+    { id: "llm-permission-control" },
+  );
+  permissionControl.style.display = "none";
+  const permissionButton = createElement(
+    doc,
+    "button",
+    "llm-permission-toggle",
+    {
+      id: "llm-permission-toggle",
+      type: "button",
+      textContent: "auto",
+      title: t("Permission mode"),
+    },
+  );
+  permissionButton.setAttribute("aria-haspopup", "menu");
+  permissionButton.setAttribute("aria-expanded", "false");
+  const permissionMenu = createElement(doc, "div", "llm-permission-menu", {
+    id: "llm-permission-menu",
+  });
+  permissionMenu.setAttribute("role", "menu");
+  permissionMenu.style.display = "none";
+  for (const option of FOOTER_PERMISSION_MODE_OPTIONS) {
+    const optionButton = createElement(doc, "button", "llm-permission-option", {
+      type: "button",
+      textContent: option.mode,
+      disabled: !option.available,
+      title: option.available ? option.mode : t("Coming later"),
+    });
+    optionButton.dataset.permissionMode = option.mode;
+    optionButton.setAttribute("role", "menuitemradio");
+    optionButton.setAttribute("aria-checked", "false");
+    permissionMenu.appendChild(optionButton);
+  }
+  permissionControl.append(permissionButton, permissionMenu);
+
+  const contextUsageControl = createElement(
+    doc,
+    "span",
+    "llm-context-usage-control",
+  );
+  const contextGauge = createElement(doc, "span", "llm-context-gauge", {
+    id: "llm-context-gauge",
+    title: t("Context window usage unavailable"),
+  });
+  contextGauge.setAttribute("role", "img");
+  contextGauge.setAttribute("tabindex", "0");
+  contextGauge.setAttribute(
+    "aria-label",
+    t("Context window usage unavailable"),
+  );
+  contextGauge.setAttribute("aria-describedby", "llm-token-usage");
   const tokenUsage = createElement(doc, "span", "llm-token-usage", {
     id: "llm-token-usage",
   });
-  statusBar.append(statusLine, tokenUsage);
+  tokenUsage.setAttribute("role", "tooltip");
+  tokenUsage.dataset.label = t("Context window:");
+  tokenUsage.dataset.summary = t("Usage unavailable");
+  tokenUsage.dataset.detail = t("Send a message to measure usage");
+  contextUsageControl.append(contextGauge, tokenUsage);
+  footerControls.append(permissionControl, contextUsageControl);
+  statusBar.append(statusLine, footerControls);
 
   actionsLeft.append(
     uploadSlot,

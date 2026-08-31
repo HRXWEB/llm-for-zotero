@@ -84,6 +84,9 @@ export type PanelDomRefs = {
   exportMenuNoteBtn: HTMLButtonElement | null;
   retryModelMenu: HTMLDivElement | null;
   status: HTMLElement | null;
+  permissionControl: HTMLDivElement | null;
+  permissionButton: HTMLButtonElement | null;
+  permissionMenu: HTMLDivElement | null;
   tokenUsageEl: HTMLElement | null;
   chatBox: HTMLDivElement | null;
   panelRoot: HTMLDivElement | null;
@@ -314,6 +317,15 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
       "#llm-retry-model-menu",
     ) as HTMLDivElement | null,
     status: body.querySelector("#llm-status") as HTMLElement | null,
+    permissionControl: body.querySelector(
+      "#llm-permission-control",
+    ) as HTMLDivElement | null,
+    permissionButton: body.querySelector(
+      "#llm-permission-toggle",
+    ) as HTMLButtonElement | null,
+    permissionMenu: body.querySelector(
+      "#llm-permission-menu",
+    ) as HTMLDivElement | null,
     tokenUsageEl: body.querySelector("#llm-token-usage") as HTMLElement | null,
     chatBox: body.querySelector("#llm-chat-box") as HTMLDivElement | null,
     panelRoot: body.querySelector("#llm-main") as HTMLDivElement | null,

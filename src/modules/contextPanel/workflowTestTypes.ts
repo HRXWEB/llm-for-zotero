@@ -126,6 +126,20 @@ export type WorkflowTestRuntimeGeometry = {
   centeredContentOffset: number;
 };
 
+export type WorkflowTestFooterLayout = {
+  statusHeight: number;
+  statusLineHeight: number;
+  statusTop: number;
+  controlsTop: number;
+  statusTextTop: number;
+  permissionTextTop: number;
+  statusTextBottom: number;
+  permissionTextBottom: number;
+  statusWrapped: boolean;
+  controlsPinnedToFirstLine: boolean;
+  textGlyphsAligned: boolean;
+};
+
 export type WorkflowTestStandaloneComposerResizeDiagnostics = {
   heightBeforeDrag: number;
   heightAfterDrag: number;
@@ -157,6 +171,17 @@ export type WorkflowTestDiagnostics = {
   runtimeSystemToggles: WorkflowTestRuntimeSystemToggle[];
   inputValue?: string;
   statusText?: string;
+  startPageActive?: boolean;
+  statusBarVisible?: boolean;
+  permissionControlVisible?: boolean;
+  permissionModeText?: string;
+  permissionModeFontSize?: string;
+  statusFontSize?: string;
+  contextGaugeWidth?: number;
+  contextGaugeHeight?: number;
+  contextGaugeInnerWidth?: number;
+  contextGaugeInnerBackground?: string;
+  panelBackground?: string;
   tokenUsageText?: string;
   messageText?: string;
   lastSend: SendQuestionOptions | null;
@@ -401,6 +426,10 @@ export type WorkflowTestApi = {
     panelId: string,
     input: { width: number; fontScale: number },
   ) => Promise<WorkflowTestRuntimeGeometry>;
+  measurePanelFooterLayout: (
+    panelId: string,
+    input: { width: number; statusText: string },
+  ) => Promise<WorkflowTestFooterLayout>;
   selectNoteEditorText: (panelId: string, text: string) => Promise<void>;
   ask: (panelId: string, text: string) => Promise<SendQuestionOptions>;
   renderAssistantForPanel: (

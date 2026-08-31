@@ -1513,7 +1513,7 @@ function renderContextUsageSnapshot(
     tokenUsageEl,
     snapshot?.contextTokens || 0,
     snapshot?.contextWindow,
-    body.querySelector("#llm-claude-context-gauge") as HTMLElement | null,
+    body.querySelector("#llm-context-gauge") as HTMLElement | null,
     {
       estimated: snapshot?.estimated !== false,
       cacheReadTokens: snapshot?.cacheReadTokens,

@@ -354,9 +354,7 @@ function createAgentTurnEventHandler(
               ui.tokenUsageEl,
               effectiveTokens,
               nextWindow,
-              body.querySelector(
-                "#llm-claude-context-gauge",
-              ) as HTMLElement | null,
+              body.querySelector("#llm-context-gauge") as HTMLElement | null,
               {
                 estimated: usageRecord.contextWindowIsAuthoritative !== true,
                 cacheReadTokens:

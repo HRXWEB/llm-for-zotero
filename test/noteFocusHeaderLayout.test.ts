@@ -21,7 +21,7 @@ describe("note focus header layout", function () {
     );
     assert.include(
       buildUi,
-      "headerRuntimeControls.append(\n    modeSwitchWrap,\n    runtimeSystemControls.group,",
+      "headerRuntimeControls.append(modeSwitchWrap, runtimeSystemControls.group)",
       "runtime icons must remain immediately after the static mode chip",
     );
     assert.notInclude(

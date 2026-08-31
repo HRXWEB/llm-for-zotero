@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { normalizeAgentLibraryWriteMode } from "../src/shared/agentLibraryWriteMode";
+import { setAgentLibraryWriteMode } from "../src/agent/libraryWriteMode";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createLibrarySettingsTool } from "../src/agent/tools/write/librarySettings";
@@ -266,6 +267,23 @@ describe("mutation-plan confirmation policy", function () {
     it("honours explicit safe and yolo modes", function () {
       assert.equal(normalizeAgentLibraryWriteMode("safe"), "safe");
       assert.equal(normalizeAgentLibraryWriteMode("yolo"), "yolo");
+    });
+
+    it("persists auto without silently converting it to safe", function () {
+      const writes: unknown[][] = [];
+      globalThis.Zotero = {
+        Prefs: {
+          set: (...args: unknown[]) => {
+            writes.push(args);
+          },
+        },
+      } as never;
+
+      setAgentLibraryWriteMode("auto");
+
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0]?.[1], "auto");
+      assert.equal(writes[0]?.[2], true);
     });
   });
 });

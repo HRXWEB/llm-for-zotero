@@ -19,6 +19,7 @@ import {
   formatSelectedTextLocator,
   renderSelectedTextAnchorContext,
 } from "./selectedTextAnchorFormatting";
+import { t } from "../../utils/i18n";
 export { normalizeSelectedTextSource } from "./normalizers";
 
 export const DEFAULT_SELECTED_TEXT_PROMPT =
@@ -481,25 +482,34 @@ export function setTokenUsage(
         : `${prefix}: ${formatTokenCount(normalizedTokens)} / ${formatTokenCount(contextWindow)} input tokens`;
     el.textContent = `${formatTokenCount(normalizedTokens)} / ${formatTokenCount(contextWindow)} (${percentage}%)`;
     el.title = cacheLines.length ? `${title}\n${cacheLines.join("\n")}` : title;
+    el.dataset.label = t("Context window:");
+    el.dataset.summary = `${percentage}% ${t("used")} (${100 - percentage}% ${t("left")})`;
+    el.dataset.detail = `${formatTokenCount(normalizedTokens)} / ${formatTokenCount(contextWindow)} ${t("tokens used")}`;
     el.dataset.warning = percentage > 80 ? "true" : "false";
-    el.style.display = "inline";
+    el.style.display = "";
     if (gaugeEl) {
-      gaugeEl.style.display = "none";
-      gaugeEl.style.background = "transparent";
-      delete gaugeEl.dataset.warning;
-      gaugeEl.title = "";
+      gaugeEl.style.display = "inline-block";
+      gaugeEl.style.background = `conic-gradient(${percentage > 80 ? "#f39c12" : "var(--fill-secondary, #7c7c7c)"} ${percentage * 3.6}deg, color-mix(in srgb, var(--fill-secondary, #7c7c7c) 22%, transparent) 0deg)`;
+      gaugeEl.dataset.warning = percentage > 80 ? "true" : "false";
+      gaugeEl.title = el.title;
+      gaugeEl.setAttribute("aria-label", el.title);
     }
     return;
   }
   el.textContent = "";
-  el.title = "";
+  el.title = "Context window usage unavailable";
+  el.dataset.label = t("Context window:");
+  el.dataset.summary = t("Usage unavailable");
+  el.dataset.detail = t("Send a message to measure usage");
   delete el.dataset.warning;
-  el.style.display = "none";
+  el.style.display = "";
   if (gaugeEl) {
-    gaugeEl.style.display = "none";
-    gaugeEl.style.background = "transparent";
+    gaugeEl.style.display = "inline-block";
+    gaugeEl.style.background =
+      "color-mix(in srgb, var(--fill-secondary, #7c7c7c) 45%, transparent)";
     delete gaugeEl.dataset.warning;
-    gaugeEl.title = "";
+    gaugeEl.title = el.title;
+    gaugeEl.setAttribute("aria-label", el.title);
   }
 }
 

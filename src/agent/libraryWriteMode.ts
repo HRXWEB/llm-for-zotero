@@ -37,7 +37,7 @@ export function setAgentLibraryWriteMode(mode: AgentLibraryWriteMode): void {
           set?: (key: string, value: unknown, global?: boolean) => void;
         };
       }
-    ).Prefs?.set?.(PREF_KEY, mode === "yolo" ? "yolo" : "safe", true);
+    ).Prefs?.set?.(PREF_KEY, mode, true);
   } catch {
     /* a pref we cannot write is not worth failing a turn over */
   }

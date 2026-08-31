@@ -78,12 +78,18 @@ describe("textUtils selected text prompt composition", function () {
       title: "",
       dataset: {} as Record<string, string>,
       style: { display: "", background: "" },
+      setAttribute() {},
     } as unknown as HTMLElement;
 
     setTokenUsage(tokenEl, 90, 100, gaugeEl, { estimated: true });
 
     assert.equal(tokenEl.textContent, "90 / 100 (90%)");
     assert.include(tokenEl.title, "Estimated active context window usage");
+    assert.equal(tokenEl.dataset.summary, "90% used (10% left)");
+    assert.equal(tokenEl.dataset.detail, "90 / 100 tokens used");
     assert.equal(tokenEl.dataset.warning, "true");
+    assert.equal(gaugeEl.style.display, "inline-block");
+    assert.include(gaugeEl.style.background, "324deg");
+    assert.equal(gaugeEl.dataset.warning, "true");
   });
 });
