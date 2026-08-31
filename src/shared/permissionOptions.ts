@@ -36,7 +36,8 @@ const ORIGINAL_OPTIONS: Record<AgentLibraryWriteMode, PermissionOption> = {
     fullLabel: "Safe",
     compactLabel: "safe",
     levelLabel: "Restricted",
-    description: "Review every Zotero library change before it happens.",
+    description:
+      "Review every library change before it happens; batch jobs pause on each page.",
     risk: "restricted",
     available: true,
   },
@@ -47,7 +48,7 @@ const ORIGINAL_OPTIONS: Record<AgentLibraryWriteMode, PermissionOption> = {
     compactLabel: "auto",
     levelLabel: "Standard",
     description:
-      "Apply reversible library changes and ask before irreversible changes.",
+      "Apply reversible library changes automatically and ask before irreversible changes.",
     risk: "standard",
     available: true,
   },
@@ -58,7 +59,7 @@ const ORIGINAL_OPTIONS: Record<AgentLibraryWriteMode, PermissionOption> = {
     compactLabel: "yolo",
     levelLabel: "Full access",
     description:
-      "Let the Original Agent apply library changes on its own judgement.",
+      "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.",
     risk: "full-access",
     available: true,
   },

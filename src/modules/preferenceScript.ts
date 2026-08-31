@@ -3992,7 +3992,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         (option) => option.id === agentLibraryWriteModeSelect.value,
       );
       agentLibraryWriteModeDescription.textContent = selected
-        ? `${selected.fullLabel}: ${selected.description}`
+        ? `${selected.fullLabel}: ${t(selected.description)}`
         : "";
     };
     renderPermissionPreferenceOptions({

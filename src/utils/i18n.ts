@@ -359,13 +359,21 @@ const zhCN: Record<string, string> = {
   "Enable Agent Mode (Beta)": "启用 Agent 模式（测试版）",
   'Shows the "Agent (beta)" toggle in the context bar, enabling the agentic multi-step assistant. Off by default — enable only if you want to experiment with the beta feature.':
     '在上下文栏显示"Agent（测试版）"切换按钮，启用多步骤 Agent 助手。默认关闭 — 仅在你想体验测试版功能时启用。',
+  "Original Agent Mode": "原生 Agent 模式",
+  "This panel configures the in-plugin Original Agent. Its library permissions are independent from the permission controls for Claude Code and Codex.":
+    "此面板用于配置插件内的原生 Agent。其文献库权限与 Claude Code 和 Codex 的权限控制彼此独立。",
+  "Library permissions": "文献库权限",
   "Library Write Mode": "文献库写入模式",
   safe: "安全",
   yolo: "全自动",
-  "reviews every library change before it happens, and batch jobs pause on each page.":
-    "会在每次更改文献库之前进行审核，批处理任务会在每一页暂停。",
-  "lets the agent apply changes on its own judgement, including whole-library batch jobs — every run is still recorded and can be reverted from the agent history. This is separate from the Claude Code permission mode, which governs the bridge only.":
-    "允许 Agent 自主判断并应用更改，包括整个文献库的批处理任务——每次运行仍会被记录，并可从 Agent 历史记录中撤销。此模式与 Claude Code 权限模式相互独立；后者仅控制桥接服务。",
+  "Review every library change before it happens; batch jobs pause on each page.":
+    "每次更改文献库前都需审核；批处理任务会在每一页暂停。",
+  "Apply reversible library changes automatically and ask before irreversible changes.":
+    "自动应用可撤销的文献库更改，并在不可撤销的更改前询问。",
+  "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.":
+    "允许原生 Agent 自主判断并应用更改，包括不可撤销的更改和整个文献库的批处理任务。",
+  "This setting controls only Original Agent library actions. Original Agent, Claude Code, and Codex each use separate permission controls; changing one does not affect the other two. Reversible changes in all three Original Agent permission modes are recorded and can be reverted from Agent history.":
+    "此设置仅控制原生 Agent 的文献库操作。原生 Agent、Claude Code 和 Codex 各自使用独立的权限控制；更改任一模式都不会影响另外两种模式。原生 Agent 三种权限模式下的可撤销更改都会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",
   "Adds current, general web search and focused page reading to the in-plugin Agent. The key stays in your local Zotero preferences.":
     "为插件内的 Agent 提供最新的通用网页搜索和针对性网页读取功能。API 密钥仅保存在本机的 Zotero 偏好设置中。",
