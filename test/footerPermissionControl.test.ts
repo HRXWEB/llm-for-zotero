@@ -3,6 +3,24 @@ import { readFileSync } from "node:fs";
 import { positionFloatingMenu } from "../src/modules/contextPanel/setupHandlers/controllers/menuController";
 
 describe("footer permission control", function () {
+  it("uses the existing designed confirmation dialog for Codex full access", function () {
+    const controller = readFileSync(
+      "src/modules/contextPanel/footerPermissionControl.ts",
+      "utf8",
+    );
+    const preferences = readFileSync("src/modules/preferenceScript.ts", "utf8");
+
+    assert.include(controller, "showStandaloneConfirmationDialog");
+    assert.include(controller, 'title: t("Enable Codex full access?")');
+    assert.include(controller, 'confirmLabel: t("Enable full access")');
+    assert.include(controller, "destructive: true");
+    assert.notInclude(controller, "defaultView?.confirm");
+
+    assert.include(preferences, "confirmCodexFullAccess");
+    assert.include(preferences, '.open(t("Enable Codex full access?"))');
+    assert.notInclude(preferences, "defaultView?.confirm");
+  });
+
   it("keeps the permission selector and context gauge together on the footer right", function () {
     const buildUi = readFileSync("src/modules/contextPanel/buildUI.ts", "utf8");
 
@@ -26,17 +44,32 @@ describe("footer permission control", function () {
     );
     assert.match(
       css,
-      /\.llm-permission-option\[data-permission-mode="safe"\]:hover:not\(:disabled\)\s*\{[\s\S]*?#22c55e 14%/,
+      /data-permission-provider="original"\]\[data-selection-key="original:safe"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,500}#22c55e 14%/,
     );
     assert.match(
       css,
-      /\.llm-permission-option\[data-permission-mode="auto"\]:hover:not\(:disabled\)\s*\{[\s\S]*?background: var\(--color-accent10/,
+      /data-permission-provider="original"\]\[data-selection-key="original:auto"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,500}background: var\(--color-accent10/,
     );
     assert.match(
       css,
-      /\.llm-permission-option\[data-permission-mode="yolo"\]:hover:not\(:disabled\)\s*\{[\s\S]*?#eab308 14%/,
+      /data-permission-provider="original"\]\[data-selection-key="original:yolo"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,900}#eab308 14%/,
     );
-    assert.notInclude(css, 'data-permission-mode="plan"');
+    assert.match(
+      css,
+      /data-permission-provider="claude"\]\[data-selection-key="claude:acceptEdits"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,500}#22c55e 14%/,
+    );
+    assert.match(
+      css,
+      /data-permission-provider="claude"\]\[data-selection-key="claude:auto"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,500}background: var\(--color-accent10/,
+    );
+    assert.match(
+      css,
+      /data-permission-provider="claude"\]\[data-selection-key="claude:bypassPermissions"\]:hover:not\([\s\S]{0,40}:disabled[\s\S]{0,40}\)[\s\S]{0,500}#eab308 14%/,
+    );
+    assert.notInclude(css, 'data-selection-key="claude:plan"');
+    assert.notInclude(css, 'data-selection-key="claude:dontAsk"');
+    assert.notInclude(css, 'data-selection-key="claude:default"');
+    assert.notInclude(css, "data-permission-mode");
     assert.notInclude(css, ".llm-permission-option-level");
     const selectedRules = css.match(
       /\.llm-permission-option-selected:not\(:disabled\)\s*\{([\s\S]*?)\n\}/,
@@ -77,9 +110,9 @@ describe("footer permission control", function () {
       css,
       /\.llm-permission-option\s*\{[\s\S]*?all: unset;[\s\S]*?display: grid;[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?padding-block: 7px;[\s\S]*?padding-inline: 9px;[\s\S]*?border: 1px solid transparent;[\s\S]*?border-radius: 8px;/,
     );
-    assert.include(
+    assert.match(
       controller,
-      'if (menu.scrollHeight <= menu.clientHeight) {\n      menu.style.overflowY = "hidden";',
+      /if \(menu\.scrollHeight <= menu\.clientHeight\)\s*(?:\{|)\s*menu\.style\.overflowY = "hidden"/,
     );
   });
 

@@ -1,11 +1,12 @@
 import type { ConversationSystem } from "../../shared/types";
 import type { AgentLibraryWriteMode } from "../../shared/agentLibraryWriteMode";
 import type { ClaudePermissionMode } from "../../shared/claudePermissionMode";
+import { t } from "../../utils/i18n";
 import {
-  buildCodexPermissionOption,
   buildPermissionAccessibleLabel,
+  getClaudePermissionModeFromSelectionKey,
+  getOriginalPermissionModeFromSelectionKey,
   getOriginalPermissionOptions,
-  normalizeCodexProfileLabel,
   type PermissionOption,
 } from "../../shared/permissionOptions";
 import {
@@ -22,37 +23,42 @@ import {
   fetchClaudePermissionModeCatalog,
   reconcileClaudePermissionMode,
 } from "../../claudeCode/permissionModes";
-import {
-  getCodexPermissionProfilePref,
-  setCodexPermissionProfilePref,
-} from "../../codexAppServer/prefs";
 import { getConfiguredCodexAppServerBinaryPath } from "../../codexAppServer/binaryPath";
-import { listCodexPermissionProfiles } from "../../codexAppServer/permissionProfiles";
+import {
+  getCodexPermissionOptionCatalog,
+  subscribeCodexPermissionProcessChanges,
+  type CodexPermissionOptionCatalog,
+} from "../../codexAppServer/permissionProfiles";
+import { setCodexPermissionStatePref } from "../../codexAppServer/prefs";
+import { applyCodexPermissionChoice } from "../../codexAppServer/permissionState";
 import { resolveCodexNativeRuntimeCwd } from "../../codexAppServer/runtimeCwd";
 import {
   positionFloatingMenu,
   setFloatingMenuOpen,
 } from "./setupHandlers/controllers/menuController";
+import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
 
 export const FOOTER_PERMISSION_MENU_OPEN_CLASS = "llm-permission-menu-open";
 
 const ORIGINAL_PLAN_PLACEHOLDER: PermissionOption = {
   provider: "original",
-  id: "plan",
+  selectionKey: "original:plan",
   fullLabel: "Plan",
   compactLabel: "plan",
-  levelLabel: "Restricted",
   description: "Plan mode is not available for the Original Agent yet.",
-  risk: "restricted",
   available: false,
   disabledReason: "Plan mode is not available for the Original Agent yet.",
 };
 
+type VisiblePermissionSurface = {
+  kind: "original" | "claude" | "codex";
+  selectedKey: string;
+  options: PermissionOption[];
+};
+
 export type PermissionSurface =
   | { kind: "hidden" }
-  | { kind: "original"; selectedId: string; options: PermissionOption[] }
-  | { kind: "claude"; selectedId: string; options: PermissionOption[] }
-  | { kind: "codex"; selectedId: string; options: PermissionOption[] }
+  | VisiblePermissionSurface
   | {
       kind: "loading";
       provider: "claude" | "codex";
@@ -66,7 +72,7 @@ export type PermissionSurface =
 
 type PermissionCatalogLoaders = {
   loadClaudeOptions: () => Promise<PermissionOption[]>;
-  loadCodexOptions: () => Promise<PermissionOption[]>;
+  loadCodexCatalog: () => Promise<CodexPermissionOptionCatalog>;
 };
 
 let permissionCatalogLoadersForTests: PermissionCatalogLoaders | null = null;
@@ -84,15 +90,14 @@ export function resolvePermissionSurface(params: {
   runtimeMode: RuntimeMode;
   originalSelectedId: AgentLibraryWriteMode;
   claudeSelectedId: ClaudePermissionMode;
-  codexSelectedId: string;
   claudeOptions?: PermissionOption[];
-  codexOptions?: PermissionOption[];
+  codexCatalog?: CodexPermissionOptionCatalog;
 }): PermissionSurface {
   if (params.conversationSystem === "claude_code") {
     return params.claudeOptions
       ? {
           kind: "claude",
-          selectedId: params.claudeSelectedId,
+          selectedKey: `claude:${params.claudeSelectedId}`,
           options: params.claudeOptions,
         }
       : {
@@ -102,18 +107,18 @@ export function resolvePermissionSurface(params: {
         };
   }
   if (params.conversationSystem === "codex") {
-    return params.codexOptions
+    return params.codexCatalog
       ? {
           kind: "codex",
-          selectedId: params.codexSelectedId,
-          options: params.codexOptions,
+          selectedKey: params.codexCatalog.selectedKey,
+          options: params.codexCatalog.options,
         }
       : { kind: "loading", provider: "codex", message: "Loading permissions…" };
   }
   if (params.runtimeMode !== "agent") return { kind: "hidden" };
   return {
     kind: "original",
-    selectedId: params.originalSelectedId,
+    selectedKey: `original:${params.originalSelectedId}`,
     options: [...getOriginalPermissionOptions(), ORIGINAL_PLAN_PLACEHOLDER],
   };
 }
@@ -127,22 +132,19 @@ export function attachFooterPermissionControl(params: {
   getRuntimeMode: () => RuntimeMode;
   onWarning?: (message: string) => void;
   loadClaudeOptions?: () => Promise<PermissionOption[]>;
-  loadCodexOptions?: () => Promise<PermissionOption[]>;
+  loadCodexCatalog?: () => Promise<CodexPermissionOptionCatalog>;
+  confirmFullAccess?: () => boolean | Promise<boolean>;
 }) {
   const { control, button, menu } = params;
   let generation = 0;
   let activeProvider: ConversationSystem | null = null;
   let disposed = false;
   let surface: PermissionSurface = { kind: "hidden" };
-  let cachedCatalog: {
-    provider: "claude_code" | "codex";
-    key: string;
-    options: PermissionOption[];
-  } | null = null;
+  let codexCatalog: CodexPermissionOptionCatalog | null = null;
   let inFlightCatalog: {
     provider: "claude_code" | "codex";
     key: string;
-    promise: Promise<PermissionOption[]>;
+    promise: Promise<PermissionOption[] | CodexPermissionOptionCatalog>;
   } | null = null;
 
   const close = () => {
@@ -150,6 +152,60 @@ export function attachFooterPermissionControl(params: {
     setFloatingMenuOpen(menu, FOOTER_PERMISSION_MENU_OPEN_CLASS, false);
     menu.replaceChildren();
     button.setAttribute("aria-expanded", "false");
+  };
+
+  const confirmFullAccess = async (): Promise<boolean> => {
+    if (params.confirmFullAccess)
+      return Boolean(await params.confirmFullAccess());
+    close();
+    button?.focus();
+    return await showStandaloneConfirmationDialog(params.body.ownerDocument, {
+      title: t("Enable Codex full access?"),
+      message: t(
+        "Codex will have unrestricted access to the internet and any file available to Codex.",
+      ),
+      confirmLabel: t("Enable full access"),
+      cancelLabel: t("Cancel"),
+      destructive: true,
+    });
+  };
+
+  const persistSelection = async (
+    next: VisiblePermissionSurface,
+    option: PermissionOption,
+  ): Promise<void> => {
+    if (next.kind === "original") {
+      const mode = getOriginalPermissionModeFromSelectionKey(
+        option.selectionKey,
+      );
+      if (mode) setAgentLibraryWriteMode(mode);
+      return;
+    }
+    if (next.kind === "claude") {
+      const mode = getClaudePermissionModeFromSelectionKey(option.selectionKey);
+      if (mode) setClaudePermissionModePref(mode);
+      return;
+    }
+    const activeCatalog = codexCatalog;
+    const choice = activeCatalog?.choices.get(option.selectionKey);
+    if (!activeCatalog || !choice) return;
+    if (choice.kind === "preset" && choice.preset === "full") {
+      if (!(await confirmFullAccess())) return;
+      if (
+        disposed ||
+        surface !== next ||
+        activeCatalog !== codexCatalog ||
+        params.getConversationSystem() !== "codex"
+      ) {
+        return;
+      }
+    }
+    setCodexPermissionStatePref(
+      applyCodexPermissionChoice({
+        current: activeCatalog.state,
+        choice,
+      }),
+    );
   };
 
   const render = (next: PermissionSurface) => {
@@ -170,22 +226,14 @@ export function attachFooterPermissionControl(params: {
     }
     button.disabled = false;
     const selected = next.options.find(
-      (option) => option.id === next.selectedId,
+      (option) => option.selectionKey === next.selectedKey,
     );
     const fallback: PermissionOption = {
       provider: next.kind,
-      id: next.selectedId,
-      fullLabel:
-        next.kind === "codex"
-          ? normalizeCodexProfileLabel(next.selectedId)
-          : next.selectedId,
-      compactLabel:
-        next.kind === "codex"
-          ? normalizeCodexProfileLabel(next.selectedId)
-          : next.selectedId,
-      levelLabel: "Custom",
+      selectionKey: next.selectedKey,
+      fullLabel: "Unavailable",
+      compactLabel: "unavailable",
       description: "The saved permission value is not available.",
-      risk: "custom",
       available: false,
     };
     const selectedOption = selected ?? fallback;
@@ -200,30 +248,32 @@ export function attachFooterPermissionControl(params: {
       const row = params.body.ownerDocument.createElement("button");
       row.type = "button";
       row.className = "llm-permission-option";
-      row.dataset.permissionMode = option.id;
-      row.dataset.permissionId = option.id;
+      row.dataset.permissionProvider = option.provider;
+      row.dataset.selectionKey = option.selectionKey;
+      row.dataset.permissionId = option.selectionKey;
       row.disabled = !option.available;
       row.setAttribute("role", "menuitemradio");
-      row.setAttribute("aria-checked", String(option.id === next.selectedId));
+      row.setAttribute(
+        "aria-checked",
+        String(option.selectionKey === next.selectedKey),
+      );
       row.classList.toggle(
         "llm-permission-option-selected",
-        option.id === next.selectedId,
+        option.selectionKey === next.selectedKey,
       );
-      row.setAttribute("aria-label", buildPermissionAccessibleLabel(option));
-      row.title =
-        option.disabledReason || buildPermissionAccessibleLabel(option);
+      const accessibleLabel = buildPermissionAccessibleLabel(option);
+      row.setAttribute("aria-label", accessibleLabel);
+      row.title = option.disabledReason
+        ? `${accessibleLabel} — ${option.disabledReason}`
+        : accessibleLabel;
       row.textContent = option.fullLabel;
       row.addEventListener("click", () => {
         if (!option.available) return;
-        if (next.kind === "original") {
-          setAgentLibraryWriteMode(option.id as AgentLibraryWriteMode);
-        } else if (next.kind === "claude") {
-          setClaudePermissionModePref(option.id as ClaudePermissionMode);
-        } else {
-          setCodexPermissionProfilePref(option.id);
-        }
-        close();
-        void sync();
+        void (async () => {
+          await persistSelection(next, option);
+          close();
+          await sync();
+        })();
       });
       menu.appendChild(row);
     }
@@ -240,14 +290,13 @@ export function attachFooterPermissionControl(params: {
       return catalog.options;
     });
   const loadCodex =
-    params.loadCodexOptions ??
-    permissionCatalogLoadersForTests?.loadCodexOptions ??
-    (async () => {
-      const catalog = await listCodexPermissionProfiles({
+    params.loadCodexCatalog ??
+    permissionCatalogLoadersForTests?.loadCodexCatalog ??
+    (() =>
+      getCodexPermissionOptionCatalog({
         codexPath: getConfiguredCodexAppServerBinaryPath(),
-      });
-      return catalog.profiles.map(buildCodexPermissionOption);
-    });
+        cwd: resolveCodexNativeRuntimeCwd(),
+      }));
 
   const sync = async () => {
     if (disposed) return;
@@ -256,7 +305,7 @@ export function attachFooterPermissionControl(params: {
     if (provider !== activeProvider) {
       close();
       activeProvider = provider;
-      cachedCatalog = null;
+      codexCatalog = null;
       inFlightCatalog = null;
     }
     const common = {
@@ -264,41 +313,32 @@ export function attachFooterPermissionControl(params: {
       runtimeMode: params.getRuntimeMode(),
       originalSelectedId: getAgentLibraryWriteMode(),
       claudeSelectedId: getClaudePermissionModePref(),
-      codexSelectedId: getCodexPermissionProfilePref(),
     };
     if (provider === "upstream") {
       render(resolvePermissionSurface(common));
       return;
     }
+    render(resolvePermissionSurface(common));
     const catalogKey =
       provider === "claude_code"
         ? `${getClaudeBridgeUrl()}\u0000${getClaudeSettingSourcesByPref().join(",")}`
         : `${getConfiguredCodexAppServerBinaryPath()}\u0000${resolveCodexNativeRuntimeCwd()}`;
-    let options =
-      cachedCatalog?.provider === provider && cachedCatalog.key === catalogKey
-        ? cachedCatalog.options
+    let requestedPromise =
+      inFlightCatalog?.provider === provider &&
+      inFlightCatalog.key === catalogKey
+        ? inFlightCatalog.promise
         : null;
-    if (!options) render(resolvePermissionSurface(common));
-    let requestedPromise: Promise<PermissionOption[]> | null = null;
+    if (!requestedPromise) {
+      requestedPromise =
+        provider === "claude_code" ? loadClaude() : loadCodex();
+      inFlightCatalog = {
+        provider,
+        key: catalogKey,
+        promise: requestedPromise,
+      };
+    }
     try {
-      if (!options) {
-        let catalogPromise =
-          inFlightCatalog?.provider === provider &&
-          inFlightCatalog.key === catalogKey
-            ? inFlightCatalog.promise
-            : null;
-        if (!catalogPromise) {
-          catalogPromise =
-            provider === "claude_code" ? loadClaude() : loadCodex();
-          inFlightCatalog = {
-            provider,
-            key: catalogKey,
-            promise: catalogPromise,
-          };
-        }
-        requestedPromise = catalogPromise;
-        options = await catalogPromise;
-      }
+      const result = await requestedPromise;
       if (
         disposed ||
         currentGeneration !== generation ||
@@ -306,9 +346,9 @@ export function attachFooterPermissionControl(params: {
       ) {
         return;
       }
-      cachedCatalog = { provider, key: catalogKey, options };
       if (inFlightCatalog?.promise === requestedPromise) inFlightCatalog = null;
       if (provider === "claude_code") {
+        const options = result as PermissionOption[];
         const reconciliation = reconcileClaudePermissionMode({
           selectedId: getClaudePermissionModePref(),
           options,
@@ -326,7 +366,8 @@ export function attachFooterPermissionControl(params: {
           }),
         );
       } else {
-        render(resolvePermissionSurface({ ...common, codexOptions: options }));
+        codexCatalog = result as CodexPermissionOptionCatalog;
+        render(resolvePermissionSurface({ ...common, codexCatalog }));
       }
     } catch (error) {
       if (inFlightCatalog?.promise === requestedPromise) inFlightCatalog = null;
@@ -349,8 +390,7 @@ export function attachFooterPermissionControl(params: {
     event.preventDefault();
     event.stopPropagation();
     if (!button || !menu || button.disabled) return;
-    const open = button.getAttribute("aria-expanded") === "true";
-    if (open) {
+    if (button.getAttribute("aria-expanded") === "true") {
       close();
       return;
     }
@@ -366,9 +406,7 @@ export function attachFooterPermissionControl(params: {
       horizontalAlignment: "center",
       verticalPlacement: "above",
     });
-    if (menu.scrollHeight <= menu.clientHeight) {
-      menu.style.overflowY = "hidden";
-    }
+    if (menu.scrollHeight <= menu.clientHeight) menu.style.overflowY = "hidden";
     setFloatingMenuOpen(menu, FOOTER_PERMISSION_MENU_OPEN_CLASS, true);
     button.setAttribute("aria-expanded", "true");
   };
@@ -402,6 +440,14 @@ export function attachFooterPermissionControl(params: {
     true,
   );
   params.body.ownerDocument.addEventListener("keydown", onEscape, true);
+  const unsubscribeCodexProcessChanges = subscribeCodexPermissionProcessChanges(
+    () => {
+      if (params.getConversationSystem() !== "codex") return;
+      inFlightCatalog = null;
+      close();
+      void sync();
+    },
+  );
 
   return {
     sync,
@@ -409,6 +455,7 @@ export function attachFooterPermissionControl(params: {
     dispose() {
       disposed = true;
       generation += 1;
+      unsubscribeCodexProcessChanges();
       close();
       button?.removeEventListener("click", onButtonClick);
       menu?.removeEventListener("pointerdown", stopMenuPointerEvent);

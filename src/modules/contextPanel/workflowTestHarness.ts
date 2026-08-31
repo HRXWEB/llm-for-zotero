@@ -47,6 +47,7 @@ import type {
   WorkflowTestPendingDeletionState,
   WorkflowTestPendingSendDeleteResult,
   WorkflowTestPermissionSurfaceDiagnostics,
+  WorkflowTestConfirmationDialogDiagnostics,
   WorkflowTestHistoryRow,
   WorkflowTestHistorySearchResult,
   WorkflowTestSeededTurn,
@@ -54,11 +55,12 @@ import type {
   WorkflowTestStaleAgentTraceIsolationResult,
 } from "./workflowTestTypes";
 import { setFooterPermissionCatalogLoadersForTests } from "./footerPermissionControl";
+import { buildClaudePermissionOption } from "../../shared/permissionOptions";
 import {
-  buildClaudePermissionOption,
-  buildCodexPermissionOption,
-  type PermissionOption,
-} from "../../shared/permissionOptions";
+  buildCodexPermissionOptionCatalog,
+  type CodexPermissionCapabilities,
+} from "../../codexAppServer/permissionProfiles";
+import { readCodexPermissionStatePref } from "../../codexAppServer/prefs";
 import { forcePendingTurnFinalizeFailuresForTests } from "./pendingDeletionWiring";
 import {
   pendingDeletionStore,
@@ -146,7 +148,7 @@ function configurePermissionCatalogs(input?: {
       id: id as Parameters<typeof buildClaudePermissionOption>[0]["id"],
     }),
   );
-  const currentCodexOptions = [
+  const currentCodexProfiles = [
     { id: ":read-only", description: "Read files only.", allowed: true },
     { id: ":workspace", description: "Write in the workspace.", allowed: true },
     {
@@ -159,28 +161,42 @@ function configurePermissionCatalogs(input?: {
       description: "A custom managed team profile.",
       allowed: true,
     },
-  ].map(buildCodexPermissionOption);
-  const staleCodexOptions = [
+  ];
+  const staleCodexProfiles = [
     {
       id: ":stale-profile",
       description: "A deliberately stale workflow response.",
       allowed: true,
     },
-  ].map(buildCodexPermissionOption);
+  ];
+  const buildCatalog = (profiles: typeof currentCodexProfiles) => {
+    const capabilities: CodexPermissionCapabilities = {
+      protocol: "profiles",
+      profiles,
+      allowedApprovalPolicies: null,
+      allowedApprovalsReviewers: null,
+      guardianApprovalEnabled: true,
+      supportsThreadSettingsUpdate: true,
+    };
+    return buildCodexPermissionOptionCatalog({
+      capabilities,
+      preference: readCodexPermissionStatePref(),
+    });
+  };
   resolveDelayedCodexPermissionCatalog = null;
   setFooterPermissionCatalogLoadersForTests({
     loadClaudeOptions: async () => claudeOptions,
-    loadCodexOptions: () => {
+    loadCodexCatalog: () => {
       codexRequestCount += 1;
       if (input?.delayFirstCodex && codexRequestCount === 1) {
-        return new Promise<PermissionOption[]>((resolve) => {
+        return new Promise((resolve) => {
           resolveDelayedCodexPermissionCatalog = () => {
-            resolve(staleCodexOptions);
+            resolve(buildCatalog(staleCodexProfiles));
             resolveDelayedCodexPermissionCatalog = null;
           };
         });
       }
-      return Promise.resolve(currentCodexOptions);
+      return Promise.resolve(buildCatalog(currentCodexProfiles));
     },
   });
 }
@@ -226,6 +242,57 @@ function readPermissionSurface(
       accessibleName: row.getAttribute("aria-label") || "",
     })),
   };
+}
+
+function getConfirmationDocument(root: ParentNode): Document {
+  if ((root as Document).documentElement) return root as Document;
+  const doc = (root as Element).ownerDocument;
+  if (!doc) throw new Error("Permission surface has no owner document");
+  return doc;
+}
+
+function readConfirmationDialog(
+  root: ParentNode,
+): WorkflowTestConfirmationDialogDiagnostics {
+  const doc = getConfirmationDocument(root);
+  const overlay = doc.querySelector(
+    ".llm-standalone-confirm-overlay",
+  ) as HTMLElement | null;
+  return {
+    visible: Boolean(overlay),
+    title:
+      overlay?.querySelector(".llm-standalone-confirm-title")?.textContent ||
+      "",
+    message:
+      overlay?.querySelector(".llm-standalone-confirm-message")?.textContent ||
+      "",
+    confirmLabel:
+      overlay?.querySelector(".llm-standalone-confirm-primary")?.textContent ||
+      "",
+    cancelLabel:
+      overlay?.querySelector(".llm-standalone-confirm-cancel")?.textContent ||
+      "",
+    destructive: Boolean(
+      overlay?.querySelector(".llm-standalone-confirm-destructive"),
+    ),
+  };
+}
+
+async function respondToConfirmationDialog(
+  root: ParentNode,
+  confirmed: boolean,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const doc = getConfirmationDocument(root);
+  const button = doc.querySelector(
+    confirmed
+      ? ".llm-standalone-confirm-primary"
+      : ".llm-standalone-confirm-cancel",
+  ) as HTMLButtonElement | null;
+  if (!button)
+    throw new Error("Permission confirmation dialog was not rendered");
+  button.click();
+  await Zotero.Promise.delay(100);
+  return readPermissionSurface(root);
 }
 
 async function clickPermissionToggle(
@@ -281,6 +348,21 @@ async function clickPanelPermissionOption(
 ): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
   assertWorkflowTestEnabled();
   return clickPermissionOption(getPanel(panelId).body, permissionId);
+}
+
+function getPanelConfirmationDialog(
+  panelId: string,
+): WorkflowTestConfirmationDialogDiagnostics {
+  assertWorkflowTestEnabled();
+  return readConfirmationDialog(getPanel(panelId).body);
+}
+
+async function respondToPanelConfirmationDialog(
+  panelId: string,
+  confirmed: boolean,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return respondToConfirmationDialog(getPanel(panelId).body, confirmed);
 }
 
 function getStandalonePermissionSurface(): WorkflowTestPermissionSurfaceDiagnostics {
@@ -4061,6 +4143,8 @@ export function installWorkflowTestHarness(targetAddon: {
     getPanelPermissionSurface,
     clickPanelPermissionToggle,
     clickPanelPermissionOption,
+    getPanelConfirmationDialog,
+    respondToPanelConfirmationDialog,
     getStandalonePermissionSurface,
     clickStandalonePermissionToggle,
     clickStandalonePermissionOption,

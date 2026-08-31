@@ -59,6 +59,15 @@ export type WorkflowTestPermissionSurfaceDiagnostics = {
   }>;
 };
 
+export type WorkflowTestConfirmationDialogDiagnostics = {
+  visible: boolean;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  destructive: boolean;
+};
+
 export type WorkflowTestDuplicatePanelSetupDiagnostics = {
   samePanelRoot: boolean;
   initializationGenerationBefore: string;
@@ -519,6 +528,13 @@ export type WorkflowTestApi = {
   clickPanelPermissionOption: (
     panelId: string,
     permissionId: string,
+  ) => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
+  getPanelConfirmationDialog: (
+    panelId: string,
+  ) => WorkflowTestConfirmationDialogDiagnostics;
+  respondToPanelConfirmationDialog: (
+    panelId: string,
+    confirmed: boolean,
   ) => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
   getStandalonePermissionSurface: () => WorkflowTestPermissionSurfaceDiagnostics;
   clickStandalonePermissionToggle: () => Promise<WorkflowTestPermissionSurfaceDiagnostics>;

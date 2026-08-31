@@ -62,12 +62,19 @@ import {
   upsertCodexConversationSummary,
 } from "./store";
 import {
-  getCodexAppServerApprovalsReviewerPref,
   getCodexNativeSkillModePref,
   isCodexZoteroMcpToolsEnabled,
-  type CodexAppServerApprovalsReviewer,
 } from "./prefs";
-import { resolveCodexPermissionExecution } from "./permissionProfiles";
+import {
+  isCodexMethodNotFound,
+  resolveCodexPermissionExecution,
+  type CodexPermissionExecution,
+} from "./permissionProfiles";
+import {
+  deserializeCodexPermissionState,
+  serializeCodexPermissionState,
+  type CodexPermissionState,
+} from "./permissionState";
 import { getCodexProfileSignature } from "./constants";
 import {
   assertRequiredCodexZoteroMcpToolsReady,
@@ -139,12 +146,18 @@ export type CodexNativeConversationScope = {
 
 export type CodexNativeStoreHooks = {
   loadProviderSessionId?: () => Promise<string | undefined>;
+  loadProviderPermissionState?: () => Promise<string | undefined>;
   persistProviderSessionId?: (threadId: string) => Promise<void>;
+  persistProviderSession?: (params: {
+    threadId: string;
+    permissionState?: string;
+  }) => Promise<void>;
   clearProviderSessionId?: () => Promise<void>;
 };
 
 type StoredCodexProviderSession = Readonly<{
   threadId: string;
+  appliedPermissionState?: CodexPermissionState;
 }>;
 
 export function resetCodexNativePathSafetyStateForTests(
@@ -177,6 +190,16 @@ type NativeThreadResolution = {
   resumed: boolean;
   developerInstructionsAccepted: boolean;
   threadSource?: string;
+  effectivePermissionSettings?: EffectiveCodexThreadSettings;
+  replacedThreadId?: string;
+  providerSessionPersistencePending?: boolean;
+};
+
+type EffectiveCodexThreadSettings = {
+  threadId: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+  permissionProfileId?: string;
 };
 
 type NativeContextPlacement =
@@ -249,18 +272,6 @@ const CODEX_APP_SERVER_BUILT_IN_APPROVAL_REQUEST_METHODS = [
   "execCommandApproval",
   "applyPatchApproval",
 ];
-const CODEX_APP_SERVER_NATIVE_APPROVAL_POLICY = "on-request";
-
-function buildCodexAppServerNativeApprovalParams(): {
-  approvalPolicy: typeof CODEX_APP_SERVER_NATIVE_APPROVAL_POLICY;
-  approvalsReviewer: CodexAppServerApprovalsReviewer;
-} {
-  return {
-    approvalPolicy: CODEX_APP_SERVER_NATIVE_APPROVAL_POLICY,
-    approvalsReviewer: getCodexAppServerApprovalsReviewerPref(),
-  };
-}
-
 const CODEX_NATIVE_HISTORY_VERIFICATION_TTL_MS = 5 * 60 * 1000;
 const CODEX_APP_SERVER_GUARDIAN_REVIEW_COMPLETED_METHOD =
   "item/autoApprovalReview/completed";
@@ -1593,15 +1604,24 @@ async function loadStoredProviderSession(params: {
   hooks?: CodexNativeStoreHooks;
 }): Promise<StoredCodexProviderSession> {
   if (params.hooks?.loadProviderSessionId) {
+    const rawPermissionState =
+      await params.hooks.loadProviderPermissionState?.();
     return {
       threadId: normalizeNonEmptyString(
         await params.hooks.loadProviderSessionId(),
       ),
+      appliedPermissionState: rawPermissionState
+        ? deserializeCodexPermissionState(rawPermissionState) || undefined
+        : undefined,
     };
   }
   const summary = await getCodexConversationSummary(params.conversationKey);
   return {
     threadId: normalizeNonEmptyString(summary?.providerSessionId),
+    appliedPermissionState: summary?.providerPermissionState
+      ? deserializeCodexPermissionState(summary.providerPermissionState) ||
+        undefined
+      : undefined,
   };
 }
 
@@ -1639,10 +1659,21 @@ async function persistProviderSessionId(params: {
   threadId: string;
   model: string;
   effort?: string;
+  permissionState?: CodexPermissionState | null;
   hooks?: CodexNativeStoreHooks;
   expectedProviderSessionId?: string | null;
   expectedGeneration?: number;
 }): Promise<void> {
+  const serializedPermissionState = params.permissionState
+    ? serializeCodexPermissionState(params.permissionState)
+    : undefined;
+  if (params.hooks?.persistProviderSession) {
+    await params.hooks.persistProviderSession({
+      threadId: params.threadId,
+      permissionState: serializedPermissionState,
+    });
+    return;
+  }
   await params.hooks?.persistProviderSessionId?.(params.threadId);
   if (params.hooks?.persistProviderSessionId) return;
   const expectedGeneration =
@@ -1672,6 +1703,7 @@ async function persistProviderSessionId(params: {
       title: params.scope.title,
       instanceID: current.instanceID,
       providerSessionId: params.threadId,
+      providerPermissionState: serializedPermissionState,
       model: params.model,
       effort: params.effort,
       createdAt: Date.now(),
@@ -1687,8 +1719,7 @@ async function startNativeThread(params: {
   config?: Record<string, unknown>;
   cwd?: string;
   ephemeral?: boolean;
-  permissionProfileId: string;
-  legacyPermissions: boolean;
+  permissionExecution: CodexPermissionExecution;
 }): Promise<{
   threadId: string;
   developerInstructionsAccepted: boolean;
@@ -1697,11 +1728,8 @@ async function startNativeThread(params: {
   const threadStartParams: Record<string, unknown> = {
     model: params.model,
     ephemeral: Boolean(params.ephemeral),
-    ...buildCodexAppServerNativeApprovalParams(),
+    ...params.permissionExecution.thread,
     serviceName: CODEX_APP_SERVER_SERVICE_NAME,
-    ...(params.legacyPermissions
-      ? { sandbox: "read-only" }
-      : { permissions: params.permissionProfileId }),
     ...(params.cwd ? { cwd: params.cwd } : {}),
     ...(params.config ? { config: params.config } : {}),
     ...(params.developerInstructions
@@ -1751,20 +1779,17 @@ async function resumeNativeThread(params: {
   developerInstructions?: string;
   config?: Record<string, unknown>;
   cwd?: string;
-  permissionProfileId: string;
-  legacyPermissions: boolean;
+  permissionExecution: CodexPermissionExecution;
 }): Promise<{
   threadId: string;
   developerInstructionsAccepted: boolean;
   threadSource?: string;
+  effectivePermissionSettings?: EffectiveCodexThreadSettings;
 }> {
   const threadResumeParams: Record<string, unknown> = {
     threadId: params.threadId,
     model: params.model,
-    ...(params.legacyPermissions
-      ? { sandbox: "read-only" }
-      : { permissions: params.permissionProfileId }),
-    ...buildCodexAppServerNativeApprovalParams(),
+    ...params.permissionExecution.thread,
     ...(params.cwd ? { cwd: params.cwd } : {}),
     ...(params.config ? { config: params.config } : {}),
     ...(params.developerInstructions
@@ -1804,7 +1829,127 @@ async function resumeNativeThread(params: {
     threadId,
     developerInstructionsAccepted,
     threadSource: extractCodexAppServerThreadSource(threadResult),
+    effectivePermissionSettings: readEffectiveCodexThreadSettings(threadResult),
   };
+}
+
+function readEffectiveCodexThreadSettings(
+  value: unknown,
+): EffectiveCodexThreadSettings {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const thread =
+    record.thread && typeof record.thread === "object"
+      ? (record.thread as Record<string, unknown>)
+      : {};
+  const settings =
+    record.threadSettings && typeof record.threadSettings === "object"
+      ? (record.threadSettings as Record<string, unknown>)
+      : record.thread_settings && typeof record.thread_settings === "object"
+        ? (record.thread_settings as Record<string, unknown>)
+        : record;
+  const activeProfile =
+    settings.activePermissionProfile &&
+    typeof settings.activePermissionProfile === "object"
+      ? (settings.activePermissionProfile as Record<string, unknown>)
+      : settings.active_permission_profile &&
+          typeof settings.active_permission_profile === "object"
+        ? (settings.active_permission_profile as Record<string, unknown>)
+        : {};
+  return {
+    threadId: normalizeNonEmptyString(
+      record.threadId || record.thread_id || thread.id,
+    ),
+    approvalPolicy: normalizeNonEmptyString(
+      settings.approvalPolicy || settings.approval_policy,
+    ),
+    approvalsReviewer: normalizeNonEmptyString(
+      settings.approvalsReviewer || settings.approvals_reviewer,
+    ),
+    permissionProfileId: normalizeNonEmptyString(activeProfile.id),
+  };
+}
+
+function effectiveThreadSettingsMatch(
+  effective: EffectiveCodexThreadSettings | undefined,
+  expected: NonNullable<CodexPermissionExecution["settingsUpdate"]>,
+): boolean {
+  if (!effective) return false;
+  return (
+    (!expected.permissions ||
+      effective.permissionProfileId === expected.permissions) &&
+    (!expected.approvalPolicy ||
+      effective.approvalPolicy === expected.approvalPolicy) &&
+    (!expected.approvalsReviewer ||
+      effective.approvalsReviewer === expected.approvalsReviewer)
+  );
+}
+
+async function applyCodexThreadPermissionSettings(params: {
+  proc: CodexAppServerProcess;
+  threadId: string;
+  settings: NonNullable<CodexPermissionExecution["settingsUpdate"]>;
+}): Promise<"applied" | "unsupported"> {
+  let resolveNotification: ((value: unknown) => void) | undefined;
+  const notification = new Promise<unknown>((resolve) => {
+    resolveNotification = resolve;
+  });
+  const unsubscribe = params.proc.onNotification(
+    "thread/settings/updated",
+    (value) => {
+      const parsed = readEffectiveCodexThreadSettings(value);
+      if (parsed.threadId === params.threadId) resolveNotification?.(value);
+    },
+  );
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    try {
+      await params.proc.sendRequest("thread/settings/update", {
+        threadId: params.threadId,
+        ...params.settings,
+      });
+    } catch (error) {
+      if (isCodexMethodNotFound(error)) return "unsupported";
+      throw error;
+    }
+    const value = await Promise.race([
+      notification,
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(new Error("Codex did not confirm updated thread settings")),
+          5000,
+        );
+      }),
+    ]);
+    const applied = readEffectiveCodexThreadSettings(value);
+    if (
+      params.settings.permissions &&
+      applied.permissionProfileId !== params.settings.permissions
+    ) {
+      throw new Error(
+        `Codex confirmed permission profile ${applied.permissionProfileId || "unknown"}, not ${params.settings.permissions}`,
+      );
+    }
+    if (
+      params.settings.approvalPolicy &&
+      applied.approvalPolicy !== params.settings.approvalPolicy
+    ) {
+      throw new Error("Codex did not apply the selected approval policy");
+    }
+    if (
+      params.settings.approvalsReviewer &&
+      applied.approvalsReviewer !== params.settings.approvalsReviewer
+    ) {
+      throw new Error("Codex did not apply the selected approval reviewer");
+    }
+    return "applied";
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    unsubscribe();
+  }
 }
 
 async function enqueueCodexArchiveRecovery(params: {
@@ -1873,8 +2018,8 @@ async function resolveNativeThread(params: {
   cwd?: string;
   hooks?: CodexNativeStoreHooks;
   storedThreadId?: string | null;
-  permissionProfileId: string;
-  legacyPermissions: boolean;
+  permissionExecution: CodexPermissionExecution;
+  forceReplacement?: boolean;
 }): Promise<NativeThreadResolution> {
   const expectedGeneration = getConversationWriteGeneration(
     params.scope.conversationKey,
@@ -1889,7 +2034,7 @@ async function resolveNativeThread(params: {
           hooks: params.hooks,
         });
   const storedThreadId = storedSession.threadId;
-  if (storedThreadId) {
+  if (storedThreadId && !params.forceReplacement) {
     let replacementThreadId: string | undefined;
     try {
       const resumedThread = await resumeNativeThread({
@@ -1899,8 +2044,7 @@ async function resolveNativeThread(params: {
         developerInstructions: params.developerInstructions,
         config: params.config,
         cwd: params.cwd,
-        permissionProfileId: params.permissionProfileId,
-        legacyPermissions: params.legacyPermissions,
+        permissionExecution: params.permissionExecution,
       });
       replacementThreadId =
         resumedThread.threadId !== storedThreadId
@@ -1921,6 +2065,7 @@ async function resolveNativeThread(params: {
           threadId: resumedThread.threadId,
           model: params.model,
           effort: params.effort,
+          permissionState: params.permissionExecution.state,
           hooks: params.hooks,
           expectedProviderSessionId: storedThreadId,
           expectedGeneration,
@@ -1976,8 +2121,7 @@ async function resolveNativeThread(params: {
       params.newThreadDeveloperInstructions ?? params.developerInstructions,
     config: params.config,
     cwd: params.cwd,
-    permissionProfileId: params.permissionProfileId,
-    legacyPermissions: params.legacyPermissions,
+    permissionExecution: params.permissionExecution,
   });
   if (
     areConversationWritesFrozen(params.scope.conversationKey) ||
@@ -2003,12 +2147,21 @@ async function resolveNativeThread(params: {
     }
     throw new Error("Conversation write generation changed");
   }
+  if (params.forceReplacement && storedThreadId) {
+    return {
+      ...thread,
+      resumed: false,
+      replacedThreadId: storedThreadId,
+      providerSessionPersistencePending: true,
+    };
+  }
   try {
     await persistProviderSessionId({
       scope: params.scope,
       threadId: thread.threadId,
       model: params.model,
       effort: params.effort,
+      permissionState: params.permissionExecution.state,
       hooks: params.hooks,
       expectedProviderSessionId: storedThreadId,
       expectedGeneration,
@@ -2446,12 +2599,21 @@ export async function runCodexAppServerNativeTurn(params: {
     });
     return await proc.runTurnExclusive(async () => {
       const codexNativeRuntimeCwd = resolveCodexNativeRuntimeCwd();
+      const storedSession = await loadResumableProviderSession({
+        conversationKey: params.scope.conversationKey,
+        hooks: params.hooks,
+      });
+      const storedThreadId = storedSession.threadId;
+      const currentTurnHasLocalPdfs = Boolean(
+        params.skillContext?.localDocuments?.length,
+      );
       const permissionExecution = await resolveCodexPermissionExecution({
         proc,
         cwd: codexNativeRuntimeCwd,
+        fresh: true,
+        hasExistingThread: Boolean(storedThreadId) && !currentTurnHasLocalPdfs,
+        appliedState: storedSession.appliedPermissionState,
       });
-      const selectedPermissionProfile = permissionExecution.profileId;
-      const legacyPermissions = permissionExecution.legacy;
       const assertApprovalTurnStillLive = () => {
         if (params.signal?.aborted) throw createNativeClientAbortError();
         if (
@@ -2478,14 +2640,6 @@ export async function runCodexAppServerNativeTurn(params: {
         normalizeNonEmptyString(params.scope.profileSignature) ||
         getCodexProfileSignature();
       const latestUserText = extractLatestUserText(params.messages);
-      const currentTurnHasLocalPdfs = Boolean(
-        skillContext?.localDocuments?.length,
-      );
-      const storedSession = await loadResumableProviderSession({
-        conversationKey: params.scope.conversationKey,
-        hooks: params.hooks,
-      });
-      const storedThreadId = storedSession.threadId;
       const summary = await getCodexConversationSummary(
         params.scope.conversationKey,
       );
@@ -2670,10 +2824,7 @@ export async function runCodexAppServerNativeTurn(params: {
               input: args.input,
               model: params.model,
               ...(codexNativeRuntimeCwd ? { cwd: codexNativeRuntimeCwd } : {}),
-              ...buildCodexAppServerNativeApprovalParams(),
-              ...(legacyPermissions
-                ? { sandboxPolicy: { type: "readOnly", networkAccess: false } }
-                : {}),
+              ...permissionExecution.turn,
               ...reasoningParams,
             });
             const turnId = extractCodexAppServerTurnId(turnResult);
@@ -2903,7 +3054,21 @@ export async function runCodexAppServerNativeTurn(params: {
             throw new Error(mcpWarning);
           }
         }
-        const thread: NativeThreadResolution = rawPdfMode
+        const resolvePersistentThread = (forceReplacement = false) =>
+          resolveNativeThread({
+            proc,
+            scope: scopeWithProfile,
+            model: params.model,
+            effort: reasoningParams.effort,
+            developerInstructions: developerPreparedTurn.developerInstructions,
+            config: threadConfig,
+            cwd: codexNativeRuntimeCwd,
+            hooks: params.hooks,
+            storedThreadId: storedThreadId || null,
+            permissionExecution,
+            forceReplacement,
+          });
+        let thread: NativeThreadResolution = rawPdfMode
           ? await (async () => {
               // Do not start an ephemeral provider thread after Clear has
               // already invalidated this turn.  The post-start check below
@@ -2919,26 +3084,14 @@ export async function runCodexAppServerNativeTurn(params: {
                   config: threadConfig,
                   cwd: codexNativeRuntimeCwd,
                   ephemeral: true,
-                  permissionProfileId: selectedPermissionProfile,
-                  legacyPermissions,
+                  permissionExecution,
                 })),
                 resumed: false,
               };
             })()
-          : await resolveNativeThread({
-              proc,
-              scope: scopeWithProfile,
-              model: params.model,
-              effort: reasoningParams.effort,
-              developerInstructions:
-                developerPreparedTurn.developerInstructions,
-              config: threadConfig,
-              cwd: codexNativeRuntimeCwd,
-              hooks: params.hooks,
-              storedThreadId: storedThreadId || null,
-              permissionProfileId: selectedPermissionProfile,
-              legacyPermissions,
-            });
+          : await resolvePersistentThread(
+              permissionExecution.requiresProviderThreadReplacement,
+            );
         if (rawPdfMode) {
           try {
             assertTurnStillLive();
@@ -2957,6 +3110,44 @@ export async function runCodexAppServerNativeTurn(params: {
             threadId: thread.threadId,
             name: params.scope.title,
           });
+        }
+        if (
+          !rawPdfMode &&
+          thread.resumed &&
+          permissionExecution.settingsUpdate
+        ) {
+          if (
+            !effectiveThreadSettingsMatch(
+              thread.effectivePermissionSettings,
+              permissionExecution.settingsUpdate,
+            )
+          ) {
+            const updateResult = await applyCodexThreadPermissionSettings({
+              proc,
+              threadId: thread.threadId,
+              settings: permissionExecution.settingsUpdate,
+            });
+            if (updateResult === "unsupported") {
+              thread = await resolvePersistentThread(true);
+              await setNativeThreadName({
+                proc,
+                threadId: thread.threadId,
+                name: params.scope.title,
+              });
+            }
+          }
+          if (!thread.providerSessionPersistencePending) {
+            await persistProviderSessionId({
+              scope: scopeWithProfile,
+              threadId: thread.threadId,
+              model: params.model,
+              effort: reasoningParams.effort,
+              permissionState: permissionExecution.state,
+              hooks: params.hooks,
+              expectedProviderSessionId: thread.threadId,
+              expectedGeneration,
+            });
+          }
         }
         const contextPlacement = resolveNativeContextPlacement(thread);
         const latestUserFallbackContextText = [
@@ -2993,17 +3184,57 @@ export async function runCodexAppServerNativeTurn(params: {
         });
         const preparedTurn =
           await prepareCodexAppServerChatTurn(nativeMessages);
-        const input = await resolveCodexAppServerTurnInputWithFallback({
-          proc,
-          threadId: thread.threadId,
-          historyItemsToInject: thread.resumed
-            ? []
-            : preparedTurn.historyItemsToInject,
-          turnInput: preparedTurn.turnInput,
-          legacyInputFactory: () =>
-            buildLegacyCodexAppServerChatInput(nativeMessages),
-          logContext: "native",
-        });
+        let input: CodexAppServerUserInput[];
+        try {
+          input = await resolveCodexAppServerTurnInputWithFallback({
+            proc,
+            threadId: thread.threadId,
+            historyItemsToInject: thread.resumed
+              ? []
+              : preparedTurn.historyItemsToInject,
+            turnInput: preparedTurn.turnInput,
+            legacyInputFactory: () =>
+              buildLegacyCodexAppServerChatInput(nativeMessages),
+            logContext: "native",
+          });
+        } catch (error) {
+          if (thread.providerSessionPersistencePending) {
+            await ensureCodexThreadCleanup({
+              proc,
+              scope: scopeWithProfile,
+              threadId: thread.threadId,
+            });
+          }
+          throw error;
+        }
+        if (thread.providerSessionPersistencePending) {
+          try {
+            await persistProviderSessionId({
+              scope: scopeWithProfile,
+              threadId: thread.threadId,
+              model: params.model,
+              effort: reasoningParams.effort,
+              permissionState: permissionExecution.state,
+              hooks: params.hooks,
+              expectedProviderSessionId: thread.replacedThreadId || null,
+              expectedGeneration,
+            });
+          } catch (error) {
+            await ensureCodexThreadCleanup({
+              proc,
+              scope: scopeWithProfile,
+              threadId: thread.threadId,
+            });
+            throw error;
+          }
+          if (thread.replacedThreadId) {
+            await ensureCodexThreadCleanup({
+              proc,
+              scope: scopeWithProfile,
+              threadId: thread.replacedThreadId,
+            });
+          }
+        }
         const nativeInput = useNativeSkillInputs
           ? applyNativeSkillInputs({
               input: input as CodexAppServerUserInput[],

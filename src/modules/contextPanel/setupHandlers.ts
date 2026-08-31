@@ -1746,7 +1746,7 @@ export function setupHandlers(
         system: "claude_code",
       },
       {
-        key: `${config.prefsPrefix}.codexAppServerPermissionProfile`,
+        key: `${config.prefsPrefix}.codexAppServerPermissionState`,
         system: "codex",
       },
       {

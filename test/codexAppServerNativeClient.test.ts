@@ -54,6 +54,12 @@ function createNativeLifecycleTestProcess(params: {
   deltaForTurn?: (turnNumber: number) => string;
   skillsListResult?: unknown;
   permissionProfilesResult?: unknown;
+  resumeEffectiveSettings?: {
+    permissions?: string;
+    approvalPolicy?: string;
+    approvalsReviewer?: string;
+  };
+  settingsUpdateMethodNotFound?: boolean;
 }): CodexAppServerProcess {
   let turnNumber = 0;
   const threadIds = [...params.newThreadIds];
@@ -86,6 +92,55 @@ function createNativeLifecycleTestProcess(params: {
           );
           return;
         }
+        if (request.method === "experimentalFeature/list") {
+          setTimeout(
+            () =>
+              handleMessage({
+                id: request.id,
+                result: {
+                  data: [{ name: "guardian_approval", enabled: true }],
+                },
+              }),
+            0,
+          );
+          return;
+        }
+        if (request.method === "configRequirements/read") {
+          setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
+          return;
+        }
+        if (request.method === "thread/settings/update") {
+          if (params.settingsUpdateMethodNotFound) {
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  error: { code: -32601, message: "Method not found" },
+                }),
+              0,
+            );
+            return;
+          }
+          setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
+          setTimeout(
+            () =>
+              handleMessage({
+                method: "thread/settings/updated",
+                params: {
+                  threadId: requestParams.threadId,
+                  threadSettings: {
+                    activePermissionProfile: requestParams.permissions
+                      ? { id: requestParams.permissions }
+                      : null,
+                    approvalPolicy: requestParams.approvalPolicy,
+                    approvalsReviewer: requestParams.approvalsReviewer,
+                  },
+                },
+              }),
+            2,
+          );
+          return;
+        }
         if (
           request.method === "skills/list" &&
           params.skillsListResult !== undefined
@@ -101,11 +156,19 @@ function createNativeLifecycleTestProcess(params: {
           return;
         }
         if (request.method === "thread/resume") {
+          const effective = params.resumeEffectiveSettings || requestParams;
           setTimeout(
             () =>
               handleMessage({
                 id: request.id,
-                result: { thread: { id: requestParams.threadId } },
+                result: {
+                  thread: { id: requestParams.threadId },
+                  activePermissionProfile: effective.permissions
+                    ? { id: effective.permissions }
+                    : null,
+                  approvalPolicy: effective.approvalPolicy,
+                  approvalsReviewer: effective.approvalsReviewer,
+                },
               }),
             0,
           );
@@ -178,6 +241,13 @@ function installDirectPathTestPrefs(
   permissionProfile = ":read-only",
 ) {
   const originalZotero = (globalThis as any).Zotero;
+  const canonicalPermissionState =
+    permissionProfile === ":read-only"
+      ? undefined
+      : JSON.stringify({
+          boundary: { kind: "profile", profileId: permissionProfile },
+          approvalOverride: { policy: "on-request", reviewer: "user" },
+        });
   (globalThis as any).Zotero = {
     ...(originalZotero || {}),
     debug: () => undefined,
@@ -187,11 +257,17 @@ function installDirectPathTestPrefs(
       get: (key: string) => {
         if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled")) return false;
         if (key.endsWith(".codexNativeSkillMode")) return skillMode;
+        if (key.endsWith(".codexAppServerPermissionState")) {
+          return canonicalPermissionState;
+        }
         if (key.endsWith(".codexAppServerPermissionProfile")) {
           return permissionProfile;
         }
         return undefined;
       },
+      prefHasUserValue: (key: string) =>
+        key.endsWith(".codexAppServerPermissionState") &&
+        canonicalPermissionState !== undefined,
     },
   };
   return () => {
@@ -1045,6 +1121,301 @@ describe("Codex app-server native client", function () {
       (request) => request.method === "turn/start",
     );
     assert.notProperty(turnStart?.params || {}, "sandboxPolicy");
+  });
+
+  it("confirms an explicit settings update before starting the resumed turn", async function () {
+    const processKey = "native-permission-settings-update";
+    const requests: Array<{
+      method: string;
+      params: Record<string, any>;
+    }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: [],
+      requests,
+      permissionProfilesResult: {
+        data: [
+          { id: ":workspace", description: "Workspace", allowed: true },
+          {
+            id: ":danger-full-access",
+            description: "Full",
+            allowed: true,
+          },
+        ],
+      },
+      resumeEffectiveSettings: {
+        permissions: ":danger-full-access",
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+      },
+    });
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const restorePrefs = installDirectPathTestPrefs("off", ":workspace");
+    let persistedPermissionState = "";
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey: 6_000_000_047,
+          libraryID: 1,
+          kind: "global",
+          title: "Settings update",
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user", content: "Inspect safely." }],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => "thread-existing",
+          loadProviderPermissionState: async () =>
+            JSON.stringify({
+              boundary: {
+                kind: "profile",
+                profileId: ":danger-full-access",
+              },
+              approvalOverride: { policy: "never", reviewer: "user" },
+            }),
+          persistProviderSession: async (value) => {
+            persistedPermissionState = value.permissionState || "";
+          },
+        },
+      });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      restorePrefs();
+    }
+
+    const updateIndex = requests.findIndex(
+      (request) => request.method === "thread/settings/update",
+    );
+    const turnIndex = requests.findIndex(
+      (request) => request.method === "turn/start",
+    );
+    assert.isAtLeast(updateIndex, 0);
+    assert.isAbove(turnIndex, updateIndex);
+    assert.deepInclude(requests[updateIndex].params, {
+      threadId: "thread-existing",
+      permissions: ":workspace",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+    });
+    assert.notProperty(requests[turnIndex].params, "permissions");
+    assert.notProperty(requests[turnIndex].params, "sandboxPolicy");
+    assert.equal(
+      persistedPermissionState,
+      JSON.stringify({
+        boundary: { kind: "profile", profileId: ":workspace" },
+        approvalOverride: { policy: "on-request", reviewer: "user" },
+      }),
+    );
+  });
+
+  it("replaces the provider thread when settings update is unsupported", async function () {
+    const processKey = "native-permission-settings-update-unsupported";
+    const requests: Array<{
+      method: string;
+      params: Record<string, any>;
+    }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["thread-settings-replacement"],
+      requests,
+      permissionProfilesResult: {
+        data: [
+          { id: ":workspace", description: "Workspace", allowed: true },
+          {
+            id: ":danger-full-access",
+            description: "Full",
+            allowed: true,
+          },
+        ],
+      },
+      resumeEffectiveSettings: {
+        permissions: ":danger-full-access",
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+      },
+      settingsUpdateMethodNotFound: true,
+    });
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const restorePrefs = installDirectPathTestPrefs("off", ":workspace");
+    let storedThreadId = "thread-settings-old";
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey: 6_000_000_049,
+          libraryID: 1,
+          kind: "global",
+          title: "Unsupported settings update",
+        },
+        model: "gpt-5.6",
+        messages: [
+          { role: "user", content: "Earlier question" },
+          { role: "assistant", content: "Earlier answer" },
+          { role: "user", content: "Continue safely." },
+        ],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => storedThreadId,
+          loadProviderPermissionState: async () =>
+            JSON.stringify({
+              boundary: {
+                kind: "profile",
+                profileId: ":danger-full-access",
+              },
+              approvalOverride: { policy: "never", reviewer: "user" },
+            }),
+          persistProviderSession: async (value) => {
+            storedThreadId = value.threadId;
+          },
+        },
+      });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      restorePrefs();
+    }
+
+    assert.isTrue(
+      requests.some((request) => request.method === "thread/settings/update"),
+    );
+    const replacementStart = requests.find(
+      (request) => request.method === "thread/start",
+    )!;
+    assert.equal(replacementStart.params.permissions, ":workspace");
+    assert.equal(replacementStart.params.approvalPolicy, "on-request");
+    assert.equal(replacementStart.params.approvalsReviewer, "user");
+    assert.equal(storedThreadId, "thread-settings-replacement");
+    assert.isTrue(
+      requests.some(
+        (request) =>
+          request.method === "thread/archive" &&
+          request.params.threadId === "thread-settings-old",
+      ),
+    );
+  });
+
+  it("replaces a sticky Ask thread before Custom, injects history, then swaps durably", async function () {
+    const processKey = "native-permission-custom-replacement";
+    const requests: Array<{
+      method: string;
+      params: Record<string, any>;
+    }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["thread-custom-replacement"],
+      requests,
+      permissionProfilesResult: {
+        data: [
+          { id: ":workspace", description: "Workspace", allowed: true },
+          {
+            id: ":danger-full-access",
+            description: "Full",
+            allowed: true,
+          },
+        ],
+      },
+    });
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const originalZotero = globalThis.Zotero;
+    let persistedAtRequestCount = -1;
+    let persistedThreadId = "thread-sticky-ask";
+    let persistedPermissionState = "";
+    (globalThis as any).Zotero = {
+      ...(originalZotero || {}),
+      debug: () => undefined,
+      DataDirectory: { dir: "/tmp/lfz-custom-replacement-data" },
+      Profile: { dir: "/tmp/lfz-custom-replacement-profile" },
+      Prefs: {
+        get: (key: string) => {
+          if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled")) {
+            return false;
+          }
+          if (key.endsWith(".codexNativeSkillMode")) return "off";
+          if (key.endsWith(".codexAppServerPermissionState")) {
+            return JSON.stringify({
+              boundary: { kind: "config" },
+              approvalOverride: null,
+            });
+          }
+          return undefined;
+        },
+        prefHasUserValue: (key: string) =>
+          key.endsWith(".codexAppServerPermissionState"),
+      },
+    };
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey: 6_000_000_048,
+          libraryID: 1,
+          kind: "global",
+          title: "Custom replacement",
+        },
+        model: "gpt-5.6",
+        messages: [
+          { role: "user", content: "Earlier question" },
+          { role: "assistant", content: "Earlier answer" },
+          { role: "user", content: "Continue under Codex config." },
+        ],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => persistedThreadId,
+          loadProviderPermissionState: async () =>
+            JSON.stringify({
+              boundary: { kind: "profile", profileId: ":workspace" },
+              approvalOverride: {
+                policy: "on-request",
+                reviewer: "user",
+              },
+            }),
+          persistProviderSession: async (value) => {
+            persistedAtRequestCount = requests.length;
+            persistedThreadId = value.threadId;
+            persistedPermissionState = value.permissionState || "";
+          },
+        },
+      });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      (globalThis as any).Zotero = originalZotero;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+    }
+
+    assert.isFalse(
+      requests.some((request) => request.method === "thread/resume"),
+    );
+    const start = requests.find(
+      (request) => request.method === "thread/start",
+    )!;
+    assert.notProperty(start.params, "permissions");
+    assert.notProperty(start.params, "approvalPolicy");
+    assert.notProperty(start.params, "approvalsReviewer");
+    assert.notProperty(start.params, "sandbox");
+    const injectIndex = requests.findIndex(
+      (request) => request.method === "thread/inject_items",
+    );
+    const turnIndex = requests.findIndex(
+      (request) => request.method === "turn/start",
+    );
+    assert.isAtLeast(injectIndex, 0);
+    assert.include(
+      JSON.stringify(requests[injectIndex].params),
+      "Earlier question",
+    );
+    assert.isAbove(persistedAtRequestCount, injectIndex);
+    assert.isAtMost(persistedAtRequestCount, turnIndex);
+    assert.equal(persistedThreadId, "thread-custom-replacement");
+    assert.equal(
+      persistedPermissionState,
+      JSON.stringify({ boundary: { kind: "config" }, approvalOverride: null }),
+    );
+    assert.isTrue(
+      requests.some(
+        (request) =>
+          request.method === "thread/archive" &&
+          request.params.threadId === "thread-sticky-ask",
+      ),
+    );
   });
 
   afterEach(function () {
@@ -2199,7 +2570,7 @@ describe("Codex app-server native client", function () {
     assert.equal(inputText.split("Zotero context for this turn").length - 1, 1);
   });
 
-  it("passes configured native approvals reviewer to thread and turn requests", async function () {
+  it("applies the canonical Approve preset at thread level only", async function () {
     const processKey = "native-approvals-reviewer-test";
     const originalSpawn = CodexAppServerProcess.spawn;
     const originalZotero = globalThis.Zotero;
@@ -2213,11 +2584,19 @@ describe("Codex app-server native client", function () {
         get: (key: string) => {
           if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled"))
             return false;
-          if (key.endsWith(".codexAppServerApprovalsReviewer")) {
-            return "auto_review";
+          if (key.endsWith(".codexAppServerPermissionState")) {
+            return JSON.stringify({
+              boundary: { kind: "profile", profileId: ":workspace" },
+              approvalOverride: {
+                policy: "on-request",
+                reviewer: "auto_review",
+              },
+            });
           }
           return undefined;
         },
+        prefHasUserValue: (key: string) =>
+          key.endsWith(".codexAppServerPermissionState"),
       },
     };
 
@@ -2234,6 +2613,42 @@ describe("Codex app-server native client", function () {
               handleMessage: (msg: Record<string, unknown>) => void;
             }
           ).handleMessage.bind(proc);
+          if (request.method === "permissionProfile/list") {
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  result: {
+                    data: [
+                      {
+                        id: ":workspace",
+                        description: "Workspace",
+                        allowed: true,
+                      },
+                    ],
+                  },
+                }),
+              0,
+            );
+            return;
+          }
+          if (request.method === "experimentalFeature/list") {
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  result: {
+                    data: [{ name: "guardian_approval", enabled: true }],
+                  },
+                }),
+              0,
+            );
+            return;
+          }
+          if (request.method === "configRequirements/read") {
+            setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
+            return;
+          }
           if (request.method === "thread/start") {
             threadStartParams = request.params;
             setTimeout(
@@ -2278,6 +2693,7 @@ describe("Codex app-server native client", function () {
       },
       kill: () => {},
     });
+    proc.isProtocolInitialized = () => true;
     CodexAppServerProcess.spawn = async () => proc;
 
     try {
@@ -2305,8 +2721,8 @@ describe("Codex app-server native client", function () {
 
     assert.equal(threadStartParams?.approvalPolicy, "on-request");
     assert.equal(threadStartParams?.approvalsReviewer, "auto_review");
-    assert.equal(turnStartParams?.approvalPolicy, "on-request");
-    assert.equal(turnStartParams?.approvalsReviewer, "auto_review");
+    assert.notProperty(turnStartParams || {}, "approvalPolicy");
+    assert.notProperty(turnStartParams || {}, "approvalsReviewer");
   });
 
   it("submits automatic skill matches as structured native Codex skill inputs", async function () {

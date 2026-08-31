@@ -638,6 +638,7 @@ const CONVERSATION_TRANSFER_COLUMNS = [
   "updated_at",
   "title",
   "provider_session_id",
+  "provider_permission_state",
   "scoped_conversation_key",
   "scope_type",
   "scope_id",
@@ -774,6 +775,7 @@ async function ensureCodexConversationCatalogColumns(
     ["first_user_title", "first_user_title TEXT"],
     ["title", "title TEXT"],
     ["provider_session_id", "provider_session_id TEXT"],
+    ["provider_permission_state", "provider_permission_state TEXT"],
     ["provider_session_path_state", "provider_session_path_state TEXT"],
     ["scoped_conversation_key", "scoped_conversation_key TEXT"],
     ["scope_type", "scope_type TEXT"],
@@ -1196,6 +1198,7 @@ export async function repairCodexConversationIdentityRegistry(
             ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL_FOR_ALIAS_C} AS updatedAt,
             COALESCE(NULLIF(TRIM(c.title), ''), NULLIF(TRIM(c.first_user_title), '')) AS title,
             c.provider_session_id AS providerSessionId,
+            c.provider_permission_state AS providerPermissionState,
             c.scoped_conversation_key AS scopedConversationKey,
             c.scope_type AS scopeType,
             c.scope_id AS scopeId,
@@ -1490,6 +1493,7 @@ export async function initCodexAppServerStore(): Promise<void> {
         first_user_title TEXT,
         title TEXT,
         provider_session_id TEXT,
+        provider_permission_state TEXT,
         provider_session_path_state TEXT,
         scoped_conversation_key TEXT,
         scope_type TEXT,
@@ -2345,6 +2349,7 @@ export async function clearCodexConversation(
     await Zotero.DB.queryAsync(
       `UPDATE ${CODEX_CONVERSATIONS_TABLE}
        SET provider_session_id = NULL,
+           provider_permission_state = NULL,
            provider_session_path_state = NULL,
            scoped_conversation_key = NULL,
            scope_type = NULL,
@@ -2734,6 +2739,7 @@ type CodexConversationRow = {
   updatedAt?: unknown;
   title?: unknown;
   providerSessionId?: unknown;
+  providerPermissionState?: unknown;
   scopedConversationKey?: unknown;
   scopeType?: unknown;
   scopeId?: unknown;
@@ -2796,6 +2802,11 @@ function toCodexConversationSummary(
     providerSessionId:
       typeof row.providerSessionId === "string" && row.providerSessionId.trim()
         ? row.providerSessionId.trim()
+        : undefined,
+    providerPermissionState:
+      typeof row.providerPermissionState === "string" &&
+      row.providerPermissionState.trim()
+        ? row.providerPermissionState.trim()
         : undefined,
     scopedConversationKey:
       typeof row.scopedConversationKey === "string" &&
@@ -3053,6 +3064,7 @@ export async function getCodexConversationSummary(
             ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL_FOR_ALIAS_C} AS updatedAt,
             COALESCE(NULLIF(TRIM(c.title), ''), NULLIF(TRIM(c.first_user_title), '')) AS title,
             c.provider_session_id AS providerSessionId,
+            c.provider_permission_state AS providerPermissionState,
             c.scoped_conversation_key AS scopedConversationKey,
             c.scope_type AS scopeType,
             c.scope_id AS scopeId,
@@ -3080,6 +3092,7 @@ export async function upsertCodexConversationSummary(params: {
   updatedAt?: number;
   title?: string;
   providerSessionId?: string;
+  providerPermissionState?: string;
   scopedConversationKey?: string;
   scopeType?: string;
   scopeId?: string;
@@ -3168,8 +3181,8 @@ export async function upsertCodexConversationSummary(params: {
   const writeCatalog = async () => {
     await Zotero.DB.queryAsync(
       `INSERT INTO ${CODEX_CONVERSATIONS_TABLE}
-        (conversation_id, conversation_instance_id, conversation_key, library_id, kind, paper_item_id, created_at, updated_at, last_activity_at, user_turn_count, first_user_title, title, provider_session_id, scoped_conversation_key, scope_type, scope_id, scope_label, cwd, model_name, effort)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (conversation_id, conversation_instance_id, conversation_key, library_id, kind, paper_item_id, created_at, updated_at, last_activity_at, user_turn_count, first_user_title, title, provider_session_id, provider_permission_state, scoped_conversation_key, scope_type, scope_id, scope_label, cwd, model_name, effort)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(conversation_key) DO UPDATE SET
          conversation_id = excluded.conversation_id,
          library_id = excluded.library_id,
@@ -3180,6 +3193,7 @@ export async function upsertCodexConversationSummary(params: {
          last_activity_at = COALESCE(excluded.last_activity_at, ${CODEX_CONVERSATIONS_TABLE}.last_activity_at, excluded.updated_at),
          title = COALESCE(excluded.title, ${CODEX_CONVERSATIONS_TABLE}.title),
          provider_session_id = COALESCE(excluded.provider_session_id, ${CODEX_CONVERSATIONS_TABLE}.provider_session_id),
+         provider_permission_state = COALESCE(excluded.provider_permission_state, ${CODEX_CONVERSATIONS_TABLE}.provider_permission_state),
          scoped_conversation_key = COALESCE(excluded.scoped_conversation_key, ${CODEX_CONVERSATIONS_TABLE}.scoped_conversation_key),
          scope_type = COALESCE(excluded.scope_type, ${CODEX_CONVERSATIONS_TABLE}.scope_type),
          scope_id = COALESCE(excluded.scope_id, ${CODEX_CONVERSATIONS_TABLE}.scope_id),
@@ -3199,6 +3213,7 @@ export async function upsertCodexConversationSummary(params: {
         updatedAt,
         title,
         params.providerSessionId?.trim() || null,
+        params.providerPermissionState?.trim() || null,
         params.scopedConversationKey?.trim() || null,
         params.scopeType?.trim() || null,
         params.scopeId?.trim() || null,
@@ -3244,6 +3259,7 @@ async function listCodexConversations(params: {
               ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL_FOR_ALIAS_C} AS updatedAt,
               COALESCE(NULLIF(TRIM(c.title), ''), NULLIF(TRIM(c.first_user_title), '')) AS title,
               c.provider_session_id AS providerSessionId,
+              c.provider_permission_state AS providerPermissionState,
               c.scoped_conversation_key AS scopedConversationKey,
               c.scope_type AS scopeType,
               c.scope_id AS scopeId,
@@ -3267,6 +3283,7 @@ async function listCodexConversations(params: {
               ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL_FOR_ALIAS_C} AS updatedAt,
               COALESCE(NULLIF(TRIM(c.title), ''), NULLIF(TRIM(c.first_user_title), '')) AS title,
               c.provider_session_id AS providerSessionId,
+              c.provider_permission_state AS providerPermissionState,
               c.scoped_conversation_key AS scopedConversationKey,
               c.scope_type AS scopeType,
               c.scope_id AS scopeId,
@@ -3342,6 +3359,7 @@ export async function listAllCodexPaperConversationsByLibrary(
             ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL_FOR_ALIAS_C} AS updatedAt,
             COALESCE(NULLIF(TRIM(c.title), ''), NULLIF(TRIM(c.first_user_title), '')) AS title,
             c.provider_session_id AS providerSessionId,
+            c.provider_permission_state AS providerPermissionState,
             c.scoped_conversation_key AS scopedConversationKey,
             c.scope_type AS scopeType,
             c.scope_id AS scopeId,
@@ -3645,6 +3663,7 @@ export async function clearCodexConversationSessionMetadata(
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_CONVERSATIONS_TABLE}
      SET provider_session_id = NULL,
+         provider_permission_state = NULL,
          provider_session_path_state = NULL,
          scoped_conversation_key = NULL,
          scope_type = NULL,

@@ -90,7 +90,7 @@ export function reconcileClaudePermissionMode(params: {
   options: PermissionOption[];
 }): { selectedId: ClaudePermissionMode; warning?: string } {
   const selected = params.options.find(
-    (option) => option.id === params.selectedId,
+    (option) => option.selectionKey === `claude:${params.selectedId}`,
   );
   if (selected?.available) return { selectedId: params.selectedId };
   return {

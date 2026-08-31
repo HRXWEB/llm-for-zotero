@@ -10401,15 +10401,39 @@ label.llm-search-results-item:hover {
   border-color: var(--stroke-secondary, rgba(120, 120, 120, 0.35));
 }
 
-.llm-permission-option[data-permission-mode="safe"]:hover:not(:disabled) {
+.llm-permission-option[data-permission-provider="original"][data-selection-key="original:safe"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="claude"][data-selection-key="claude:acceptEdits"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="codex"][data-selection-key="codex:preset:ask"]:hover:not(
+    :disabled
+  ) {
   background: color-mix(in srgb, #22c55e 14%, var(--material-background));
 }
 
-.llm-permission-option[data-permission-mode="auto"]:hover:not(:disabled) {
+.llm-permission-option[data-permission-provider="original"][data-selection-key="original:auto"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="claude"][data-selection-key="claude:auto"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="codex"][data-selection-key="codex:preset:approve"]:hover:not(
+    :disabled
+  ) {
   background: var(--color-accent10, rgba(53, 132, 228, 0.14));
 }
 
-.llm-permission-option[data-permission-mode="yolo"]:hover:not(:disabled) {
+.llm-permission-option[data-permission-provider="original"][data-selection-key="original:yolo"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="claude"][data-selection-key="claude:bypassPermissions"]:hover:not(
+    :disabled
+  ),
+.llm-permission-option[data-permission-provider="codex"][data-selection-key="codex:preset:full"]:hover:not(
+    :disabled
+  ) {
   background: color-mix(in srgb, #eab308 14%, var(--material-background));
 }
 

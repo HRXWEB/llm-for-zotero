@@ -41,6 +41,11 @@ pref("codexAppServerZoteroMcpToolsEnabled", true);
 pref("codexAppServerNativeApprovalsEnabled", false);
 pref("codexAppServerApprovalsReviewer", "user");
 pref("codexAppServerPermissionProfile", ":read-only");
+pref(
+  "codexAppServerPermissionState",
+  '{"boundary":{"kind":"profile","profileId":":workspace"},"approvalOverride":{"policy":"on-request","reviewer":"user"}}',
+);
+pref("codexAppServerPermissionStateMigrationDone", false);
 pref("codexNativeSkillMode", "native");
 pref("codexNativeSkillRoutingMode", "hybrid");
 pref("codexAppServerGlobalConversationMap", "");

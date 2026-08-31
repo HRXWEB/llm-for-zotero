@@ -6,6 +6,18 @@ import type {
 } from "../src/modules/contextPanel/workflowTestTypes";
 
 const PREF_PREFIX = "extensions.zotero.llmforzotero";
+const CODEX_ASK_STATE = JSON.stringify({
+  boundary: { kind: "profile", profileId: ":workspace" },
+  approvalOverride: { policy: "on-request", reviewer: "user" },
+});
+
+function readCodexPermissionState(): Record<string, any> {
+  return JSON.parse(
+    String(
+      Zotero.Prefs.get(`${PREF_PREFIX}.codexAppServerPermissionState`, true),
+    ),
+  ) as Record<string, any>;
+}
 
 async function withPrefs<T>(
   prefs: Record<string, unknown>,
@@ -78,7 +90,7 @@ describe("workflow: provider-aware permission modes", function () {
         conversationSystem: "upstream",
         agentLibraryWriteMode: "safe",
         claudeCodePermissionMode: "default",
-        codexAppServerPermissionProfile: ":read-only",
+        codexAppServerPermissionState: CODEX_ASK_STATE,
       },
       async () => {
         api.configurePermissionCatalogs({ delayFirstCodex: true });
@@ -92,10 +104,10 @@ describe("workflow: provider-aware permission modes", function () {
           await api.clickPanelRuntimeModeToggle(panel.panelId);
         }
         assertRows(api.getPanelPermissionSurface(panel.panelId), [
-          "safe",
-          "auto",
-          "yolo",
-          "plan",
+          "original:safe",
+          "original:auto",
+          "original:yolo",
+          "original:plan",
         ]);
         const originalPanel = api.getPanelPermissionSurface(panel.panelId);
         assert.deepEqual(
@@ -115,16 +127,16 @@ describe("workflow: provider-aware permission modes", function () {
 
         await api.clickPanelSystemToggle(panel.panelId, "claude_code");
         assertRows(api.getPanelPermissionSurface(panel.panelId), [
-          "plan",
-          "dontAsk",
-          "default",
-          "acceptEdits",
-          "auto",
-          "bypassPermissions",
+          "claude:plan",
+          "claude:dontAsk",
+          "claude:default",
+          "claude:acceptEdits",
+          "claude:auto",
+          "claude:bypassPermissions",
         ]);
         const afterClaude = await api.clickPanelPermissionOption(
           panel.panelId,
-          "bypassPermissions",
+          "claude:bypassPermissions",
         );
         assert.equal(afterClaude.compactLabel, "bypass");
         assert.equal(
@@ -136,11 +148,8 @@ describe("workflow: provider-aware permission modes", function () {
           "safe",
         );
         assert.equal(
-          Zotero.Prefs.get(
-            `${PREF_PREFIX}.codexAppServerPermissionProfile`,
-            true,
-          ),
-          ":read-only",
+          readCodexPermissionState().boundary.profileId,
+          ":workspace",
         );
 
         await api.clickPanelSystemToggle(panel.panelId, "codex");
@@ -148,35 +157,60 @@ describe("workflow: provider-aware permission modes", function () {
         await api.clickPanelSystemToggle(panel.panelId, "codex");
         const currentCodex = api.getPanelPermissionSurface(panel.panelId);
         assertRows(currentCodex, [
-          ":read-only",
-          ":workspace",
-          ":danger-full-access",
-          ":team_custom_profile",
+          "codex:preset:ask",
+          "codex:preset:approve",
+          "codex:preset:full",
+          "codex:preset:custom",
+          "codex:profile:%3Aread-only",
+          "codex:profile:%3Ateam_custom_profile",
         ]);
         await api.resolveDelayedCodexPermissionCatalog();
         const afterStaleResponse = api.getPanelPermissionSurface(panel.panelId);
         assertRows(afterStaleResponse, [
-          ":read-only",
-          ":workspace",
-          ":danger-full-access",
-          ":team_custom_profile",
+          "codex:preset:ask",
+          "codex:preset:approve",
+          "codex:preset:full",
+          "codex:preset:custom",
+          "codex:profile:%3Aread-only",
+          "codex:profile:%3Ateam_custom_profile",
         ]);
         assert.notInclude(
           afterStaleResponse.rows.map((row) => row.id),
-          ":stale-profile",
+          "codex:profile:%3Astale-profile",
+        );
+
+        await api.clickPanelPermissionOption(
+          panel.panelId,
+          "codex:preset:full",
+        );
+        const fullAccessDialog = api.getPanelConfirmationDialog(panel.panelId);
+        assert.deepInclude(fullAccessDialog, {
+          visible: true,
+          title: "Enable Codex full access?",
+          confirmLabel: "Enable full access",
+          cancelLabel: "Cancel",
+          destructive: true,
+        });
+        assert.include(fullAccessDialog.message, "unrestricted access");
+        assert.equal(
+          readCodexPermissionState().boundary.profileId,
+          ":workspace",
+        );
+        await api.respondToPanelConfirmationDialog(panel.panelId, false);
+        assert.isFalse(api.getPanelConfirmationDialog(panel.panelId).visible);
+        assert.equal(
+          readCodexPermissionState().boundary.profileId,
+          ":workspace",
         );
 
         const afterCodex = await api.clickPanelPermissionOption(
           panel.panelId,
-          ":workspace",
+          "codex:preset:approve",
         );
-        assert.equal(afterCodex.compactLabel, "workspace");
+        assert.equal(afterCodex.compactLabel, "approve");
         assert.equal(
-          Zotero.Prefs.get(
-            `${PREF_PREFIX}.codexAppServerPermissionProfile`,
-            true,
-          ),
-          ":workspace",
+          readCodexPermissionState().approvalOverride.reviewer,
+          "auto_review",
         );
         assert.equal(
           Zotero.Prefs.get(`${PREF_PREFIX}.claudeCodePermissionMode`, true),
@@ -191,10 +225,10 @@ describe("workflow: provider-aware permission modes", function () {
         api.configurePermissionCatalogs();
         await api.openStandaloneForItem(fixture.parentItemId);
         assertRows(api.getStandalonePermissionSurface(), [
-          "safe",
-          "auto",
-          "yolo",
-          "plan",
+          "original:safe",
+          "original:auto",
+          "original:yolo",
+          "original:plan",
         ]);
         assert.isTrue(
           api.getStandalonePermissionSurface().rows.at(-1)?.disabled,
@@ -210,42 +244,38 @@ describe("workflow: provider-aware permission modes", function () {
         );
         await api.clickStandaloneSystemToggle("claude_code");
         assertRows(api.getStandalonePermissionSurface(), [
-          "plan",
-          "dontAsk",
-          "default",
-          "acceptEdits",
-          "auto",
-          "bypassPermissions",
+          "claude:plan",
+          "claude:dontAsk",
+          "claude:default",
+          "claude:acceptEdits",
+          "claude:auto",
+          "claude:bypassPermissions",
         ]);
-        await api.clickStandalonePermissionOption("acceptEdits");
+        await api.clickStandalonePermissionOption("claude:acceptEdits");
         assert.equal(
           Zotero.Prefs.get(`${PREF_PREFIX}.claudeCodePermissionMode`, true),
           "acceptEdits",
         );
         assert.equal(
-          Zotero.Prefs.get(
-            `${PREF_PREFIX}.codexAppServerPermissionProfile`,
-            true,
-          ),
-          ":workspace",
+          readCodexPermissionState().approvalOverride.reviewer,
+          "auto_review",
         );
         await api.clickStandaloneSystemToggle("codex");
         assertRows(api.getStandalonePermissionSurface(), [
-          ":read-only",
-          ":workspace",
-          ":danger-full-access",
-          ":team_custom_profile",
+          "codex:preset:ask",
+          "codex:preset:approve",
+          "codex:preset:full",
+          "codex:preset:custom",
+          "codex:profile:%3Aread-only",
+          "codex:profile:%3Ateam_custom_profile",
         ]);
         const standaloneCodex = await api.clickStandalonePermissionOption(
-          ":team_custom_profile",
+          "codex:profile:%3Ateam_custom_profile",
         );
         assert.equal(standaloneCodex.compactLabel, "team custom profile");
         assert.include(standaloneCodex.accessibleName, ":team_custom_profile");
         assert.equal(
-          Zotero.Prefs.get(
-            `${PREF_PREFIX}.codexAppServerPermissionProfile`,
-            true,
-          ),
+          readCodexPermissionState().boundary.profileId,
           ":team_custom_profile",
         );
         assert.equal(

@@ -270,6 +270,7 @@ export type CodexConversationSummary = {
   updatedAt: number;
   title?: string;
   providerSessionId?: string;
+  providerPermissionState?: string;
   scopedConversationKey?: string;
   scopeType?: string;
   scopeId?: string;

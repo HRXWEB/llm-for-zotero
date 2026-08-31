@@ -3,21 +3,12 @@ import type { ClaudePermissionMode } from "./claudePermissionMode";
 
 export type PermissionProvider = "original" | "claude" | "codex";
 
-export type PermissionRisk =
-  | "restricted"
-  | "standard"
-  | "elevated"
-  | "full-access"
-  | "custom";
-
 export type PermissionOption = {
+  selectionKey: string;
   provider: PermissionProvider;
-  id: string;
   fullLabel: string;
   compactLabel: string;
-  levelLabel: string;
   description: string;
-  risk: PermissionRisk;
   available: boolean;
   disabledReason?: string;
 };
@@ -32,109 +23,67 @@ export type CodexPermissionProfile = {
 const ORIGINAL_OPTIONS: Record<AgentLibraryWriteMode, PermissionOption> = {
   safe: {
     provider: "original",
-    id: "safe",
+    selectionKey: "original:safe",
     fullLabel: "Safe",
     compactLabel: "safe",
-    levelLabel: "Restricted",
     description:
       "Review every library change before it happens; batch jobs pause on each page.",
-    risk: "restricted",
     available: true,
   },
   auto: {
     provider: "original",
-    id: "auto",
+    selectionKey: "original:auto",
     fullLabel: "Auto",
     compactLabel: "auto",
-    levelLabel: "Standard",
     description:
       "Apply reversible library changes automatically and ask before irreversible changes.",
-    risk: "standard",
     available: true,
   },
   yolo: {
     provider: "original",
-    id: "yolo",
+    selectionKey: "original:yolo",
     fullLabel: "Yolo",
     compactLabel: "yolo",
-    levelLabel: "Full access",
     description:
       "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.",
-    risk: "full-access",
     available: true,
   },
 };
 
 const CLAUDE_PRESENTATION: Record<
   ClaudePermissionMode,
-  Omit<PermissionOption, "provider" | "id" | "available">
+  Omit<PermissionOption, "provider" | "selectionKey" | "available">
 > = {
   plan: {
     fullLabel: "Plan",
     compactLabel: "plan",
-    levelLabel: "Restricted",
     description: "Plan without executing tools that modify the environment.",
-    risk: "restricted",
   },
   dontAsk: {
     fullLabel: "Don’t ask",
     compactLabel: "no prompts",
-    levelLabel: "Restricted",
     description: "Decline permission prompts instead of asking the user.",
-    risk: "restricted",
   },
   default: {
     fullLabel: "Default",
     compactLabel: "default",
-    levelLabel: "Standard",
     description: "Use Claude Code's standard permission behavior.",
-    risk: "standard",
   },
   acceptEdits: {
     fullLabel: "Accept edits",
     compactLabel: "edits",
-    levelLabel: "Elevated",
     description:
       "Automatically accept file edits while retaining other prompts.",
-    risk: "elevated",
   },
   auto: {
     fullLabel: "Auto approval",
     compactLabel: "auto",
-    levelLabel: "Elevated",
     description: "Let Claude Code automatically resolve supported permissions.",
-    risk: "elevated",
   },
   bypassPermissions: {
     fullLabel: "Bypass permissions",
     compactLabel: "bypass",
-    levelLabel: "Full access",
     description: "Bypass Claude Code permission checks for this runtime.",
-    risk: "full-access",
-  },
-};
-
-const CODEX_PRESENTATION: Record<
-  string,
-  Omit<PermissionOption, "provider" | "id" | "description" | "available">
-> = {
-  ":read-only": {
-    fullLabel: "Read only",
-    compactLabel: "read only",
-    levelLabel: "Restricted",
-    risk: "restricted",
-  },
-  ":workspace": {
-    fullLabel: "Workspace access",
-    compactLabel: "workspace",
-    levelLabel: "Elevated",
-    risk: "elevated",
-  },
-  ":danger-full-access": {
-    fullLabel: "Danger full access",
-    compactLabel: "full access",
-    levelLabel: "Full access",
-    risk: "full-access",
   },
 };
 
@@ -142,6 +91,13 @@ export function getOriginalPermissionOptions(): PermissionOption[] {
   return ["safe", "auto", "yolo"].map(
     (id) => ORIGINAL_OPTIONS[id as AgentLibraryWriteMode],
   );
+}
+
+export function getOriginalPermissionModeFromSelectionKey(
+  selectionKey: string,
+): AgentLibraryWriteMode | null {
+  const mode = selectionKey.replace(/^original:/, "");
+  return mode === "safe" || mode === "auto" || mode === "yolo" ? mode : null;
 }
 
 export function buildClaudePermissionOption(params: {
@@ -153,7 +109,7 @@ export function buildClaudePermissionOption(params: {
   const presentation = CLAUDE_PRESENTATION[params.id];
   return {
     provider: "claude",
-    id: params.id,
+    selectionKey: `claude:${params.id}`,
     ...presentation,
     description: params.description?.trim() || presentation.description,
     available: params.available !== false,
@@ -161,28 +117,18 @@ export function buildClaudePermissionOption(params: {
   };
 }
 
-export function normalizeCodexProfileLabel(id: string): string {
-  const normalized = id.replace(/^:/, "").replace(/[-_]+/g, " ").trim();
-  return normalized || id;
-}
-
-export function buildCodexPermissionOption(
-  profile: CodexPermissionProfile,
-): PermissionOption {
-  const presentation = CODEX_PRESENTATION[profile.id];
-  const fullLabel =
-    presentation?.fullLabel || normalizeCodexProfileLabel(profile.id);
-  return {
-    provider: "codex",
-    id: profile.id,
-    fullLabel,
-    compactLabel: presentation?.compactLabel || fullLabel,
-    levelLabel: presentation?.levelLabel || "Custom",
-    description: profile.description,
-    risk: presentation?.risk || "custom",
-    available: profile.allowed,
-    disabledReason: profile.disabledReason,
-  };
+export function getClaudePermissionModeFromSelectionKey(
+  selectionKey: string,
+): ClaudePermissionMode | null {
+  const mode = selectionKey.replace(/^claude:/, "");
+  return mode === "default" ||
+    mode === "acceptEdits" ||
+    mode === "plan" ||
+    mode === "auto" ||
+    mode === "dontAsk" ||
+    mode === "bypassPermissions"
+    ? mode
+    : null;
 }
 
 export function buildPermissionAccessibleLabel(
@@ -195,5 +141,5 @@ export function buildPermissionAccessibleLabel(
         ? "Codex"
         : "Original Agent";
   const description = option.description.trim();
-  return `${provider} permission mode: ${option.id} — ${option.levelLabel}${description ? ` — ${description}` : ""}`;
+  return `${provider} permission mode: ${option.fullLabel}${description ? ` — ${description}` : ""}`;
 }

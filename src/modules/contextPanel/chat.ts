@@ -58,7 +58,6 @@ import { normalizeForcedSkillIds } from "../../shared/skillIds";
 import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
-  isCodexAppServerNativeApprovalsEnabled,
   isCodexAppServerModeEnabled,
   isCodexZoteroMcpToolsEnabled,
 } from "../../codexAppServer/prefs";
@@ -2880,7 +2879,6 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
     text: string,
     kind: Parameters<typeof setStatus>[2],
   ) => void;
-  isNativeApprovalsEnabled?: () => boolean;
   showActionCard?: (
     body: Element,
     requestId: string,
@@ -2900,13 +2898,7 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
     );
     return defaultDecision.response;
   }
-  if (
-    !(
-      params.isNativeApprovalsEnabled?.() ??
-      isCodexAppServerNativeApprovalsEnabled()
-    ) ||
-    !isCodexNativeBuiltInApprovalRequest(params.request)
-  ) {
+  if (!isCodexNativeBuiltInApprovalRequest(params.request)) {
     params.setStatusSafely(
       "Codex denied a built-in or untrusted approval request",
       "error",

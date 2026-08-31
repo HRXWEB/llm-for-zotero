@@ -1,5 +1,10 @@
 import { config } from "../../package.json";
 import { joinLocalPath } from "./localPath";
+import {
+  CODEX_APPROVE_PERMISSION_STATE,
+  CODEX_ASK_PERMISSION_STATE,
+  serializeCodexPermissionState,
+} from "../codexAppServer/permissionState";
 
 declare const Services:
   | {
@@ -18,6 +23,9 @@ const PREF_ATTACHMENTS_VAULT_RELATIVE = `${config.prefsPrefix}.migrationAttachme
 const PREF_CLAUDE_PERMISSION_MODE = `${config.prefsPrefix}.claudeCodePermissionMode`;
 const PREF_CLAUDE_PERMISSION_MODE_MIGRATION = `${config.prefsPrefix}.claudeCodePermissionModeMigrationDone`;
 const PREF_LEGACY_AGENT_PERMISSION_MODE = `${config.prefsPrefix}.agentPermissionMode`;
+const PREF_CODEX_PERMISSION_STATE = `${config.prefsPrefix}.codexAppServerPermissionState`;
+const PREF_CODEX_PERMISSION_STATE_MIGRATION = `${config.prefsPrefix}.codexAppServerPermissionStateMigrationDone`;
+const PREF_CODEX_APPROVALS_REVIEWER = `${config.prefsPrefix}.codexAppServerApprovalsReviewer`;
 
 const MIGRATABLE_PREF_KEYS = [
   "enable",
@@ -277,9 +285,31 @@ export function migrateClaudePermissionMode(): void {
   Zotero.Prefs.set(PREF_CLAUDE_PERMISSION_MODE_MIGRATION, true, true);
 }
 
+export function migrateCodexPermissionState(): void {
+  if (Zotero.Prefs.get(PREF_CODEX_PERMISSION_STATE_MIGRATION, true)) return;
+
+  if (!hasUserPref(PREF_CODEX_PERMISSION_STATE)) {
+    if (hasUserPref(PREF_CODEX_APPROVALS_REVIEWER)) {
+      const reviewer = Zotero.Prefs.get(PREF_CODEX_APPROVALS_REVIEWER, true);
+      Zotero.Prefs.set(
+        PREF_CODEX_PERMISSION_STATE,
+        serializeCodexPermissionState(
+          reviewer === "auto_review"
+            ? CODEX_APPROVE_PERMISSION_STATE
+            : CODEX_ASK_PERMISSION_STATE,
+        ),
+        true,
+      );
+    }
+  }
+
+  Zotero.Prefs.set(PREF_CODEX_PERMISSION_STATE_MIGRATION, true, true);
+}
+
 export function runStartupPreferenceMigrations(): void {
   migrateLegacyPrefs();
   migrateClaudePermissionMode();
+  migrateCodexPermissionState();
   migrateNickname();
   migrateAttachmentsVaultRelative();
 }

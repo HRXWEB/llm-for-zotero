@@ -25,7 +25,7 @@ describe("Codex native approval bridge", function () {
     };
   }
 
-  it("fails closed without rendering a card when native approvals are disabled", async function () {
+  it("always renders built-in approval requests without an enable switch", async function () {
     const statuses = recordStatuses();
     let rendered = false;
 
@@ -33,19 +33,15 @@ describe("Codex native approval bridge", function () {
       body,
       request: commandRequest,
       setStatusSafely: statuses.setStatusSafely,
-      isNativeApprovalsEnabled: () => false,
       showActionCard: async () => {
         rendered = true;
         return { approved: true };
       },
     });
 
-    assert.deepEqual(response, { decision: "decline" });
-    assert.equal(rendered, false);
-    assert.include(
-      statuses.entries.at(-1)?.text,
-      "denied a built-in or untrusted approval request",
-    );
+    assert.deepEqual(response, { decision: "accept" });
+    assert.equal(rendered, true);
+    assert.include(statuses.entries.at(-1)?.text, "waiting for your approval");
   });
 
   it("renders a native approval card and resolves approved command requests", async function () {
@@ -59,7 +55,6 @@ describe("Codex native approval bridge", function () {
       body,
       request: commandRequest,
       setStatusSafely: statuses.setStatusSafely,
-      isNativeApprovalsEnabled: () => true,
       nextRequestId: () => "native-approval-1",
       trace: {
         noteMcpConfirmationRequired: (_requestId, action) => {
@@ -96,7 +91,6 @@ describe("Codex native approval bridge", function () {
       body,
       request: commandRequest,
       setStatusSafely: statuses.setStatusSafely,
-      isNativeApprovalsEnabled: () => true,
       nextRequestId: () => "native-approval-2",
       showActionCard: async () => ({ approved: false, actionId: "deny" }),
     });
@@ -111,7 +105,6 @@ describe("Codex native approval bridge", function () {
       body,
       request: commandRequest,
       setStatusSafely: statuses.setStatusSafely,
-      isNativeApprovalsEnabled: () => true,
       showActionCard: async () => {
         throw new Error("missing panel");
       },

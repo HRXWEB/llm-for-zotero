@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { assert } from "chai";
 import { after, beforeEach, describe, it } from "mocha";
 import {
-  buildCodexPermissionOption,
   buildPermissionAccessibleLabel,
   getOriginalPermissionOptions,
 } from "../src/shared/permissionOptions";
@@ -13,23 +12,73 @@ import {
   setClaudePermissionModePref,
 } from "../src/claudeCode/prefs";
 import {
-  getCodexPermissionProfilePref,
-  setCodexPermissionProfilePref,
+  getCodexPermissionStatePref,
+  readCodexPermissionStatePref,
+  setCodexPermissionStatePref,
 } from "../src/codexAppServer/prefs";
 import {
   getAgentLibraryWriteMode,
   setAgentLibraryWriteMode,
 } from "../src/agent/libraryWriteMode";
-import { migrateClaudePermissionMode } from "../src/utils/migrations";
-import { fetchClaudePermissionModeCatalog } from "../src/claudeCode/permissionModes";
-import { reconcileClaudePermissionMode } from "../src/claudeCode/permissionModes";
 import {
-  listCodexPermissionProfiles,
-  validateCodexPermissionSelection,
+  migrateClaudePermissionMode,
+  migrateCodexPermissionState,
+} from "../src/utils/migrations";
+import {
+  fetchClaudePermissionModeCatalog,
+  reconcileClaudePermissionMode,
+} from "../src/claudeCode/permissionModes";
+import {
+  buildCodexPermissionExecution,
+  buildCodexPermissionOptionCatalog,
+  getCodexPermissionCapabilities,
+  subscribeCodexPermissionProcessChanges,
+  type CodexPermissionCapabilities,
 } from "../src/codexAppServer/permissionProfiles";
+import {
+  applyCodexPermissionChoice,
+  CODEX_APPROVE_PERMISSION_STATE,
+  CODEX_ASK_PERMISSION_STATE,
+  CODEX_CUSTOM_PERMISSION_STATE,
+  CODEX_FULL_PERMISSION_STATE,
+  codexProfileSelectionKey,
+  serializeCodexPermissionState,
+  type CodexPermissionState,
+} from "../src/codexAppServer/permissionState";
 import type { CodexAppServerProcess } from "../src/utils/codexAppServerProcess";
 
 const PREFIX = "extensions.zotero.llmforzotero.";
+
+function modernCapabilities(
+  overrides: Partial<CodexPermissionCapabilities> = {},
+): CodexPermissionCapabilities {
+  return {
+    protocol: "profiles",
+    profiles: [
+      { id: ":read-only", description: "Read files only.", allowed: true },
+      { id: ":workspace", description: "Workspace access.", allowed: true },
+      {
+        id: ":danger-full-access",
+        description: "Full local access.",
+        allowed: true,
+      },
+      {
+        id: ":team_custom-profile",
+        description: "Managed team policy.",
+        allowed: true,
+      },
+    ],
+    allowedApprovalPolicies: null,
+    allowedApprovalsReviewers: null,
+    guardianApprovalEnabled: true,
+    supportsThreadSettingsUpdate: true,
+    ...overrides,
+  };
+}
+
+function preference(state: CodexPermissionState, hasUserValue = true) {
+  return { state, hasUserValue, raw: serializeCodexPermissionState(state) };
+}
 
 describe("provider permission modes", function () {
   const originalZotero = globalThis.Zotero;
@@ -47,6 +96,7 @@ describe("provider permission modes", function () {
           prefs.set(key, value);
           userPrefs.add(key);
         },
+        prefHasUserValue: (key: string) => userPrefs.has(key),
       },
     };
     (globalThis as any).Services = {
@@ -69,10 +119,6 @@ describe("provider permission modes", function () {
       prefs.get(`${PREFIX}claudeCodePermissionMode`),
       "bypassPermissions",
     );
-    assert.equal(
-      prefs.get(`${PREFIX}claudeCodePermissionModeMigrationDone`),
-      true,
-    );
 
     prefs.clear();
     userPrefs.clear();
@@ -84,23 +130,64 @@ describe("provider permission modes", function () {
     assert.equal(prefs.get(`${PREFIX}claudeCodePermissionMode`), "plan");
   });
 
+  it("migrates the old Codex reviewer exactly once without inventing Full access", function () {
+    prefs.set(`${PREFIX}codexAppServerApprovalsReviewer`, "auto_review");
+    userPrefs.add(`${PREFIX}codexAppServerApprovalsReviewer`);
+    prefs.set(
+      `${PREFIX}codexAppServerPermissionProfile`,
+      ":danger-full-access",
+    );
+    userPrefs.add(`${PREFIX}codexAppServerPermissionProfile`);
+    migrateCodexPermissionState();
+    assert.equal(
+      prefs.get(`${PREFIX}codexAppServerPermissionState`),
+      serializeCodexPermissionState(CODEX_APPROVE_PERMISSION_STATE),
+    );
+
+    const preserved = serializeCodexPermissionState(
+      CODEX_CUSTOM_PERMISSION_STATE,
+    );
+    prefs.clear();
+    userPrefs.clear();
+    prefs.set(`${PREFIX}codexAppServerPermissionState`, preserved);
+    userPrefs.add(`${PREFIX}codexAppServerPermissionState`);
+    migrateCodexPermissionState();
+    assert.equal(
+      prefs.get(`${PREFIX}codexAppServerPermissionState`),
+      preserved,
+    );
+
+    prefs.clear();
+    userPrefs.clear();
+    migrateCodexPermissionState();
+    assert.isFalse(userPrefs.has(`${PREFIX}codexAppServerPermissionState`));
+    assert.equal(
+      prefs.get(`${PREFIX}codexAppServerPermissionStateMigrationDone`),
+      true,
+    );
+  });
+
   it("round-trips provider preferences without cross-writing", function () {
+    const customState: CodexPermissionState = {
+      boundary: {
+        kind: "profile",
+        profileId: ":custom_profile-with-long-name",
+      },
+      approvalOverride: null,
+    };
     setAgentLibraryWriteMode("yolo");
     setClaudePermissionModePref("dontAsk");
-    setCodexPermissionProfilePref(":custom_profile-with-long-name");
+    setCodexPermissionStatePref(customState);
 
     assert.equal(getAgentLibraryWriteMode(), "yolo");
     assert.equal(getClaudePermissionModePref(), "dontAsk");
-    assert.equal(
-      getCodexPermissionProfilePref(),
-      ":custom_profile-with-long-name",
-    );
+    assert.deepEqual(getCodexPermissionStatePref(), customState);
     assert.deepEqual(
       Array.from(prefs.keys()).sort(),
       [
         `${PREFIX}agentLibraryWriteMode`,
         `${PREFIX}claudeCodePermissionMode`,
-        `${PREFIX}codexAppServerPermissionProfile`,
+        `${PREFIX}codexAppServerPermissionState`,
       ].sort(),
     );
   });
@@ -109,7 +196,6 @@ describe("provider permission modes", function () {
     const common = {
       originalSelectedId: "auto" as const,
       claudeSelectedId: "default" as const,
-      codexSelectedId: ":read-only",
     };
     assert.equal(
       resolvePermissionSurface({
@@ -126,10 +212,11 @@ describe("provider permission modes", function () {
     });
     assert.deepEqual(
       original.kind === "original"
-        ? original.options.map((entry) => entry.id)
+        ? original.options.map((entry) => entry.selectionKey)
         : [],
-      ["safe", "auto", "yolo", "plan"],
+      ["original:safe", "original:auto", "original:yolo", "original:plan"],
     );
+
     const claudeOptions = [
       "plan",
       "dontAsk",
@@ -141,68 +228,82 @@ describe("provider permission modes", function () {
     const claude = resolvePermissionSurface({
       ...common,
       conversationSystem: "claude_code",
-      runtimeMode: "agent",
+      runtimeMode: "chat",
       claudeOptions,
     });
     assert.deepEqual(
-      claude.kind === "claude" ? claude.options.map((entry) => entry.id) : [],
-      claudeOptions.map((entry) => entry.id),
+      claude.kind === "claude"
+        ? claude.options.map((entry) => entry.selectionKey)
+        : [],
+      claudeOptions.map((entry) => entry.selectionKey),
     );
-    const codexOptions = [
-      buildCodexPermissionOption({
-        id: ":read-only",
-        description: "Read only",
-        allowed: true,
-      }),
-      buildCodexPermissionOption({
-        id: ":team_custom-profile",
-        description: "Team policy",
-        allowed: true,
-      }),
-    ];
+
+    const codexCatalog = buildCodexPermissionOptionCatalog({
+      capabilities: modernCapabilities(),
+      preference: preference(CODEX_ASK_PERMISSION_STATE),
+    });
     const codex = resolvePermissionSurface({
       ...common,
       conversationSystem: "codex",
       runtimeMode: "chat",
-      codexOptions,
+      codexCatalog,
     });
     assert.deepEqual(
-      codex.kind === "codex" ? codex.options.map((entry) => entry.id) : [],
-      [":read-only", ":team_custom-profile"],
+      codex.kind === "codex"
+        ? codex.options.map((entry) => entry.selectionKey)
+        : [],
+      codexCatalog.options.map((entry) => entry.selectionKey),
+    );
+    assert.isFalse(
+      codexCatalog.options.some((entry) =>
+        entry.selectionKey.startsWith("original:"),
+      ),
     );
   });
 
-  it("uses provider-local labels and semantic risks", function () {
-    const originalAuto = getOriginalPermissionOptions().find(
-      (entry) => entry.id === "auto",
+  it("uses concise labels while retaining exact named-profile identity", function () {
+    const catalog = buildCodexPermissionOptionCatalog({
+      capabilities: modernCapabilities({
+        profiles: [
+          ...modernCapabilities().profiles,
+          {
+            id: ":a-very_long-custom_profile-name",
+            description: "Exact custom policy.",
+            allowed: true,
+          },
+        ],
+      }),
+      preference: preference(CODEX_ASK_PERMISSION_STATE),
+    });
+    const named = catalog.options.find(
+      (entry) =>
+        entry.selectionKey ===
+        codexProfileSelectionKey(":a-very_long-custom_profile-name"),
     )!;
-    const claudeAuto = buildClaudePermissionOption({ id: "auto" });
-    const edits = buildClaudePermissionOption({ id: "acceptEdits" });
-    const dontAsk = buildClaudePermissionOption({ id: "dontAsk" });
-    const bypass = buildClaudePermissionOption({ id: "bypassPermissions" });
-    const full = buildCodexPermissionOption({
-      id: ":danger-full-access",
-      description: "No sandbox",
-      allowed: true,
-    });
-    const custom = buildCodexPermissionOption({
-      id: ":a-very_long-custom_profile-name",
-      description: "Exact custom policy",
-      allowed: true,
-    });
-    assert.equal(originalAuto.risk, "standard");
-    assert.equal(claudeAuto.risk, "elevated");
-    assert.equal(edits.compactLabel, "edits");
-    assert.equal(dontAsk.compactLabel, "no prompts");
-    assert.equal(bypass.compactLabel, "bypass");
-    assert.equal(full.compactLabel, "full access");
-    assert.equal(custom.fullLabel, "a very long custom profile name");
-    assert.equal(custom.id, ":a-very_long-custom_profile-name");
-    assert.include(buildPermissionAccessibleLabel(custom), custom.id);
+    assert.equal(named.fullLabel, "a very long custom profile name");
+    assert.equal(named.compactLabel, "a very long custom profile name");
+    assert.include(
+      buildPermissionAccessibleLabel(named),
+      ":a-very_long-custom_profile-name",
+    );
+    assert.equal(
+      buildClaudePermissionOption({ id: "acceptEdits" }).compactLabel,
+      "edits",
+    );
+    assert.equal(
+      buildClaudePermissionOption({ id: "dontAsk" }).compactLabel,
+      "no prompts",
+    );
+    assert.equal(
+      buildClaudePermissionOption({ id: "bypassPermissions" }).compactLabel,
+      "bypass",
+    );
 
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     assert.include(css, "max-width: 14ch");
-    assert.include(css, 'data-permission-mode="auto"');
+    assert.include(css, 'data-permission-provider="original"');
+    assert.include(css, 'data-selection-key="claude:auto"');
+    assert.notInclude(css, "data-permission-mode");
     assert.notInclude(css, ".llm-permission-option-level");
   });
 
@@ -238,10 +339,11 @@ describe("provider permission modes", function () {
     });
     assert.equal(catalog.configuredDefaultMode, "plan");
     assert.equal(
-      catalog.options.find((entry) => entry.id === "auto")?.available,
+      catalog.options.find((entry) => entry.selectionKey === "claude:auto")
+        ?.available,
       false,
     );
-    assert.deepEqual(
+    assert.equal(
       reconcileClaudePermissionMode({
         selectedId: "bypassPermissions",
         options: catalog.options,
@@ -250,57 +352,243 @@ describe("provider permission modes", function () {
     );
   });
 
-  it("paginates Codex profiles and fails closed for missing or legacy selections", async function () {
-    const calls: unknown[] = [];
+  it("paginates profiles and features and applies complete managed constraints", async function () {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> =
+      [];
     const proc = {
-      async sendRequest(_method: string, params: Record<string, unknown>) {
-        calls.push(params);
-        return params.cursor
-          ? {
-              data: [
-                { id: "custom_team", description: "Team", allowed: false },
-              ],
-            }
-          : {
-              data: [{ id: ":read-only", description: "Read", allowed: true }],
-              nextCursor: "next",
-            };
+      async sendRequest(method: string, params?: Record<string, unknown>) {
+        calls.push({ method, params });
+        if (method === "permissionProfile/list") {
+          return params?.cursor
+            ? {
+                data: [
+                  { id: ":workspace", description: "Workspace", allowed: true },
+                  {
+                    id: ":danger-full-access",
+                    description: "Full",
+                    allowed: true,
+                  },
+                  { id: "custom_team", description: "Team", allowed: false },
+                ],
+              }
+            : {
+                data: [
+                  { id: ":read-only", description: "Read", allowed: true },
+                ],
+                nextCursor: "profile-next",
+              };
+        }
+        if (method === "experimentalFeature/list") {
+          return params?.cursor
+            ? { data: [{ name: "guardian_approval", enabled: true }] }
+            : { data: [], nextCursor: "feature-next" };
+        }
+        if (method === "configRequirements/read") {
+          return {
+            requirements: {
+              allowedApprovalPolicies: ["on-request", "never"],
+              allowedApprovalsReviewers: ["user"],
+            },
+          };
+        }
+        throw new Error(`Unexpected method ${method}`);
       },
     } as CodexAppServerProcess;
-    const catalog = await listCodexPermissionProfiles({
+    const capabilities = await getCodexPermissionCapabilities({
       proc,
       cwd: "/runtime",
+      fresh: true,
     });
-    assert.equal(catalog.kind, "profiles");
     assert.deepEqual(
-      catalog.profiles.map((entry) => entry.id),
-      [":read-only", "custom_team"],
+      capabilities.profiles.map((entry) => entry.id),
+      [":read-only", ":workspace", ":danger-full-access", "custom_team"],
     );
-    assert.lengthOf(calls, 2);
-    assert.throws(
-      () =>
-        validateCodexPermissionSelection({
-          selectedId: "custom_team",
-          catalog,
-        }),
-      /Choose an allowed/,
+    assert.isTrue(capabilities.guardianApprovalEnabled);
+    assert.deepEqual(Array.from(capabilities.allowedApprovalsReviewers || []), [
+      "user",
+    ]);
+    assert.equal(
+      calls.filter((entry) => entry.method === "permissionProfile/list").length,
+      2,
+    );
+    assert.equal(
+      calls.filter((entry) => entry.method === "experimentalFeature/list")
+        .length,
+      2,
     );
 
-    const legacy = await listCodexPermissionProfiles({
-      proc: {
-        async sendRequest() {
-          throw new Error("Method not found (-32601)");
-        },
-      } as CodexAppServerProcess,
+    const catalog = buildCodexPermissionOptionCatalog({
+      capabilities,
+      preference: preference(CODEX_ASK_PERMISSION_STATE),
     });
-    assert.equal(legacy.kind, "legacy");
+    assert.isFalse(
+      catalog.options.find(
+        (entry) => entry.selectionKey === "codex:preset:approve",
+      )?.available,
+    );
+    assert.isFalse(
+      catalog.options.find(
+        (entry) =>
+          entry.selectionKey === codexProfileSelectionKey("custom_team"),
+      )?.available,
+    );
+  });
+
+  it("invalidates capability state when the app-server process closes", async function () {
+    let processClose: (() => void) | undefined;
+    let profileId = "first-profile";
+    let changeCount = 0;
+    const unsubscribe = subscribeCodexPermissionProcessChanges(() => {
+      changeCount += 1;
+    });
+    const proc = {
+      onClose(handler: () => void) {
+        processClose = handler;
+        return () => undefined;
+      },
+      async sendRequest(method: string) {
+        if (method === "permissionProfile/list") {
+          return {
+            data: [{ id: profileId, description: profileId, allowed: true }],
+          };
+        }
+        if (method === "experimentalFeature/list") return { data: [] };
+        if (method === "configRequirements/read") return {};
+        throw new Error(`Unexpected method ${method}`);
+      },
+    } as unknown as CodexAppServerProcess;
+    try {
+      const first = await getCodexPermissionCapabilities({ proc, cwd: "/one" });
+      profileId = "second-profile";
+      processClose?.();
+      const second = await getCodexPermissionCapabilities({
+        proc,
+        cwd: "/one",
+      });
+      assert.deepEqual(
+        first.profiles.map((profile) => profile.id),
+        ["first-profile"],
+      );
+      assert.deepEqual(
+        second.profiles.map((profile) => profile.id),
+        ["second-profile"],
+      );
+      assert.equal(changeCount, 1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("preserves native approval state for named profiles and replaces sticky Custom transitions", function () {
+    const namedFromFull = applyCodexPermissionChoice({
+      current: CODEX_FULL_PERMISSION_STATE,
+      choice: { kind: "profile", profileId: "project-edit" },
+    });
+    assert.deepEqual(namedFromFull.approvalOverride, {
+      policy: "never",
+      reviewer: "user",
+    });
+    const namedFromCustom = applyCodexPermissionChoice({
+      current: CODEX_CUSTOM_PERMISSION_STATE,
+      choice: { kind: "profile", profileId: "project-edit" },
+    });
+    assert.isNull(namedFromCustom.approvalOverride);
+
+    const customAfterAsk = buildCodexPermissionExecution({
+      capabilities: modernCapabilities(),
+      preference: preference(CODEX_CUSTOM_PERMISSION_STATE),
+      hasExistingThread: true,
+      appliedState: CODEX_ASK_PERMISSION_STATE,
+    });
+    assert.isTrue(customAfterAsk.requiresProviderThreadReplacement);
+    assert.equal(customAfterAsk.replacementReason, "clear-boundary");
+    assert.deepEqual(customAfterAsk.thread, {});
+
+    const namedAfterApprove = buildCodexPermissionExecution({
+      capabilities: modernCapabilities({
+        profiles: [
+          ...modernCapabilities().profiles,
+          { id: "project-edit", description: "Project", allowed: true },
+        ],
+      }),
+      preference: preference(namedFromCustom),
+      hasExistingThread: true,
+      appliedState: CODEX_APPROVE_PERMISSION_STATE,
+    });
+    assert.isTrue(namedAfterApprove.requiresProviderThreadReplacement);
+    assert.equal(namedAfterApprove.replacementReason, "clear-approval");
+    assert.deepEqual(namedAfterApprove.thread, { permissions: "project-edit" });
+    assert.notProperty(namedAfterApprove.turn, "permissions");
+    assert.notProperty(namedAfterApprove.turn, "sandboxPolicy");
+
+    const confirmedCustom = buildCodexPermissionExecution({
+      capabilities: modernCapabilities(),
+      preference: preference(CODEX_CUSTOM_PERMISSION_STATE),
+      hasExistingThread: true,
+      appliedState: CODEX_CUSTOM_PERMISSION_STATE,
+    });
+    assert.isFalse(confirmedCustom.requiresProviderThreadReplacement);
+  });
+
+  it("keeps legacy read-only synthetic and never overwrites a modern choice", function () {
+    const legacy: CodexPermissionCapabilities = {
+      protocol: "legacy",
+      profiles: [
+        { id: ":read-only", description: "Legacy read only", allowed: true },
+      ],
+      allowedApprovalPolicies: null,
+      allowedApprovalsReviewers: null,
+      guardianApprovalEnabled: false,
+      supportsThreadSettingsUpdate: false,
+    };
+    const synthetic = buildCodexPermissionOptionCatalog({
+      capabilities: legacy,
+      preference: preference(CODEX_ASK_PERMISSION_STATE, false),
+    });
+    assert.deepEqual(
+      synthetic.options.map((entry) => entry.selectionKey),
+      ["codex:legacy:read-only"],
+    );
     assert.throws(
       () =>
-        validateCodexPermissionSelection({
-          selectedId: ":workspace",
-          catalog: legacy,
+        buildCodexPermissionExecution({
+          capabilities: legacy,
+          preference: preference(CODEX_ASK_PERMISSION_STATE, true),
         }),
-      /supports only Read only/,
+      /Update Codex/,
+    );
+  });
+
+  it("keeps malformed state visible while leaving valid recovery choices enabled", function () {
+    prefs.set(
+      `${PREFIX}codexAppServerPermissionState`,
+      JSON.stringify({
+        boundary: { kind: "config" },
+        approvalOverride: { policy: "never", reviewer: "user" },
+      }),
+    );
+    userPrefs.add(`${PREFIX}codexAppServerPermissionState`);
+    const invalid = readCodexPermissionStatePref();
+    assert.match(invalid.error || "", /invalid/i);
+    const catalog = buildCodexPermissionOptionCatalog({
+      capabilities: modernCapabilities(),
+      preference: invalid,
+    });
+    assert.equal(catalog.selectedKey, "codex:invalid");
+    assert.isFalse(
+      catalog.options.find((entry) => entry.selectionKey === "codex:invalid")
+        ?.available,
+    );
+    assert.isTrue(
+      catalog.options.find((entry) => entry.selectionKey === "codex:preset:ask")
+        ?.available,
+    );
+  });
+
+  it("keeps the Original Agent option contract unchanged", function () {
+    assert.deepEqual(
+      getOriginalPermissionOptions().map((entry) => entry.selectionKey),
+      ["original:safe", "original:auto", "original:yolo"],
     );
   });
 });

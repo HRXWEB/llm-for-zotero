@@ -331,8 +331,7 @@ export async function runCodexAppServerConnectionTest(params: {
         const threadResp = await proc.sendRequest("thread/start", {
           model: params.modelName || undefined,
           ephemeral: true,
-          approvalPolicy: "never",
-          ...permissionExecution.threadParams,
+          ...permissionExecution.thread,
           ...(cwd ? { cwd } : {}),
         });
         const threadId = extractCodexAppServerThreadId(threadResp);
@@ -343,6 +342,7 @@ export async function runCodexAppServerConnectionTest(params: {
         const turnResp = await proc.sendRequest("turn/start", {
           threadId,
           input: [{ type: "text", text: "Say OK" }],
+          ...permissionExecution.turn,
         });
         const turnId = extractCodexAppServerTurnId(turnResp);
         if (!turnId) {

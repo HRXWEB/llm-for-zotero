@@ -47,6 +47,8 @@ declare namespace _ZoteroTypes {
       "codexAppServerNativeApprovalsEnabled": boolean;
       "codexAppServerApprovalsReviewer": string;
       "codexAppServerPermissionProfile": string;
+      "codexAppServerPermissionState": string;
+      "codexAppServerPermissionStateMigrationDone": boolean;
       "codexNativeSkillMode": string;
       "codexNativeSkillRoutingMode": string;
       "codexAppServerGlobalConversationMap": string;

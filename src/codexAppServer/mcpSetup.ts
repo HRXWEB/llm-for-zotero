@@ -543,8 +543,7 @@ export async function probeCodexZoteroMcpThroughAppServer(
   try {
     const threadResult = await proc.sendRequest("thread/start", {
       ephemeral: true,
-      approvalPolicy: "never",
-      ...permissionExecution.threadParams,
+      ...permissionExecution.thread,
       ...(cwd ? { cwd } : {}),
       config: threadConfig.config,
     });
