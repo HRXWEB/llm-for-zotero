@@ -107,6 +107,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
       (capturedBody?.tools as Array<Record<string, unknown>>)[0]?.name,
       "read_paper",
     );
+    assert.equal(capturedBody?.max_tokens, 8192);
     const serializedSystem = Array.isArray(capturedBody?.system)
       ? (capturedBody.system as Array<{ text?: string }>)
           .map((entry) => entry.text || "")

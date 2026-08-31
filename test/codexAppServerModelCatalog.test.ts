@@ -123,7 +123,7 @@ describe("Codex app-server model catalog", function () {
           displayModelLabel: "GPT-5.5 Fast",
           authMode: "codex_app_server",
           providerProtocol: "codex_responses",
-          advanced: { temperature: 0.3, maxTokens: 4096 },
+          advanced: { temperature: 0.3, maxTokens: 8192 },
         },
         {
           entryId: "codex_app_server::gpt-5.5-thinking",
@@ -133,7 +133,7 @@ describe("Codex app-server model catalog", function () {
           displayModelLabel: "gpt-5.5-thinking",
           authMode: "codex_app_server",
           providerProtocol: "codex_responses",
-          advanced: { temperature: 0.3, maxTokens: 4096 },
+          advanced: { temperature: 0.3, maxTokens: 8192 },
         },
       ],
     );

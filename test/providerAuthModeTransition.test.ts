@@ -182,7 +182,7 @@ describe("provider auth-mode transitions", function () {
       assert.equal(next.authMode, "api_key");
       if (next.authMode !== "api_key") assert.fail("expected API provider");
       assert.equal(next.models[0].temperature, 0.3);
-      assert.equal(next.models[0].maxTokens, 4096);
+      assert.equal(next.models[0].maxTokens, 8192);
       assert.isUndefined(next.models[0].inputTokenCap);
       assert.isUndefined(next.models[0].profileOverride);
     }

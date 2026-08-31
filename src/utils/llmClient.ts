@@ -2787,7 +2787,7 @@ export function buildOllamaChatPayload(params: {
   temperature?: number;
   /**
    * Output cap. Ollama's own default is unlimited (-1); a thinking model that
-   * inherits the plugin's 4096 default can spend the whole budget reasoning and
+   * inherits the plugin's 8192 default can spend the whole budget reasoning and
    * return empty content, so callers pass -1 unless the user set a value.
    */
   numPredict?: number;
@@ -2824,7 +2824,7 @@ export function buildOllamaChatPayload(params: {
 }
 
 /**
- * Ollama's own `num_predict` default is -1 (unlimited). The plugin's 4096
+ * Ollama's own `num_predict` default is -1 (unlimited). The plugin's 8192
  * default is a hazard here: a thinking model can spend the entire budget
  * reasoning and return empty content. Treat the untouched plugin default as
  * "unset" and let the server decide; any other value is the user's explicit

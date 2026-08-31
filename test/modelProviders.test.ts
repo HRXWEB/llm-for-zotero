@@ -209,7 +209,7 @@ describe("modelProviders", function () {
             id: "default",
             model: "gemma3:4b",
             temperature: 0.3,
-            maxTokens: 4096,
+            maxTokens: 8192,
           },
           {
             id: "legacy-custom",
@@ -236,6 +236,53 @@ describe("modelProviders", function () {
     assert.isTrue(entries[2].advanced.maxTokensExplicit);
     assert.equal(entries[3].advanced.maxTokens, 200000);
     assert.isTrue(entries[3].advanced.maxTokensExplicit);
+  });
+
+  it("migrates the inherited 4096 max-token default without changing explicit choices", function () {
+    const prefs = globalThis.Zotero.Prefs as {
+      set: (key: string, value: unknown, global?: boolean) => void;
+      get: (key: string, global?: boolean) => unknown;
+    };
+    prefs.set(
+      `${config.prefsPrefix}.modelProviderGroups`,
+      JSON.stringify([
+        {
+          id: "provider",
+          apiBase: "https://api.anthropic.com/v1",
+          apiKey: "test",
+          authMode: "api_key",
+          providerProtocol: "anthropic_messages",
+          models: [
+            {
+              id: "inherited",
+              model: "claude-sonnet-4-6",
+              temperature: 0.3,
+              maxTokens: 4096,
+            },
+            {
+              id: "explicit",
+              model: "claude-haiku-4-5",
+              temperature: 0.3,
+              maxTokens: 4096,
+              maxTokensExplicit: true,
+            },
+          ],
+        },
+      ]),
+      true,
+    );
+    prefs.set(
+      `${config.prefsPrefix}.modelProviderGroupsMigrationVersion`,
+      7,
+      true,
+    );
+
+    const entries = getRuntimeModelEntries();
+
+    assert.equal(entries[0].advanced.maxTokens, 8192);
+    assert.isUndefined(entries[0].advanced.maxTokensExplicit);
+    assert.equal(entries[1].advanced.maxTokens, 4096);
+    assert.isTrue(entries[1].advanced.maxTokensExplicit);
   });
 
   it("notifies open consumers after provider settings change", function () {
@@ -1006,7 +1053,7 @@ describe("modelProviders", function () {
     assert.equal(entries[1].catalogAvailability, "available");
     assert.equal(entries[1].providerLabel, "Codex Direct (Legacy)");
     assert.equal(entries[1].advanced.temperature, 0.3);
-    assert.equal(entries[1].advanced.maxTokens, 4096);
+    assert.equal(entries[1].advanced.maxTokens, 8192);
     assert.isUndefined(entries[1].advanced.inputTokenCap);
     assert.notInclude(
       entries.map((entry) => entry.model),

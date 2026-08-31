@@ -352,7 +352,7 @@ describe("ollama native protocol", function () {
         serializedMessages.split(PAPER_CITATION_CONTRACT).length - 1,
         1,
       );
-      // The plugin's 4096 default would let a thinking model spend the whole
+      // The plugin's 8192 default would let a thinking model spend the whole
       // budget reasoning and return empty content.
       assert.equal(
         (body.options as Record<string, unknown>)?.num_predict,

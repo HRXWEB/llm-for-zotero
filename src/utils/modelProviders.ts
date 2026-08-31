@@ -170,7 +170,8 @@ const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION_PREF_KEY =
   "modelProviderGroupsMigrationVersion";
 const LAST_USED_MODEL_ENTRY_ID_PREF_KEY = "lastUsedModelEntryId";
 const LEGACY_LAST_MODEL_PROFILE_PREF_KEY = "lastUsedModelProfile";
-const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 7;
+const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 8;
+const PREVIOUS_DEFAULT_MAX_TOKENS = 4096;
 const modelProviderGroupListeners = new Set<() => void>();
 
 function getZoteroPrefs(): ZoteroPrefsAPI | null {
@@ -404,7 +405,10 @@ function normalizeWebChatTargetRows(models: unknown): WebChatTargetRow[] {
   return rows;
 }
 
-function normalizeGroup(group: unknown): ModelProviderGroup | null {
+function normalizeGroup(
+  group: unknown,
+  migrateStoredDefaults: boolean,
+): ModelProviderGroup | null {
   if (!group || typeof group !== "object") return null;
   const rawGroup = group as RawProviderGroup;
 
@@ -454,7 +458,9 @@ function normalizeGroup(group: unknown): ModelProviderGroup | null {
 
   const models = Array.isArray(rawGroup.models)
     ? rawGroup.models
-        .map((entry) => normalizeGroupModel(entry, authMode))
+        .map((entry) =>
+          normalizeGroupModel(entry, authMode, migrateStoredDefaults),
+        )
         .filter((entry): entry is ModelProviderModel => Boolean(entry))
     : [];
   const apiBase = normalizeApiBase(normalizeString(rawGroup.apiBase));
@@ -537,13 +543,13 @@ function hasSelectableModelEntryId(
 
 function normalizeAndCollapseModelProviderGroups(
   raw: unknown[],
-  migrateStoredDirectGroups: boolean,
+  migrateStoredGroups: boolean,
 ): ModelProviderGroup[] {
   const legacySelection = resolveLegacyCodexDirectSelection(raw);
   const groups: ModelProviderGroup[] = [];
   let directGroup: CodexDirectProviderGroup | null = null;
   for (const value of raw) {
-    const group = normalizeGroup(value);
+    const group = normalizeGroup(value, migrateStoredGroups);
     if (!group) continue;
     if (group.authMode !== "codex_auth") {
       groups.push(group);
@@ -570,7 +576,7 @@ function normalizeAndCollapseModelProviderGroups(
       directGroup.models.push({ id: createId("model"), model: selectedModel });
     }
   }
-  if (migrateStoredDirectGroups) {
+  if (migrateStoredGroups) {
     const lastUsedEntryId = getStringPref(LAST_USED_MODEL_ENTRY_ID_PREF_KEY);
     const selectedRow = directGroup?.models.find(
       (row) =>
@@ -602,6 +608,7 @@ function normalizePresetIdOverride(
 function normalizeGroupModel(
   model: unknown,
   authMode: ModelProviderAuthMode,
+  migrateStoredDefaults: boolean,
 ): ModelProviderModel | null {
   if (!model || typeof model !== "object") return null;
   const rawModel = model as {
@@ -616,10 +623,17 @@ function normalizeGroupModel(
     profileOverride?: unknown;
   };
   const modelName = normalizeString(rawModel.model);
+  const rawMaxTokens = Number(rawModel.maxTokens);
+  const maxTokens =
+    migrateStoredDefaults &&
+    rawModel.maxTokensExplicit !== true &&
+    rawMaxTokens === PREVIOUS_DEFAULT_MAX_TOKENS
+      ? DEFAULT_MAX_TOKENS
+      : rawMaxTokens;
   const advanced = normalizeAdvancedModelConfig(
     {
       temperature: Number(rawModel.temperature),
-      maxTokens: Number(rawModel.maxTokens),
+      maxTokens,
       maxTokensExplicit:
         typeof rawModel.maxTokensExplicit === "boolean"
           ? rawModel.maxTokensExplicit
@@ -706,11 +720,11 @@ function parseStoredModelProviderGroups(raw: string): ModelProviderGroup[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    const shouldMigrateCodexDirectGroups =
+    const shouldMigrateStoredGroups =
       getMigrationVersion() < MODEL_PROVIDER_GROUPS_MIGRATION_VERSION;
     return normalizeAndCollapseModelProviderGroups(
       parsed,
-      shouldMigrateCodexDirectGroups,
+      shouldMigrateStoredGroups,
     );
   } catch (_err) {
     return [];
