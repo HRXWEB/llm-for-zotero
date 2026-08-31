@@ -3405,7 +3405,6 @@ type CodexNativeTurnCallbacks = Pick<
   | "onItemStarted"
   | "onItemCompleted"
   | "onMcpToolActivity"
-  | "onMcpConfirmationRequest"
   | "onMcpSetupWarning"
   | "onDiagnostics"
   | "onApprovalRequest"
@@ -3510,23 +3509,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
           "sending",
         );
       }
-    },
-    onMcpConfirmationRequest: async ({ requestId, action }) => {
-      if (!isLive())
-        return { approved: false, reason: "conversation_not_live" };
-      flushResponseStream("event");
-      setStatusSafely(
-        action.mode === "review"
-          ? "Codex is waiting for your Zotero review"
-          : "Codex is waiting for your Zotero approval",
-        "sending",
-      );
-      codexActivityTrace?.noteMcpConfirmationRequired(requestId, action);
-      const resolution = await showNativeMcpActionCard(body, requestId, action);
-      if (!isLive())
-        return { approved: false, reason: "conversation_not_live" };
-      codexActivityTrace?.noteMcpConfirmationResolved(requestId, resolution);
-      return resolution;
     },
     onMcpSetupWarning: (message) => {
       if (!isLive()) return;

@@ -5451,7 +5451,8 @@ describe("agentTrace render", function () {
           callId: "call-script",
           name: "zotero_script",
           args: {
-            mode: "read",
+            access: "library",
+            effect: "read",
             script: "const secretScript = 'do not show';",
             metadata: "public metadata should remain",
             nested: {

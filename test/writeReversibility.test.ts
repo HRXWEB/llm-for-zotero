@@ -1,6 +1,6 @@
 import { assert } from "chai";
-import { normalizeAgentLibraryWriteMode } from "../src/shared/agentLibraryWriteMode";
-import { setAgentLibraryWriteMode } from "../src/agent/libraryWriteMode";
+import { normalizeOriginalAgentPermissionMode } from "../src/shared/originalAgentPermissionMode";
+import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createLibrarySettingsTool } from "../src/agent/tools/write/librarySettings";
@@ -14,7 +14,11 @@ import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 describe("mutation-plan confirmation policy", function () {
   const originalZotero = globalThis.Zotero;
   const context = {
-    request: { conversationKey: 1, libraryID: 1 },
+    request: {
+      conversationKey: 1,
+      libraryID: 1,
+      userText: "update the requested setting and write the result",
+    },
     item: null,
     currentAnswerText: "",
     modelName: "test",
@@ -93,23 +97,23 @@ describe("mutation-plan confirmation policy", function () {
     }
   });
 
-  it("auto reviews partial and irreversible plans", async function () {
+  it("auto executes clear partial and irreversible plans", async function () {
     for (const reversibility of ["partial", "none"] as const) {
       const prepared = await prepare({
         mode: "auto",
         journal: true,
         plan: { effect: "write", reversibility },
       });
-      assert.equal(prepared.kind, "confirmation", reversibility);
+      assert.equal(prepared.kind, "result", reversibility);
     }
   });
 
   it("defaults a future write without a planner to irreversible", async function () {
     const prepared = await prepare({ mode: "auto", journal: true });
-    assert.equal(prepared.kind, "confirmation");
+    assert.equal(prepared.kind, "result");
   });
 
-  it("honours an operation-specific confirmation requirement even in yolo", async function () {
+  it("does not let a tool override yolo with its own prompt", async function () {
     const prepared = await prepare({
       mode: "yolo",
       journal: true,
@@ -120,7 +124,7 @@ describe("mutation-plan confirmation policy", function () {
         reason: "Resume an interrupted batch only after reviewing its state.",
       },
     });
-    assert.equal(prepared.kind, "confirmation");
+    assert.equal(prepared.kind, "result");
   });
 
   it("applies the global write mode to library settings", async function () {
@@ -244,29 +248,27 @@ describe("mutation-plan confirmation policy", function () {
     }
   });
 
-  it("auto falls back to explicit confirmation with a recovery warning", async function () {
+  it("blocks auto when durable authorization cannot be recorded", async function () {
     const prepared = await prepare({
       mode: "auto",
       journal: false,
       plan: { effect: "write", reversibility: "full" },
     });
-    assert.equal(prepared.kind, "confirmation");
-    if (prepared.kind === "confirmation") {
-      assert.include(prepared.action.description, "Recovery warning");
-      const execution = await prepared.execute();
-      assert.isTrue(execution.result.ok);
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind === "result") {
+      assert.isFalse(prepared.execution.result.ok);
     }
   });
 
   describe("stored preference normalization", function () {
     it("defaults to auto", function () {
-      assert.equal(normalizeAgentLibraryWriteMode(undefined), "auto");
-      assert.equal(normalizeAgentLibraryWriteMode("nonsense"), "auto");
+      assert.equal(normalizeOriginalAgentPermissionMode(undefined), "auto");
+      assert.equal(normalizeOriginalAgentPermissionMode("nonsense"), "auto");
     });
 
     it("honours explicit safe and yolo modes", function () {
-      assert.equal(normalizeAgentLibraryWriteMode("safe"), "safe");
-      assert.equal(normalizeAgentLibraryWriteMode("yolo"), "yolo");
+      assert.equal(normalizeOriginalAgentPermissionMode("safe"), "safe");
+      assert.equal(normalizeOriginalAgentPermissionMode("yolo"), "yolo");
     });
 
     it("persists auto without silently converting it to safe", function () {
@@ -279,7 +281,7 @@ describe("mutation-plan confirmation policy", function () {
         },
       } as never;
 
-      setAgentLibraryWriteMode("auto");
+      setOriginalAgentPermissionMode("auto");
 
       assert.equal(writes.length, 1);
       assert.equal(writes[0]?.[1], "auto");

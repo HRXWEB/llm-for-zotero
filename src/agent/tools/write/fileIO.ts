@@ -27,7 +27,6 @@ type FileIOInput = {
   encoding?: string;
   offset?: number;
   length?: number;
-  allowOverwrite?: boolean;
 };
 
 type FileIOAction = FileIOInput["action"];
@@ -683,10 +682,6 @@ export function createFileIOTool(): AgentWriteToolDefinition<
       };
     },
 
-    applyConfirmation(input) {
-      return ok({ ...input, allowOverwrite: true });
-    },
-
     async execute(input, context) {
       const paperSourceMetadata = buildCodexMineruPaperSourceMetadata(
         input.filePath,
@@ -806,30 +801,11 @@ export function createFileIOTool(): AgentWriteToolDefinition<
       const nextContent = input.content || "";
       const nextBytes = new TextEncoder().encode(nextContent);
       const nextChecksum = await sha256Bytes(nextBytes);
-      if (
-        (await fileExists(input.filePath)) === true &&
-        !input.allowOverwrite
-      ) {
-        return {
-          content: {
-            action: "write",
-            filePath: input.filePath,
-            error:
-              "Refusing to overwrite an existing file without confirmation",
-          },
-          effect: "none",
-        };
-      }
       return executeExternalMutation({
         context,
         toolName: "file_io",
         plan: async () => {
           const existedBeforeWrite = await fileExists(input.filePath);
-          if (existedBeforeWrite === true && !input.allowOverwrite) {
-            throw new Error(
-              "Refusing to overwrite an existing file without confirmation",
-            );
-          }
           const previousBytes =
             existedBeforeWrite === true
               ? await readFileBytes(input.filePath)

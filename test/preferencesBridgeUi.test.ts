@@ -82,30 +82,12 @@ describe("bridge settings UI behavior", function () {
 
     try {
       assert.equal(t("Original Agent Mode"), "原生 Agent 模式");
-      assert.equal(t("Library permissions"), "文献库权限");
+      assert.equal(t("Permission mode"), "权限模式");
       assert.equal(
         t(
-          "Review every library change before it happens; batch jobs pause on each page.",
+          "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.",
         ),
-        "每次更改文献库前都需审核；批处理任务会在每一页暂停。",
-      );
-      assert.equal(
-        t(
-          "Apply reversible library changes automatically and ask before irreversible changes.",
-        ),
-        "自动应用可撤销的文献库更改，并在不可撤销的更改前询问。",
-      );
-      assert.equal(
-        t(
-          "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.",
-        ),
-        "允许原生 Agent 自主判断并应用更改，包括不可撤销的更改和整个文献库的批处理任务。",
-      );
-      assert.equal(
-        t(
-          "This setting controls only Original Agent library actions. Original Agent, Claude Code, and Codex each use separate permission controls; changing one does not affect the other two. Reversible changes in all three Original Agent permission modes are recorded and can be reverted from Agent history.",
-        ),
-        "此设置仅控制原生 Agent 的文献库操作。原生 Agent、Claude Code 和 Codex 各自使用独立的权限控制；更改任一模式都不会影响另外两种模式。原生 Agent 三种权限模式下的可撤销更改都会被记录，并可从 Agent 历史记录中撤销。",
+        "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。",
       );
     } finally {
       if (previousZotero) {
@@ -134,7 +116,7 @@ describe("bridge settings UI behavior", function () {
     assert.include(originalAgentCard, 'id="__addonRef__-enable-agent-mode"');
     assert.include(
       originalAgentCard,
-      'id="__addonRef__-agent-library-write-mode"',
+      'id="__addonRef__-original-agent-permission-mode"',
     );
     assert.include(originalAgentCard, 'id="__addonRef__-tavily-card"');
   });

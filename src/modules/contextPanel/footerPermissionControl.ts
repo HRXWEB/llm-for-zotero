@@ -1,5 +1,5 @@
 import type { ConversationSystem } from "../../shared/types";
-import type { AgentLibraryWriteMode } from "../../shared/agentLibraryWriteMode";
+import type { OriginalAgentPermissionMode } from "../../shared/originalAgentPermissionMode";
 import type { ClaudePermissionMode } from "../../shared/claudePermissionMode";
 import { t } from "../../utils/i18n";
 import {
@@ -10,9 +10,9 @@ import {
   type PermissionOption,
 } from "../../shared/permissionOptions";
 import {
-  getAgentLibraryWriteMode,
-  setAgentLibraryWriteMode,
-} from "../../agent/libraryWriteMode";
+  getOriginalAgentPermissionMode,
+  setOriginalAgentPermissionMode,
+} from "../../agent/originalAgentPermissionMode";
 import {
   getClaudeBridgeUrl,
   getClaudePermissionModePref,
@@ -88,7 +88,7 @@ type RuntimeMode = "chat" | "agent";
 export function resolvePermissionSurface(params: {
   conversationSystem: ConversationSystem;
   runtimeMode: RuntimeMode;
-  originalSelectedId: AgentLibraryWriteMode;
+  originalSelectedId: OriginalAgentPermissionMode;
   claudeSelectedId: ClaudePermissionMode;
   claudeOptions?: PermissionOption[];
   codexCatalog?: CodexPermissionOptionCatalog;
@@ -178,7 +178,7 @@ export function attachFooterPermissionControl(params: {
       const mode = getOriginalPermissionModeFromSelectionKey(
         option.selectionKey,
       );
-      if (mode) setAgentLibraryWriteMode(mode);
+      if (mode) setOriginalAgentPermissionMode(mode);
       return;
     }
     if (next.kind === "claude") {
@@ -311,7 +311,7 @@ export function attachFooterPermissionControl(params: {
     const common = {
       conversationSystem: provider,
       runtimeMode: params.getRuntimeMode(),
-      originalSelectedId: getAgentLibraryWriteMode(),
+      originalSelectedId: getOriginalAgentPermissionMode(),
       claudeSelectedId: getClaudePermissionModePref(),
     };
     if (provider === "upstream") {

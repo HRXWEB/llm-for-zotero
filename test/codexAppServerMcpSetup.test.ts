@@ -137,10 +137,11 @@ describe("Codex app-server MCP setup", function () {
     const value = (writeCall?.params as { value?: Record<string, unknown> })
       .value;
     assert.equal(value?.url, "http://127.0.0.1:24680/llm-for-zotero/mcp");
-    assert.equal(value?.default_tools_approval_mode, "approve");
+    assert.equal(value?.default_tools_approval_mode, "auto");
     assert.deepEqual(value?.enabled_tools, getZoteroMcpAllowedToolNames());
     assert.include(value?.enabled_tools as string[], "note_write");
-    assert.include(value?.enabled_tools as string[], "run_command");
+    assert.notInclude(value?.enabled_tools as string[], "run_command");
+    assert.notInclude(value?.enabled_tools as string[], "file_io");
     assert.notInclude(
       value?.enabled_tools as string[],
       "zotero_confirm_action",
@@ -150,8 +151,8 @@ describe("Codex app-server MCP setup", function () {
       { approval_mode?: string }
     >;
     assert.equal(toolApprovals.library_search.approval_mode, "approve");
-    assert.equal(toolApprovals.note_write.approval_mode, "approve");
-    assert.equal(toolApprovals.run_command.approval_mode, "approve");
+    assert.equal(toolApprovals.note_write.approval_mode, "auto");
+    assert.notProperty(toolApprovals, "run_command");
     assert.notProperty(toolApprovals, "zotero_confirm_action");
     assert.deepEqual(value?.http_headers, {
       Authorization: `Bearer ${prefStore.get(
@@ -515,7 +516,7 @@ describe("Codex app-server MCP setup", function () {
     );
     assert.equal(
       servers[scoped.serverName].default_tools_approval_mode,
-      "approve",
+      "auto",
     );
     assert.include(servers[scoped.serverName].enabled_tools, "library_search");
     assert.include(servers[scoped.serverName].enabled_tools, "library_read");
@@ -526,12 +527,9 @@ describe("Codex app-server MCP setup", function () {
     assert.include(servers[scoped.serverName].enabled_tools, "note_write");
     assert.equal(
       servers[scoped.serverName].tools.note_write.approval_mode,
-      "approve",
+      "auto",
     );
-    assert.equal(
-      servers[scoped.serverName].tools.run_command.approval_mode,
-      "approve",
-    );
+    assert.notInclude(servers[scoped.serverName].enabled_tools, "run_command");
     assert.notInclude(
       servers[scoped.serverName].enabled_tools,
       "zotero_confirm_action",
@@ -570,7 +568,7 @@ describe("Codex app-server MCP setup", function () {
       config.allowedTools,
       "mcp__llm_for_zotero_profile_dev_one__library_retrieve",
     );
-    assert.include(
+    assert.notInclude(
       config.allowedTools,
       "mcp__llm_for_zotero_profile_dev_one__zotero_script",
     );

@@ -5,6 +5,7 @@ import {
   getZoteroMcpServerName,
   getZoteroMcpServerUrl,
   invokeRegisteredZoteroMcpEndpoint,
+  ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
   ZOTERO_MCP_SERVER_NAME,
   ZOTERO_MCP_SCOPE_HEADER,
 } from "../agent/mcp/server";
@@ -687,7 +688,7 @@ export function buildClaudeZoteroMcpAllowedToolNames(
   return (
     rawPdfMode
       ? getZoteroMcpDirectPdfToolNames()
-      : getZoteroMcpAllowedToolNames()
+      : [...ZOTERO_MCP_SAFE_READ_TOOL_NAMES]
   ).map((toolName) => `mcp__${serverName}__${toolName}`);
 }
 

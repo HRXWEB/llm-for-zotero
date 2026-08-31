@@ -1936,11 +1936,7 @@ describe("durable change journal v2", function () {
       });
       assert.isTrue(validated.ok);
       if (!validated.ok) return;
-      const approved = tool.applyConfirmation?.(validated.value, {}, context);
-      assert.isTrue(approved?.ok);
-      if (!approved?.ok) return;
-
-      const result = (await tool.execute(approved.value, context)).content as {
+      const result = (await tool.execute(validated.value, context)).content as {
         exitCode: number;
       };
       const [action] = await listJournalActions({
@@ -1999,11 +1995,7 @@ describe("durable change journal v2", function () {
       });
       assert.isTrue(validated.ok);
       if (!validated.ok) return;
-      const approved = tool.applyConfirmation?.(validated.value, {}, context);
-      assert.isTrue(approved?.ok);
-      if (!approved?.ok) return;
-
-      const result = (await tool.execute(approved.value, context)).content as {
+      const result = (await tool.execute(validated.value, context)).content as {
         exitCode: number;
       };
       const [action] = await listJournalActions({
@@ -2053,11 +2045,7 @@ describe("durable change journal v2", function () {
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
-    const approved = tool.applyConfirmation?.(validated.value, {}, context);
-    assert.isTrue(approved?.ok);
-    if (!approved?.ok) return;
-
-    await tool.execute(approved.value, context);
+    await tool.execute(validated.value, context);
     assert.deepEqual(
       [...currentBytes],
       [...new TextEncoder().encode("replacement")],
@@ -2096,7 +2084,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "reject an invalid inverse before writing",
       script: [
         "env.addInverse({ version: 1, kind: 'unsupported' });",
@@ -2148,7 +2137,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "retain a snapshot after a bad inverse",
       script: [
         "const item = Zotero.Items.get(92);",
@@ -2216,7 +2206,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "retain a snapshot when a file guard fails",
       script: [
         "const item = Zotero.Items.get(93);",
@@ -2276,7 +2267,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "change tags with a declarative inverse",
       script: [
         "const item = Zotero.Items.get(91);",
@@ -2654,7 +2646,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "privileged",
+      effect: "write",
       description: "set an originally absent preference",
       script: [
         "env.addInverse({ version: 1, kind: 'preference', key: 'export.quickCopy.setting', existed: false });",
@@ -2724,7 +2717,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "change a title while preserving automatic tags",
       script: [
         "const item = Zotero.Items.get(91);",
@@ -3118,7 +3112,7 @@ describe("durable change journal v2", function () {
     );
   });
 
-  it("journals a mutating read-mode Zotero script as irreversible", async function () {
+  it("prevents a library read script from mutating Zotero", async function () {
     let savedTitle = "Before";
     const item = {
       id: 91,
@@ -3137,7 +3131,8 @@ describe("durable change journal v2", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "read",
+      access: "library",
+      effect: "read",
       script:
         "const item = Zotero.Items.get(91); item.setField('title', 'After'); await item.saveTx(); return item.id;",
       description: "A falsely declared read script",
@@ -3146,21 +3141,12 @@ describe("durable change journal v2", function () {
     if (!validated.ok) return;
     const plan = await tool.planMutation?.(validated.value, context);
     assert.deepInclude(plan, {
-      effect: "write",
-      reversibility: "none",
-      requiresConfirmation: true,
+      effect: "none",
+      reversibility: "full",
     });
 
     await tool.execute(validated.value, context);
-    const [action] = await listJournalActions({
-      conversationKey: 77,
-      limit: 1,
-    });
-
-    assert.equal(savedTitle, "After");
-    assert.equal(action.toolName, "zotero_script");
-    assert.equal(action.status, "irreversible");
-    assert.equal(action.steps[0].operation, "zotero_script");
+    assert.equal(savedTitle, "Before");
   });
 
   it("skips stale metadata, note, file, and created-item inverses", async function () {

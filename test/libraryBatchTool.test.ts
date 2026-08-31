@@ -116,7 +116,7 @@ describe("library_batch", function () {
     assert.include(result.error, "auto_tag");
   });
 
-  it("refuses in safe mode and says where per-page review lives", async function () {
+  it("keeps permission policy out of the direct batch executor", async function () {
     installMode("safe");
     const tool = makeTool();
     const validated = tool.validate({
@@ -126,15 +126,9 @@ describe("library_batch", function () {
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
 
-    let message = "";
-    try {
-      await tool.execute(validated.value, context);
-      assert.fail("expected safe mode to refuse");
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-    assert.include(message, "yolo");
-    assert.include(message, "/auto_tag", "the user needs somewhere to go");
+    const output = (await tool.execute(validated.value, context))
+      .content as Record<string, unknown>;
+    assert.equal(output.appliedCount, 42);
   });
 
   it("runs the job in yolo and reports real counts", async function () {

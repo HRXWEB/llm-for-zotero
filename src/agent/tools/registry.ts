@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import { isAgentChangeJournalAvailable } from "../store/changeJournal";
 import { isMalformedToolArgumentsDiagnostic } from "../toolArgumentDiagnostics";
-import { getAgentLibraryWriteMode } from "../libraryWriteMode";
+import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import {
   ActionContractService,
   type PreparedActionExecution,
@@ -22,6 +22,10 @@ import {
   createFallbackToolReceipts,
   createUnverifiedReceipt,
 } from "../contracts/actionEvaluation";
+import { hasExplicitNoWriteConstraint } from "../authorization/policy";
+import { authorizeOriginalAction } from "../authorization/policy";
+import { buildActionProposal } from "../authorization/proposal";
+import type { ActionProposal } from "../authorization/types";
 
 function createSyntheticErrorResult(
   call: AgentToolCall,
@@ -56,6 +60,36 @@ function createSyntheticErrorResult(
 
 function createRequestId(): string {
   return `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createProposalConfirmationAction(
+  proposal: ActionProposal,
+): import("../types").AgentPendingAction {
+  return {
+    toolName: proposal.toolName,
+    title: `Review ${proposal.toolName.replace(/_/g, " ")}`,
+    description: proposal.summary,
+    confirmLabel: "Allow once",
+    cancelLabel: "Cancel",
+    fields: [
+      {
+        type: "text",
+        id: "operation",
+        label: "Operation",
+        value: proposal.operation,
+      },
+      ...(proposal.targets.length
+        ? [
+            {
+              type: "text" as const,
+              id: "targets",
+              label: "Exact targets",
+              value: proposal.targets.join("\n"),
+            },
+          ]
+        : []),
+    ],
+  };
 }
 
 function withRecoveryWarning(
@@ -114,28 +148,6 @@ function normalizeExecutionOutput(value: AgentToolExecutionOutput<any>): {
   };
 }
 
-/**
- * Tools that change the library unattended and therefore need `yolo`.
- *
- * Deliberately a short, explicit list rather than "every write tool": the
- * ordinary write tools already stop at a confirmation card, so gating them
- * here would only duplicate a control the user already has. What needs a mode
- * is the work that runs *without* a card once approved.
- */
-const YOLO_ONLY_TOOLS = new Set(["library_batch"]);
-
-function refuseForLibraryWriteMode(
-  tool: AgentToolDefinition<any, any>,
-  options: PreparedToolExecutionOptions,
-): string | null {
-  if (!YOLO_ONLY_TOOLS.has(tool.spec.name)) return null;
-  // Only the model path is gated. The actions subsystem and the public API
-  // are driven by an explicit user gesture, which is its own consent.
-  if (options.callerKind && options.callerKind !== "model") return null;
-  if (getAgentLibraryWriteMode() === "yolo") return null;
-  return `${tool.spec.name} runs unattended and requires the agent library write mode to be "yolo". Change it in the plugin preferences, or use the slash-command surface, which reviews each page before applying it.`;
-}
-
 export class AgentToolRegistry {
   private readonly tools = new Map<string, AgentToolDefinition<any, any>>();
 
@@ -157,6 +169,15 @@ export class AgentToolRegistry {
     return {
       version: 2,
       id,
+      hardConstraints: hasExplicitNoWriteConstraint(request.userText || "")
+        ? [
+            {
+              kind: "no_write",
+              description:
+                "The user explicitly prohibited changes or execution in this request.",
+            },
+          ]
+        : [],
       writeDisposition:
         request.classifiedIntent?.writeDisposition ||
         (intents.length ? "required" : "none"),
@@ -192,6 +213,7 @@ export class AgentToolRegistry {
         failureReasons: [],
       })),
       appliedReceiptKeys: [],
+      authorizationGrants: [],
       updatedAt: Date.now(),
     };
   }
@@ -259,18 +281,8 @@ export class AgentToolRegistry {
         `${call.name} is not available for this request`,
       );
     }
-    // Enforce the library write mode here, not in the tool listing.
-    //
-    // `exposure` is checked when listing tools and deliberately NOT here --
-    // seventeen internal tools are called by name through this method by the
-    // actions subsystem, the slash commands and the public runAction API, and
-    // a test asserts they stay reachable. So this is a separate gate keyed on
-    // the caller being the model, and it lives at the one point every backend
-    // (in-plugin runtime, MCP, the external bridge) passes through.
-    const modeRefusal = refuseForLibraryWriteMode(tool, options);
-    if (modeRefusal) {
-      return createSyntheticErrorResult(call, modeRefusal);
-    }
+    // The Original Agent permission policy is enforced after validation from
+    // the exact proposal. Tool exposure is not an authorization boundary.
     if (isMalformedToolArgumentsDiagnostic(call.arguments)) {
       return createSyntheticErrorResult(
         call,
@@ -353,7 +365,7 @@ export class AgentToolRegistry {
       },
       prepared: PreparedActionExecution | undefined = preparedAction,
     ) => {
-      const receipts =
+      let receipts =
         prepared && this.actionContracts
           ? this.actionContracts.finalize(
               context.request.actionContract,
@@ -367,6 +379,20 @@ export class AgentToolRegistry {
               input: validation.value,
               ...params,
             });
+      if (
+        tool.spec.mutability === "write" &&
+        !receipts.some((receipt) => receipt.operation !== "read_full")
+      ) {
+        receipts = [
+          ...receipts,
+          ...createFallbackToolReceipts({
+            toolName: call.name,
+            mutability: tool.spec.mutability,
+            input: validation.value,
+            ...params,
+          }),
+        ];
+      }
       if (context.request.actionProgress && this.actionContracts) {
         this.actionContracts.applyReceipts(
           context.request.actionProgress,
@@ -397,6 +423,91 @@ export class AgentToolRegistry {
           },
         },
       });
+      if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
+        return lifecycleError();
+      }
+      const executionProposal = buildActionProposal({
+        tool,
+        input: resolvedInput,
+        plan: mutationPlan,
+        intentBinding: {
+          conversationKey: context.request.conversationKey,
+          conversationGeneration: context.request.conversationGeneration,
+          actionContractId: context.request.actionContract?.id,
+          userText: context.request.userText,
+        },
+      });
+      const hasExternalEffect = executionProposal.effects.some((effect) =>
+        ["create", "modify", "delete", "execute", "egress"].includes(effect),
+      );
+      let stagedGrant:
+        | NonNullable<
+            NonNullable<
+              AgentToolContext["request"]["actionProgress"]
+            >["authorizationGrants"]
+          >[number]
+        | undefined;
+      if (callerKind === "model" && hasExternalEffect && context.runId) {
+        const progress = context.request.actionProgress;
+        if (!progress || !context.checkpointActionProgress) {
+          return {
+            tool,
+            input: resolvedInput,
+            result: {
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              actionReceipts: finalizeReceipts({
+                ok: false,
+                reason:
+                  "Action authorization could not be persisted before execution.",
+              }),
+              content: {
+                error:
+                  "Action authorization could not be persisted before execution.",
+              },
+            },
+          };
+        }
+        const grants = (progress.authorizationGrants ||= []);
+        stagedGrant = {
+          proposalDigest: executionProposal.payloadDigest,
+          toolName: call.name,
+          authority:
+            authorization.kind === "confirm"
+              ? "safe_confirmation"
+              : authorization.kind === "execute" &&
+                  authorization.authority === "yolo"
+                ? "yolo"
+                : "auto_policy",
+          status: "staged",
+          createdAt: Date.now(),
+        };
+        grants.push(stagedGrant);
+        try {
+          await context.checkpointActionProgress();
+        } catch (error) {
+          grants.splice(grants.indexOf(stagedGrant), 1);
+          return {
+            tool,
+            input: resolvedInput,
+            result: {
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              actionReceipts: finalizeReceipts({
+                ok: false,
+                reason: error instanceof Error ? error.message : String(error),
+              }),
+              content: {
+                error: `Action authorization persistence failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              },
+            },
+          };
+        }
+      }
       const execute = async () => {
         if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
           return lifecycleError();
@@ -450,6 +561,7 @@ export class AgentToolRegistry {
           const executionOutput = normalizeExecutionOutput(
             await tool.execute(resolvedInput, executionContext),
           );
+          if (stagedGrant) stagedGrant.status = "executed";
           if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
             return lifecycleError();
           }
@@ -509,6 +621,7 @@ export class AgentToolRegistry {
             },
           };
         } catch (error) {
+          if (stagedGrant) stagedGrant.status = "failed";
           if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
             return lifecycleError();
           }
@@ -605,27 +718,51 @@ export class AgentToolRegistry {
         `Write blocked: ${call.name} has no configured Action Contract verifier.`,
       );
     }
-    const writeMode = getAgentLibraryWriteMode();
+    const writeMode = getOriginalAgentPermissionMode();
     const journalUnavailable =
       mutationPlan.effect === "write" && !isAgentChangeJournalAvailable();
-    if (journalUnavailable && writeMode === "yolo") {
+    if (journalUnavailable) {
       return createSyntheticErrorResult(
         call,
-        `${call.name} was refused because the durable change journal is unavailable. Unattended writes cannot run without restart-safe recovery.`,
+        `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
       );
     }
-    const planRequiresConfirmation =
-      mutationPlan.requiresConfirmation === true ||
-      (mutationPlan.effect === "write" &&
-        (writeMode === "safe" ||
-          (writeMode === "auto" &&
-            (mutationPlan.reversibility !== "full" || journalUnavailable))));
+    const proposal = buildActionProposal({
+      tool,
+      input: validation.value,
+      plan: mutationPlan,
+      intentBinding: {
+        conversationKey: context.request.conversationKey,
+        conversationGeneration: context.request.conversationGeneration,
+        actionContractId: context.request.actionContract?.id,
+        userText: context.request.userText,
+      },
+    });
+    const authorization =
+      callerKind === "model"
+        ? authorizeOriginalAction(proposal, {
+            mode: writeMode,
+            userText: context.request.userText || "",
+            hasExplicitNoWrite:
+              context.request.actionContract?.hardConstraints?.some(
+                (constraint) => constraint.kind === "no_write",
+              ) || hasExplicitNoWriteConstraint(context.request.userText || ""),
+          })
+        : { kind: "execute" as const, authority: "auto_policy" as const };
+    if (authorization.kind === "block") {
+      return createSyntheticErrorResult(call, authorization.reason);
+    }
+    const planRequiresConfirmation = authorization.kind === "confirm";
     const shouldRequireConfirmation =
-      options.forceConfirmation && tool.createPendingAction
+      callerKind !== "mcp" &&
+      options.forceConfirmation &&
+      tool.createPendingAction
         ? true
-        : mutationPlan.effect === "write"
+        : callerKind === "model"
           ? planRequiresConfirmation
-          : toolWantsConfirmation;
+          : callerKind === "mcp"
+            ? false
+            : toolWantsConfirmation;
     const acceptsInheritedApproval =
       shouldRequireConfirmation &&
       !journalUnavailable &&
@@ -648,12 +785,11 @@ export class AgentToolRegistry {
         ),
       };
     }
-    if (shouldRequireConfirmation && tool.createPendingAction) {
+    if (shouldRequireConfirmation) {
       const requestId = createRequestId();
-      const pendingAction = await tool.createPendingAction(
-        validation.value,
-        context,
-      );
+      const pendingAction = tool.createPendingAction
+        ? await tool.createPendingAction(validation.value, context)
+        : createProposalConfirmationAction(proposal);
       return {
         kind: "confirmation",
         requestId,
@@ -681,13 +817,6 @@ export class AgentToolRegistry {
         }),
       };
     }
-    if (shouldRequireConfirmation) {
-      return createSyntheticErrorResult(
-        call,
-        `${call.name} requires confirmation for this mutation plan, but the tool did not provide a confirmation action. The write was not executed.`,
-      );
-    }
-
     return {
       kind: "result",
       execution: await runWithInput(validation.value),

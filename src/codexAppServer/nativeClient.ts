@@ -25,16 +25,13 @@ import {
 } from "../shared/instructionContracts";
 import {
   addZoteroMcpToolActivityObserver,
-  addZoteroMcpConfirmationHandler,
   ZOTERO_MCP_SERVER_NAME,
   ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
-  ZOTERO_MCP_WRITE_TOOL_NAMES,
   getZoteroMcpDirectPdfToolNames,
   registerScopedZoteroMcpScope,
   resolveConversationScopeToken,
   setActiveZoteroMcpScope,
   type ZoteroMcpActiveScope,
-  type ZoteroMcpConfirmationRequest,
   type ZoteroMcpToolActivityEvent,
 } from "../agent/mcp/server";
 import {
@@ -241,22 +238,10 @@ const DISALLOWED_ZOTERO_MCP_AUTO_APPROVAL_TOOLS = new Set([
   "zotero_script",
   ...DISALLOWED_ZOTERO_MCP_APPROVAL_MARKERS,
 ]);
-const LEGACY_ZOTERO_MCP_AUTO_APPROVAL_TOOL_NAMES = [
-  "query_library",
-  "read_paper",
-  "search_paper",
-  "view_pdf_pages",
-  "search_literature_online",
-  "edit_current_note",
-  "import_identifiers",
-  "update_metadata",
-] as const;
 const TRUSTED_ZOTERO_MCP_AUTO_APPROVAL_TOOL_NAMES = new Set<string>(
-  [
-    ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
-    ...ZOTERO_MCP_WRITE_TOOL_NAMES,
-    ...LEGACY_ZOTERO_MCP_AUTO_APPROVAL_TOOL_NAMES,
-  ].filter((name) => !DISALLOWED_ZOTERO_MCP_AUTO_APPROVAL_TOOLS.has(name)),
+  [...ZOTERO_MCP_SAFE_READ_TOOL_NAMES].filter(
+    (name) => !DISALLOWED_ZOTERO_MCP_AUTO_APPROVAL_TOOLS.has(name),
+  ),
 );
 const TRUSTED_ZOTERO_MCP_APPROVAL_METHODS = new Set([
   "item/tool/requestUserInput",
@@ -1339,6 +1324,7 @@ function buildCodexNativeScopedMcpScope(params: {
     skillContext: params.skillContext,
   });
   return {
+    runtimeAuthority: "codex",
     profileSignature: params.profileSignature,
     conversationKey: params.scope.conversationKey,
     instanceID: params.scope.instanceID,
@@ -2546,9 +2532,6 @@ export async function runCodexAppServerNativeTurn(params: {
   onItemStarted?: (event: CodexAppServerItemEvent) => void;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void;
   onMcpToolActivity?: (event: ZoteroMcpToolActivityEvent) => void;
-  onMcpConfirmationRequest?: (
-    request: ZoteroMcpConfirmationRequest,
-  ) => AgentConfirmationResolution | Promise<AgentConfirmationResolution>;
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
   onMcpSetupWarning?: (message: string) => void;
   onDiagnostics?: (diagnostics: CodexNativeDiagnostics) => void;
@@ -2722,12 +2705,6 @@ export async function runCodexAppServerNativeTurn(params: {
       const clearMcpScope = mcpEnabled
         ? setActiveZoteroMcpScope(scopedMcpScope)
         : () => undefined;
-      const clearMcpConfirmationHandler =
-        mcpEnabled && params.onMcpConfirmationRequest
-          ? addZoteroMcpConfirmationHandler(scopedMcpScope, (request) =>
-              params.onMcpConfirmationRequest!(redactTerminalValue(request)),
-            )
-          : () => undefined;
       let unregisterGuardianReviews: () => void = () => undefined;
       try {
         const reasoningParams = resolveCodexAppServerReasoningParams(
@@ -3275,7 +3252,6 @@ export async function runCodexAppServerNativeTurn(params: {
         // the same conversation-stable token and registers its own scope under
         // it, so the header Codex captured at thread creation stays valid.
         scopedMcp?.clear();
-        clearMcpConfirmationHandler();
         clearMcpScope();
         unregisterApprovalHandlers();
       }

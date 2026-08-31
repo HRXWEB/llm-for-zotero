@@ -1759,13 +1759,13 @@ describe("Codex app-server native client", function () {
     }
   });
 
-  it("auto-approves trusted Zotero MCP approval prompts except self-confirmation", function () {
+  it("auto-approves only safe Zotero MCP reads", function () {
     const legacyReadDecision = resolveSafeCodexNativeApprovalRequest({
       method: "tool/requestUserInput",
       params: {
         serverName: "llm_for_zotero_profile_1234",
-        toolName: "query_library",
-        questions: [{ header: "Allow", question: "Use query_library?" }],
+        toolName: "library_search",
+        questions: [{ header: "Allow", question: "Use library_search?" }],
       },
     });
     assert.equal(legacyReadDecision?.approved, true);
@@ -1779,8 +1779,7 @@ describe("Codex app-server native client", function () {
         questions: [{ header: "Allow", question: "Use edit_current_note?" }],
       },
     });
-    assert.equal(legacyWriteDecision?.approved, true);
-    assert.deepEqual(legacyWriteDecision?.response, { approved: true });
+    assert.isNull(legacyWriteDecision);
 
     const currentWriteDecision = resolveCodexNativeApprovalRequest({
       method: "item/tool/requestUserInput",
@@ -1800,10 +1799,7 @@ describe("Codex app-server native client", function () {
         ],
       },
     });
-    assert.equal(currentWriteDecision.approved, true);
-    assert.deepEqual(currentWriteDecision.response, {
-      answers: { allow: { answers: ["Allow"] } },
-    });
+    assert.isFalse(currentWriteDecision.approved);
 
     const suffixedApprovalDecision = resolveCodexNativeApprovalRequest({
       method: "item/tool/requestUserInput",
@@ -1823,10 +1819,7 @@ describe("Codex app-server native client", function () {
         ],
       },
     });
-    assert.equal(suffixedApprovalDecision.approved, true);
-    assert.deepEqual(suffixedApprovalDecision.response, {
-      answers: { mcp_access: { answers: ["Allow once (Recommended)"] } },
-    });
+    assert.isFalse(suffixedApprovalDecision.approved);
 
     const turnApprovalDecision = resolveSafeCodexNativeApprovalRequest({
       method: "turn/approval/request",
@@ -1836,8 +1829,7 @@ describe("Codex app-server native client", function () {
         message: "Allow llm_for_zotero to use edit_current_note?",
       },
     });
-    assert.equal(turnApprovalDecision?.approved, true);
-    assert.deepEqual(turnApprovalDecision?.response, { approved: true });
+    assert.isNull(turnApprovalDecision);
 
     assert.isNull(
       resolveSafeCodexNativeApprovalRequest({

@@ -88,11 +88,11 @@ import {
   getOriginalPermissionOptions,
   type PermissionOption,
 } from "../shared/permissionOptions";
-import { normalizeAgentLibraryWriteMode } from "../shared/agentLibraryWriteMode";
+import { normalizeOriginalAgentPermissionMode } from "../shared/originalAgentPermissionMode";
 import {
-  getAgentLibraryWriteMode,
-  setAgentLibraryWriteMode,
-} from "../agent/libraryWriteMode";
+  getOriginalAgentPermissionMode,
+  setOriginalAgentPermissionMode,
+} from "../agent/originalAgentPermissionMode";
 import {
   startCopilotDeviceFlow,
   pollCopilotDeviceAuth,
@@ -2821,11 +2821,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const agentClaudeConfigSourceSelect = doc.querySelector(
     `#${config.addonRef}-agent-claude-config-source`,
   ) as HTMLSelectElement | null;
-  const agentLibraryWriteModeSelect = doc.querySelector(
-    `#${config.addonRef}-agent-library-write-mode`,
+  const originalAgentPermissionModeSelect = doc.querySelector(
+    `#${config.addonRef}-original-agent-permission-mode`,
   ) as HTMLSelectElement | null;
-  const agentLibraryWriteModeDescription = doc.querySelector(
-    `#${config.addonRef}-agent-library-write-mode-description`,
+  const originalAgentPermissionModeDescription = doc.querySelector(
+    `#${config.addonRef}-original-agent-permission-mode-description`,
   ) as HTMLSpanElement | null;
   const agentPermissionModeSelect = doc.querySelector(
     `#${config.addonRef}-agent-permission-mode`,
@@ -4001,36 +4001,36 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     }
   }
 
-  if (agentLibraryWriteModeSelect) {
+  if (originalAgentPermissionModeSelect) {
     const originalPermissionOptions = getOriginalPermissionOptions();
     const updateOriginalPermissionDescription = () => {
-      if (!agentLibraryWriteModeDescription) return;
+      if (!originalAgentPermissionModeDescription) return;
       const selected = originalPermissionOptions.find(
         (option) =>
           option.selectionKey ===
-          `original:${agentLibraryWriteModeSelect.value.replace(/^original:/, "")}`,
+          `original:${originalAgentPermissionModeSelect.value.replace(/^original:/, "")}`,
       );
-      agentLibraryWriteModeDescription.textContent = selected
+      originalAgentPermissionModeDescription.textContent = selected
         ? `${selected.fullLabel}: ${t(selected.description)}`
         : "";
     };
     renderPermissionPreferenceOptions({
-      select: agentLibraryWriteModeSelect,
+      select: originalAgentPermissionModeSelect,
       options: originalPermissionOptions,
-      selectedKey: `original:${getAgentLibraryWriteMode()}`,
+      selectedKey: `original:${getOriginalAgentPermissionMode()}`,
     });
     updateOriginalPermissionDescription();
     observePermissionPreference(
-      `${config.prefsPrefix}.agentLibraryWriteMode`,
+      `${config.prefsPrefix}.originalAgentPermissionMode`,
       () => {
-        agentLibraryWriteModeSelect.value = `original:${getAgentLibraryWriteMode()}`;
+        originalAgentPermissionModeSelect.value = `original:${getOriginalAgentPermissionMode()}`;
         updateOriginalPermissionDescription();
       },
     );
-    agentLibraryWriteModeSelect.addEventListener("change", () => {
-      setAgentLibraryWriteMode(
-        normalizeAgentLibraryWriteMode(
-          agentLibraryWriteModeSelect.value.replace(/^original:/, ""),
+    originalAgentPermissionModeSelect.addEventListener("change", () => {
+      setOriginalAgentPermissionMode(
+        normalizeOriginalAgentPermissionMode(
+          originalAgentPermissionModeSelect.value.replace(/^original:/, ""),
         ),
       );
       updateOriginalPermissionDescription();

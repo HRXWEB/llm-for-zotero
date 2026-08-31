@@ -26,8 +26,6 @@ import {
   withConversationWriteLock,
 } from "../../shared/conversationWriteFence";
 import type {
-  AgentConfirmationResolution,
-  AgentPendingAction,
   AgentRuntimeRequest,
   AgentRuntimeRequestInput,
   AgentToolArtifact,
@@ -83,8 +81,6 @@ export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
   "library_import",
   "library_delete",
   "attachment_update",
-  "run_command",
-  "file_io",
   "zotero_script",
   "undo_last_action",
   "revert_changes",
@@ -99,6 +95,10 @@ export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
  * silently diverged before.
  */
 export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
+  run_command:
+    "External runtimes must use their native command tool so their selected permission profile and sandbox remain authoritative.",
+  file_io:
+    "External runtimes must use their native filesystem tools so their selected permission profile and sandbox remain authoritative.",
   // Runs unattended for minutes and reports only at the end. The MCP
   // transport has no progress channel and no way to drive the per-page
   // review the in-plugin surface offers, so an external backend would see a
@@ -138,7 +138,8 @@ const MCP_SCOPE_ARG_NAMES = new Set([
   "activeContextItemId",
   "activeContextItemID",
 ]);
-const CODEX_MCP_TOOL_APPROVAL_MODE = "approve";
+const CODEX_MCP_READ_APPROVAL_MODE = "approve";
+const CODEX_MCP_EFFECT_APPROVAL_MODE = "auto";
 const MCP_READ_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
   "library_search",
@@ -161,13 +162,9 @@ const RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES = new Set([
   "zotero_script",
 ]);
 const RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES = new Set(["literature_search"]);
-const MCP_TOOLS_WITH_OWN_CONFIRMATION_POLICY = new Set([
-  "run_command",
-  "file_io",
-  "zotero_script",
-]);
 
 type ZoteroMcpScopeMetadata = {
+  runtimeAuthority?: "claude" | "codex";
   profileSignature?: string;
   conversationKey?: number;
   instanceID?: string;
@@ -299,22 +296,6 @@ type ZoteroMcpToolActivityObserver = (
 
 const zoteroMcpToolActivityObservers = new Set<ZoteroMcpToolActivityObserver>();
 
-export type ZoteroMcpConfirmationRequest = {
-  requestId: string;
-  action: AgentPendingAction;
-  toolName: string;
-  scope: ZoteroMcpActiveScope | null;
-};
-
-type ZoteroMcpConfirmationHandler = (
-  request: ZoteroMcpConfirmationRequest,
-) => AgentConfirmationResolution | Promise<AgentConfirmationResolution>;
-
-const zoteroMcpConfirmationHandlers = new Set<{
-  scope: ZoteroMcpActiveScope;
-  handler: ZoteroMcpConfirmationHandler;
-}>();
-
 export function addZoteroMcpToolActivityObserver(
   observer: ZoteroMcpToolActivityObserver,
 ): () => void {
@@ -344,17 +325,6 @@ function logZoteroMcp(message: string, details?: unknown): void {
   } catch {
     /* diagnostics must not affect MCP execution */
   }
-}
-
-export function addZoteroMcpConfirmationHandler(
-  scope: ZoteroMcpActiveScope,
-  handler: ZoteroMcpConfirmationHandler,
-): () => void {
-  const entry = { scope: normalizeActiveScope(scope), handler };
-  zoteroMcpConfirmationHandlers.add(entry);
-  return () => {
-    zoteroMcpConfirmationHandlers.delete(entry);
-  };
 }
 
 function getZoteroPrefs(): {
@@ -445,11 +415,15 @@ export function getZoteroMcpDirectPdfToolNames(): string[] {
 
 function getZoteroMcpToolApprovalOverrides(
   toolNames = getZoteroMcpAllowedToolNames(),
-): Record<string, { approval_mode: typeof CODEX_MCP_TOOL_APPROVAL_MODE }> {
+): Record<string, { approval_mode: "approve" | "auto" }> {
   return Object.fromEntries(
     toolNames.map((name) => [
       name,
-      { approval_mode: CODEX_MCP_TOOL_APPROVAL_MODE },
+      {
+        approval_mode: CURATED_READ_TOOL_NAMES.has(name)
+          ? CODEX_MCP_READ_APPROVAL_MODE
+          : CODEX_MCP_EFFECT_APPROVAL_MODE,
+      },
     ]),
   );
 }
@@ -487,7 +461,7 @@ export function buildZoteroMcpConfigValue(
     url: getZoteroMcpServerUrl(),
     ...(!enabled ? { enabled: false } : {}),
     ...(enabled && params.required ? { required: true } : {}),
-    default_tools_approval_mode: CODEX_MCP_TOOL_APPROVAL_MODE,
+    default_tools_approval_mode: CODEX_MCP_EFFECT_APPROVAL_MODE,
     tools: getZoteroMcpToolApprovalOverrides(enabledToolNames),
     http_headers: {
       [ZOTERO_MCP_AUTH_HEADER]: `Bearer ${token}`,
@@ -712,6 +686,10 @@ function normalizeActiveScope(
     );
   }
   const metadata: ZoteroMcpScopeMetadata = {
+    runtimeAuthority:
+      scope.runtimeAuthority === "claude" || scope.runtimeAuthority === "codex"
+        ? scope.runtimeAuthority
+        : undefined,
     profileSignature: normalizeText(scope.profileSignature, 128),
     conversationKey,
     instanceID: normalizeText(scope.instanceID, 128),
@@ -1319,9 +1297,9 @@ function decorateMcpToolDescription(
     "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'full' only for explicit exhaustive full-text requests with a coverage receipt, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
   const writeGuidance =
     toolName === "zotero_script"
-      ? "Write-mode zotero_script pauses in Zotero and shows the user the script source for approval before it runs. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
+      ? "The native runtime permission profile authorizes zotero_script before Zotero applies its scope, facade, and recovery checks. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
       : mutability === "write"
-        ? "Write operations pause in Zotero for user review before execution. For Zotero note requests, call note_write instead of returning note-ready text in chat."
+        ? "Write operations are authorized by the native runtime permission profile and checked against Zotero integrity rules before execution. For Zotero note requests, call note_write instead of returning note-ready text in chat."
         : "";
   return [description, scopeGuidance, writeGuidance]
     .filter(Boolean)
@@ -1500,51 +1478,6 @@ function buildMcpToolActivityEvent(params: {
     kind: scope?.kind,
     timestamp: Date.now(),
   };
-}
-
-function scopesMatchForConfirmation(
-  handlerScope: ZoteroMcpActiveScope,
-  requestScope: ZoteroMcpActiveScope | null,
-): boolean {
-  if (!requestScope) return false;
-  if (
-    handlerScope.profileSignature &&
-    requestScope.profileSignature &&
-    handlerScope.profileSignature !== requestScope.profileSignature
-  ) {
-    return false;
-  }
-  if (
-    handlerScope.instanceID &&
-    requestScope.instanceID &&
-    handlerScope.instanceID !== requestScope.instanceID
-  ) {
-    return false;
-  }
-  if (
-    handlerScope.conversationGeneration !== undefined &&
-    requestScope.conversationGeneration !== undefined &&
-    handlerScope.conversationGeneration !== requestScope.conversationGeneration
-  ) {
-    return false;
-  }
-  if (
-    handlerScope.conversationKey &&
-    requestScope.conversationKey &&
-    handlerScope.conversationKey !== requestScope.conversationKey
-  ) {
-    return false;
-  }
-  return Boolean(handlerScope.profileSignature || handlerScope.conversationKey);
-}
-
-function findZoteroMcpConfirmationHandler(
-  scope: ZoteroMcpActiveScope | null,
-): ZoteroMcpConfirmationHandler | null {
-  for (const entry of Array.from(zoteroMcpConfirmationHandlers).reverse()) {
-    if (scopesMatchForConfirmation(entry.scope, scope)) return entry.handler;
-  }
-  return null;
 }
 
 function createToolContext(
@@ -1730,77 +1663,6 @@ function extractToolCallErrorText(
   return undefined;
 }
 
-async function requestZoteroMcpConfirmation(params: {
-  execution: Extract<PreparedToolExecution, { kind: "confirmation" }>;
-  headers?: Record<string, string>;
-  isExecutionAllowed?: () => boolean;
-}): Promise<McpToolCallResult> {
-  const scope = resolveScopedMcpScope(params.headers);
-  const handler = findZoteroMcpConfirmationHandler(scope);
-  if (!handler) {
-    logZoteroMcp("Zotero MCP confirmation unavailable", {
-      requestId: params.execution.requestId,
-      toolName: params.execution.action.toolName,
-      conversationKey: scope?.conversationKey,
-      profileSignature: scope?.profileSignature,
-    });
-    return {
-      content: [
-        {
-          type: "text",
-          text:
-            "Zotero MCP confirmation UI is unavailable for this Codex turn. " +
-            "Start a new Codex turn from Zotero and try again.",
-        },
-      ],
-      isError: true,
-    };
-  }
-
-  logZoteroMcp("Zotero MCP confirmation requested", {
-    requestId: params.execution.requestId,
-    toolName: params.execution.action.toolName,
-    conversationKey: scope?.conversationKey,
-    profileSignature: scope?.profileSignature,
-  });
-  const resolution = await handler({
-    requestId: params.execution.requestId,
-    action: params.execution.action,
-    toolName: params.execution.action.toolName,
-    scope: scope ? { ...scope } : null,
-  });
-  logZoteroMcp("Zotero MCP confirmation resolved", {
-    requestId: params.execution.requestId,
-    toolName: params.execution.action.toolName,
-    approved: resolution.approved,
-    actionId: resolution.actionId,
-  });
-  let execution: ReturnType<typeof params.execution.deny>;
-  if (!resolution.approved) {
-    execution = params.execution.deny(resolution.data);
-  } else if (params.isExecutionAllowed && !params.isExecutionAllowed()) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            ok: false,
-            error:
-              "Conversation lifecycle changed before this tool could execute.",
-          }),
-        },
-      ],
-      isError: true,
-    };
-  } else {
-    // The registry's confirmation executor already performs the final
-    // lifecycle check inside its per-conversation write lock.  Do not wrap
-    // it in a second lock here: that would await itself indefinitely.
-    execution = await params.execution.execute(resolution.data);
-  }
-  return formatToolResult(execution);
-}
-
 async function handleToolsCall(
   params: McpToolCallParams,
   deps: McpServerDeps,
@@ -1865,6 +1727,15 @@ async function handleToolsCall(
       ? Number(scope?.conversationGeneration)
       : getConversationWriteGeneration(scopeConversationKey)
     : 0;
+  if (tool.spec.mutability === "write" && !scope?.runtimeAuthority) {
+    const error =
+      "Effectful Zotero MCP tools require a valid, turn-scoped runtime authorization token.";
+    completeActivity({ ok: false, error });
+    return {
+      content: [{ type: "text", text: JSON.stringify({ ok: false, error }) }],
+      isError: true,
+    };
+  }
   const nativeFilesystemViolation = getRawPdfNativeFilesystemViolation({
     toolName: name,
     scope,
@@ -1933,9 +1804,7 @@ async function handleToolsCall(
       },
       createToolContext(rawArgs, headers, deps.zoteroGateway),
       {
-        forceConfirmation:
-          tool.spec.mutability === "write" &&
-          !MCP_TOOLS_WITH_OWN_CONFIRMATION_POLICY.has(name),
+        callerKind: "mcp",
         isExecutionAllowed: () => {
           return (
             !scopeConversationKey ||
@@ -1955,20 +1824,15 @@ async function handleToolsCall(
     );
 
     if (prepared.kind === "confirmation") {
-      const result = await requestZoteroMcpConfirmation({
-        execution: prepared,
-        headers,
-        isExecutionAllowed: () => {
-          return (
-            !scopeConversationKey ||
-            (!areConversationWritesFrozen(scopeConversationKey) &&
-              isConversationWriteGenerationCurrent(
-                scopeConversationKey,
-                scopeGeneration,
-              ))
-          );
-        },
-      });
+      const result: McpToolCallResult = {
+        content: [
+          {
+            type: "text",
+            text: "Zotero rejected an unexpected plugin-side confirmation. Native runtimes must authorize MCP effects before calling Zotero.",
+          },
+        ],
+        isError: true,
+      };
       completeActivity({
         ok: !result.isError,
         error: extractToolCallErrorText(result),
@@ -2164,7 +2028,6 @@ export async function invokeRegisteredZoteroMcpEndpoint(
 export function unregisterMcpServer(): void {
   scopedZoteroMcpScopes.clear();
   mcpReadDedupeCache.clear();
-  zoteroMcpConfirmationHandlers.clear();
   registeredMcpDeps = null;
   delete Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];
 }

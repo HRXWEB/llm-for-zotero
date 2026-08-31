@@ -20,7 +20,6 @@ type RunCommandInput = {
   command: string;
   cwd?: string;
   timeoutMs: number;
-  allowUnsafe?: boolean;
 };
 
 type ReversibleCommandWrite = {
@@ -776,10 +775,6 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
       };
     },
 
-    applyConfirmation(input) {
-      return ok({ ...input, allowUnsafe: true });
-    },
-
     async execute(input, context) {
       const reversibleWrite = parseReversibleCommandWrite(input.command);
       const noteWriteRefusal = getNoteWriteBypassRefusal(input, context);
@@ -789,18 +784,6 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
             exitCode: -1,
             stdout: "",
             stderr: noteWriteRefusal,
-            command: input.command,
-          },
-          effect: "none",
-        };
-      }
-      const confirmationReason = await getRunCommandConfirmationReason(input);
-      if (confirmationReason && !input.allowUnsafe) {
-        return {
-          content: {
-            exitCode: -1,
-            stdout: "",
-            stderr: confirmationReason,
             command: input.command,
           },
           effect: "none",

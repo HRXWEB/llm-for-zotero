@@ -993,7 +993,7 @@ export type PreparedToolExecutionOptions = {
    * absent, so a caller that forgets to declare itself gets the stricter
    * treatment rather than the looser one.
    */
-  callerKind?: "model" | "action" | "api";
+  callerKind?: "model" | "action" | "api" | "mcp";
   /**
    * Lifecycle fence checked immediately before any tool implementation runs.
    * A tool may be prepared while a conversation is still live and execute only

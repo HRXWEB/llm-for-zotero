@@ -31,7 +31,6 @@ import { dbg, dbgError } from "../utils/debugLogger";
 import { buildNotesDirectoryConfigSection } from "../utils/notesDirectoryConfig";
 import type { AgentRuntime } from "./runtime";
 import {
-  addZoteroMcpConfirmationHandler,
   addZoteroMcpToolActivityObserver,
   registerScopedZoteroMcpScope,
   setActiveZoteroMcpScope,
@@ -1259,6 +1258,7 @@ function buildClaudeZoteroMcpScope(
     kind === "paper" ? selectedPaper?.itemId || activeItemId : undefined;
   const libraryID = resolveFallbackLibraryId(request);
   return {
+    runtimeAuthority: "claude",
     profileSignature,
     conversationKey: normalizePositiveInt(request.conversationKey),
     libraryID,
@@ -3013,7 +3013,6 @@ export function createExternalBackendBridgeRuntime(options: {
         let allowedTools: string[] | undefined;
         let clearScopedMcpScope: () => void = () => undefined;
         let clearActiveMcpScope: () => void = () => undefined;
-        let clearMcpConfirmationHandler: () => void = () => undefined;
         let unregisterMcpToolActivity: () => void = () => undefined;
         try {
           if (isNativeZoteroMcpToolsEnabled()) {
@@ -3026,30 +3025,6 @@ export function createExternalBackendBridgeRuntime(options: {
             const scopedMcp = registerScopedZoteroMcpScope(mcpScope);
             clearScopedMcpScope = scopedMcp.clear;
             clearActiveMcpScope = setActiveZoteroMcpScope(mcpScope);
-            clearMcpConfirmationHandler = addZoteroMcpConfirmationHandler(
-              mcpScope,
-              async ({ requestId, action }) => {
-                const resolution = new Promise<AgentConfirmationResolution>(
-                  (resolve) => {
-                    coreRuntime.registerPendingConfirmation(requestId, resolve);
-                  },
-                );
-                await emitTurnEvent({
-                  type: "confirmation_required",
-                  requestId,
-                  action,
-                });
-                const settled = await resolution;
-                await emitTurnEvent({
-                  type: "confirmation_resolved",
-                  requestId,
-                  approved: settled.approved,
-                  actionId: settled.actionId,
-                  data: settled.data,
-                });
-                return settled;
-              },
-            );
             unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
               (event) => {
                 const sameConversation =
@@ -3237,7 +3212,6 @@ export function createExternalBackendBridgeRuntime(options: {
           throw new Error(message);
         } finally {
           unregisterMcpToolActivity();
-          clearMcpConfirmationHandler();
           clearActiveMcpScope();
           clearScopedMcpScope();
         }

@@ -11,7 +11,7 @@ import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
  * checked when listing and deliberately not when executing, because
  * seventeen internal tools are called by name through this same method.
  */
-describe("library write mode gate", function () {
+describe("Original Agent permission gate", function () {
   const originalZotero = (
     globalThis as typeof globalThis & { Zotero?: unknown }
   ).Zotero;
@@ -35,7 +35,7 @@ describe("library write mode gate", function () {
     request: {
       conversationKey: 1,
       mode: "agent",
-      userText: "go",
+      userText: "run the library batch",
       libraryID: 1,
     },
     item: null,
@@ -77,18 +77,12 @@ describe("library write mode gate", function () {
 
   const call = { id: "c1", name: "library_batch", arguments: {} };
 
-  it("refuses a yolo-only tool in safe mode, at execution", async function () {
+  it("reviews a batch in safe mode", async function () {
     await installMode("safe");
     const { registry, didRun } = makeRegistry();
     const prepared = await registry.prepareExecution(call, context);
-    assert.equal(prepared.kind, "result");
-    if (prepared.kind !== "result") return;
-    assert.isFalse(prepared.execution.result.ok);
+    assert.equal(prepared.kind, "confirmation");
     assert.isFalse(didRun(), "the tool must not have run");
-    assert.include(
-      String((prepared.execution.result.content as { error?: string })?.error),
-      "yolo",
-    );
   });
 
   it("allows it in yolo", async function () {
@@ -99,17 +93,13 @@ describe("library write mode gate", function () {
     assert.isTrue(didRun());
   });
 
-  it("bypasses the yolo-only gate for a slash command but still reviews the plan", async function () {
+  it("treats a slash command as an explicit user gesture", async function () {
     await installMode("safe");
     const { registry, didRun } = makeRegistry();
     const prepared = await registry.prepareExecution(call, context, {
       callerKind: "action",
     });
-    assert.equal(prepared.kind, "confirmation");
-    assert.isFalse(didRun());
-    if (prepared.kind !== "confirmation") return;
-    const execution = await prepared.execute();
-    assert.isTrue(execution.result.ok);
+    assert.equal(prepared.kind, "result");
     assert.isTrue(didRun());
   });
 

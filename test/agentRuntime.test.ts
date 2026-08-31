@@ -623,6 +623,11 @@ describe("AgentRuntime", function () {
   it("executes tool calls and resumes after approval", async function () {
     const restoreDb = installMockDb();
     try {
+      await initAgentChangeJournal();
+      globalThis.Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.originalAgentPermissionMode",
+        "safe",
+      );
       const registry = new AgentToolRegistry(
         createTestActionContractService((itemId) =>
           itemId === 500
@@ -4044,7 +4049,7 @@ describe("AgentRuntime", function () {
           request: {
             conversationKey,
             mode: "agent",
-            userText: "run command once",
+            userText: "write the recovery record once",
             model: "gpt-4o-mini",
             apiBase: "https://api.openai.com/v1/chat/completions",
             apiKey: "test",
@@ -4202,7 +4207,8 @@ describe("AgentRuntime", function () {
           request: {
             conversationKey,
             mode: "agent",
-            userText: "run command to preserve this original goal",
+            userText:
+              "write the recovery record to preserve this original goal",
             model: "gpt-4o-mini",
             apiBase: "https://api.openai.com/v1/chat/completions",
             apiKey: "test",
@@ -4271,7 +4277,7 @@ describe("AgentRuntime", function () {
       const serialized = JSON.stringify(continuedMessages);
       assert.include(
         serialized,
-        "Prior goal: run command to preserve this original goal",
+        "Prior goal: write the recovery record to preserve this original goal",
       );
       assert.include(serialized, `actionId=${actionId}`);
       assert.include(serialized, "status=partially_applied");
@@ -6536,6 +6542,7 @@ describe("shallow guard round-limit safety", function () {
   it("does not retry a typed obligation after the user declines it", async function () {
     const restoreDb = installMockDb();
     try {
+      await initAgentChangeJournal();
       const registry = new AgentToolRegistry(createTestActionContractService());
       registry.register({
         spec: {
@@ -6602,7 +6609,7 @@ describe("shallow guard round-limit safety", function () {
         Prefs: {
           ...(previousZotero?.Prefs || {}),
           get: (key: string, ...rest: unknown[]) =>
-            String(key).endsWith("agentLibraryWriteMode")
+            String(key).endsWith("originalAgentPermissionMode")
               ? "safe"
               : previousZotero?.Prefs?.get?.(key, ...rest),
         },

@@ -23,6 +23,9 @@ const PREF_ATTACHMENTS_VAULT_RELATIVE = `${config.prefsPrefix}.migrationAttachme
 const PREF_CLAUDE_PERMISSION_MODE = `${config.prefsPrefix}.claudeCodePermissionMode`;
 const PREF_CLAUDE_PERMISSION_MODE_MIGRATION = `${config.prefsPrefix}.claudeCodePermissionModeMigrationDone`;
 const PREF_LEGACY_AGENT_PERMISSION_MODE = `${config.prefsPrefix}.agentPermissionMode`;
+const PREF_LEGACY_ORIGINAL_AGENT_PERMISSION_MODE = `${config.prefsPrefix}.agentLibraryWriteMode`;
+const PREF_ORIGINAL_AGENT_PERMISSION_MODE = `${config.prefsPrefix}.originalAgentPermissionMode`;
+const PREF_ORIGINAL_AGENT_PERMISSION_MODE_MIGRATION = `${config.prefsPrefix}.originalAgentPermissionModeMigrationDone`;
 const PREF_CODEX_PERMISSION_STATE = `${config.prefsPrefix}.codexAppServerPermissionState`;
 const PREF_CODEX_PERMISSION_STATE_MIGRATION = `${config.prefsPrefix}.codexAppServerPermissionStateMigrationDone`;
 const PREF_CODEX_APPROVALS_REVIEWER = `${config.prefsPrefix}.codexAppServerApprovalsReviewer`;
@@ -285,6 +288,23 @@ export function migrateClaudePermissionMode(): void {
   Zotero.Prefs.set(PREF_CLAUDE_PERMISSION_MODE_MIGRATION, true, true);
 }
 
+export function migrateOriginalAgentPermissionMode(): void {
+  if (Zotero.Prefs.get(PREF_ORIGINAL_AGENT_PERMISSION_MODE_MIGRATION, true)) {
+    return;
+  }
+  if (!hasUserPref(PREF_ORIGINAL_AGENT_PERMISSION_MODE)) {
+    const legacyValue = hasUserPref(PREF_LEGACY_ORIGINAL_AGENT_PERMISSION_MODE)
+      ? Zotero.Prefs.get(PREF_LEGACY_ORIGINAL_AGENT_PERMISSION_MODE, true)
+      : undefined;
+    const migrated =
+      legacyValue === "safe" || legacyValue === "auto" || legacyValue === "yolo"
+        ? legacyValue
+        : "auto";
+    Zotero.Prefs.set(PREF_ORIGINAL_AGENT_PERMISSION_MODE, migrated, true);
+  }
+  Zotero.Prefs.set(PREF_ORIGINAL_AGENT_PERMISSION_MODE_MIGRATION, true, true);
+}
+
 export function migrateCodexPermissionState(): void {
   if (Zotero.Prefs.get(PREF_CODEX_PERMISSION_STATE_MIGRATION, true)) return;
 
@@ -308,6 +328,7 @@ export function migrateCodexPermissionState(): void {
 
 export function runStartupPreferenceMigrations(): void {
   migrateLegacyPrefs();
+  migrateOriginalAgentPermissionMode();
   migrateClaudePermissionMode();
   migrateCodexPermissionState();
   migrateNickname();

@@ -86,6 +86,12 @@ describe("AgentToolRegistry", function () {
   });
 
   it("gates write tools behind confirmation", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "safe" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
     const registry = new AgentToolRegistry();
     registry.register({
       spec: {
@@ -188,7 +194,7 @@ describe("AgentToolRegistry", function () {
     assert.equal(result.action.toolName, "mutate_library");
     assert.deepEqual(
       result.action.fields.map((field) => field.id),
-      ["selectedOperations", "operationsJson", "journalRecoveryWarning"],
+      ["selectedOperations", "operationsJson"],
     );
     assert.equal(result.deny().result.ok, false);
     const approved = await result.execute({
@@ -262,7 +268,7 @@ describe("AgentToolRegistry", function () {
     assert.deepEqual(result.execution.result.content, { applied: 1 });
   });
 
-  it("does not inherit consent for an unjournalled fallback", async function () {
+  it("blocks an unjournalled action even when it has inherited consent", async function () {
     globalThis.Zotero = { debug: () => undefined } as never;
     const registry = new AgentToolRegistry();
     let executions = 0;
@@ -302,17 +308,14 @@ describe("AgentToolRegistry", function () {
       },
     );
 
-    assert.equal(result.kind, "confirmation");
+    assert.equal(result.kind, "result");
     assert.equal(executions, 0);
-    if (result.kind !== "confirmation") return;
-    assert.include(result.action.description, "Recovery warning");
+    if (result.kind !== "result") return;
+    assert.isFalse(result.execution.result.ok);
     assert.include(
-      result.action.fields.map((field) => field.id),
-      "journalRecoveryWarning",
+      String((result.execution.result.content as { error?: string }).error),
+      "durable change journal is unavailable",
     );
-    const confirmed = await result.execute();
-    assert.isTrue(confirmed.result.ok);
-    assert.equal(executions, 1);
   });
 
   it("filters request-scoped tools when they are unavailable", async function () {
@@ -433,6 +436,7 @@ describe("AgentToolRegistry", function () {
   it("acquires the conversation write lock for a planned write", async function () {
     globalThis.Zotero = {
       DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();

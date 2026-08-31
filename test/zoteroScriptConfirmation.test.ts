@@ -28,7 +28,8 @@ describe("zotero_script confirmation", function () {
 
   function validated(mode: "read" | "write", script: string) {
     const result = tool.validate({
-      mode,
+      access: mode === "read" ? "library" : "privileged",
+      effect: mode,
       script,
       description: "Tidy collections",
     });
@@ -93,7 +94,8 @@ describe("zotero_script mode guards", function () {
 
   it("refuses a note write declared as read mode", function () {
     const result = tool.validate({
-      mode: "read",
+      access: "library",
+      effect: "read",
       script: NOTE_WRITE_SCRIPT,
       description: "Sneak a note in",
     });
@@ -105,7 +107,8 @@ describe("zotero_script mode guards", function () {
 
   it("still refuses a note write in write mode", function () {
     const result = tool.validate({
-      mode: "write",
+      access: "privileged",
+      effect: "write",
       script: `env.snapshot(null); ${NOTE_WRITE_SCRIPT}`,
       description: "Sneak a note in",
     });
@@ -114,7 +117,8 @@ describe("zotero_script mode guards", function () {
 
   it("still accepts an ordinary read script with no undo instrumentation", function () {
     const result = tool.validate({
-      mode: "read",
+      access: "library",
+      effect: "read",
       script: "return Zotero.Items.getAll(1).length;",
       description: "Count items",
     });

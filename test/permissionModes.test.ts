@@ -17,12 +17,13 @@ import {
   setCodexPermissionStatePref,
 } from "../src/codexAppServer/prefs";
 import {
-  getAgentLibraryWriteMode,
-  setAgentLibraryWriteMode,
-} from "../src/agent/libraryWriteMode";
+  getOriginalAgentPermissionMode,
+  setOriginalAgentPermissionMode,
+} from "../src/agent/originalAgentPermissionMode";
 import {
   migrateClaudePermissionMode,
   migrateCodexPermissionState,
+  migrateOriginalAgentPermissionMode,
 } from "../src/utils/migrations";
 import {
   fetchClaudePermissionModeCatalog,
@@ -175,21 +176,28 @@ describe("provider permission modes", function () {
       },
       approvalOverride: null,
     };
-    setAgentLibraryWriteMode("yolo");
+    setOriginalAgentPermissionMode("yolo");
     setClaudePermissionModePref("dontAsk");
     setCodexPermissionStatePref(customState);
 
-    assert.equal(getAgentLibraryWriteMode(), "yolo");
+    assert.equal(getOriginalAgentPermissionMode(), "yolo");
     assert.equal(getClaudePermissionModePref(), "dontAsk");
     assert.deepEqual(getCodexPermissionStatePref(), customState);
     assert.deepEqual(
       Array.from(prefs.keys()).sort(),
       [
-        `${PREFIX}agentLibraryWriteMode`,
+        `${PREFIX}originalAgentPermissionMode`,
         `${PREFIX}claudeCodePermissionMode`,
         `${PREFIX}codexAppServerPermissionState`,
       ].sort(),
     );
+  });
+
+  it("migrates the library-only Original Agent preference without changing its valid value", function () {
+    prefs.set(`${PREFIX}agentLibraryWriteMode`, "safe");
+    userPrefs.add(`${PREFIX}agentLibraryWriteMode`);
+    migrateOriginalAgentPermissionMode();
+    assert.equal(prefs.get(`${PREFIX}originalAgentPermissionMode`), "safe");
   });
 
   it("resolves a provider-exclusive footer matrix", function () {

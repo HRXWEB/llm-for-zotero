@@ -949,7 +949,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("file_io writes new files directly, confirms overwrites, and records undo", async function () {
+  it("file_io executes validated writes while the registry owns authorization", async function () {
     const tool = createFileIOTool();
     const existingPaths = new Set<string>(["/tmp/existing.md"]);
     const fileContent = new Map<string, string>([
@@ -1015,19 +1015,7 @@ describe("primitive agent tools", function () {
         await tool.shouldRequireConfirmation?.(overwrite.value, context),
       );
 
-      const deniedOutput = await tool.execute(overwrite.value, context);
-      const deniedBypass = deniedOutput.content;
-      assert.equal(deniedOutput.effect, "none");
-      assert.include(
-        String((deniedBypass as { error?: unknown }).error || ""),
-        "without confirmation",
-      );
-      assert.equal(fileContent.get("/tmp/existing.md"), "Original note.");
-
-      const approved = tool.applyConfirmation?.(overwrite.value, {}, context);
-      assert.isTrue(approved?.ok);
-      if (!approved?.ok) return;
-      const approvedOutput = await tool.execute(approved.value, context);
+      const approvedOutput = await tool.execute(overwrite.value, context);
       assert.equal(approvedOutput.effect, "applied");
       assert.equal(fileContent.get("/tmp/existing.md"), "Updated note.");
     } finally {
@@ -1785,7 +1773,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("file_io gates note overwrites at the requested path and records undo", async function () {
+  it("file_io writes the exact requested note path after registry authorization", async function () {
     const tool = createFileIOTool();
     const existingPaths = new Set<string>([
       "/tmp/obsidian-vault/Papers/existing.md",
@@ -1835,25 +1823,7 @@ describe("primitive agent tools", function () {
         await tool.shouldRequireConfirmation?.(overwrite.value, context),
       );
 
-      const deniedBypass = (await tool.execute(overwrite.value, context))
-        .content;
-      assert.deepInclude(deniedBypass as Record<string, unknown>, {
-        action: "write",
-        filePath: "/tmp/obsidian-vault/Papers/existing.md",
-      });
-      assert.include(
-        String((deniedBypass as { error?: unknown }).error || ""),
-        "without confirmation",
-      );
-      assert.equal(
-        fileContent.get("/tmp/obsidian-vault/Papers/existing.md"),
-        "Original note.",
-      );
-
-      const approved = tool.applyConfirmation?.(overwrite.value, {}, context);
-      assert.isTrue(approved?.ok);
-      if (!approved?.ok) return;
-      await tool.execute(approved.value, context);
+      await tool.execute(overwrite.value, context);
       assert.equal(
         fileContent.get("/tmp/obsidian-vault/Papers/existing.md"),
         "Updated note.",
@@ -2044,14 +2014,7 @@ describe("primitive agent tools", function () {
       assert.isTrue(
         await tool.shouldRequireConfirmation?.(existingMkdir.value, context),
       );
-      const approvedMkdir = tool.applyConfirmation?.(
-        existingMkdir.value,
-        {},
-        context,
-      );
-      assert.isTrue(approvedMkdir?.ok);
-      if (!approvedMkdir?.ok) return;
-      const mkdirOutput = await tool.execute(approvedMkdir.value, context);
+      const mkdirOutput = await tool.execute(existingMkdir.value, context);
       const mkdirResult = mkdirOutput.content as { exitCode: number };
       assert.equal(mkdirOutput.effect, "none");
       assert.equal(mkdirResult.exitCode, 0);
@@ -3831,7 +3794,7 @@ describe("primitive agent tools", function () {
     assert.equal((result as { noteText: string }).noteText, "Approved *note*");
   });
 
-  it("zotero_script write mode confirms with a code preview, then records undo snapshots", async function () {
+  it("zotero_script refuses effects when durable authorization persistence is unavailable", async function () {
     const fakeItem = createFakeZoteroItem();
     globalScope.Zotero = {
       ...(globalScope.Zotero || {}),
@@ -3851,7 +3814,8 @@ describe("primitive agent tools", function () {
         id: "script-1",
         name: "zotero_script",
         arguments: {
-          mode: "write",
+          access: "library",
+          effect: "write",
           description: "Update one fake item",
           script: `
 const item = Zotero.Items.get(101);
@@ -3867,29 +3831,16 @@ env.log('updated');
       baseContext,
     );
 
-    // Write-mode scripts mutate the live library, so they must present the
-    // source for approval rather than running straight through.
-    assert.equal(prepared.kind, "confirmation");
-    if (prepared.kind !== "confirmation") return;
-    const preview = prepared.action.fields.find(
-      (field) => field.type === "code_preview",
-    );
-    assert.exists(preview, "the card must show the script itself");
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
     assert.include(
-      (preview as never as { value: string }).value,
-      "item.setField('title', 'Updated title')",
+      String(
+        (prepared.execution.result.content as { error?: string }).error || "",
+      ),
+      "durable change journal is unavailable",
     );
-
-    const execution = await prepared.execute();
-    assert.equal(execution.result.ok, true);
-    assert.equal(fakeItem.getField("title"), "Updated title");
-    assert.sameMembers(Array.from(fakeItem.tags), ["existing", "new-tag"]);
-    assert.sameMembers(Array.from(fakeItem.collections), [5, 9]);
-    assert.include(
-      prepared.action.description,
-      "Recovery warning",
-      "a confirmed fallback must state that restart-safe recovery is unavailable",
-    );
+    assert.equal(fakeItem.getField("title"), "Original title");
   });
 
   it("apply_tags paged actions render through the shared review-card layout", function () {
@@ -3946,7 +3897,8 @@ env.log('updated');
       allowUnsandboxedTestExecution: true,
     });
     const validation = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "Unsafe direct write",
       script: "env.log('about to write without undo');",
     });
@@ -3960,7 +3912,8 @@ env.log('updated');
       allowUnsandboxedTestExecution: true,
     });
     const validation = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       description: "Create a child note directly",
       script: `
 env.addInverse({ version: 1, kind: 'library_operations', operations: [] });

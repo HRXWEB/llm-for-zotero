@@ -26,10 +26,10 @@ pref("agentClaudeConfigSource", "default");
 pref("agentPermissionMode", "safe");
 pref("claudeCodePermissionMode", "default");
 pref("claudeCodePermissionModeMigrationDone", false);
-// How much the in-plugin agent may change the library unattended. Separate
-// from claudeCodePermissionMode, which governs the Claude Code bridge only --
-// see src/shared/agentLibraryWriteMode.ts.
-pref("agentLibraryWriteMode", "auto");
+// Complete permission mode for the in-plugin Original Agent. Claude Code and
+// Codex retain their independent native permission profiles.
+pref("originalAgentPermissionMode", "auto");
+pref("originalAgentPermissionModeMigrationDone", false);
 pref("tavilyApiKey", "");
 pref("conversationSystem", "upstream");
 pref("enableCodexAppServerMode", false);

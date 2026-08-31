@@ -1,4 +1,4 @@
-import type { AgentLibraryWriteMode } from "./agentLibraryWriteMode";
+import type { OriginalAgentPermissionMode } from "./originalAgentPermissionMode";
 import type { ClaudePermissionMode } from "./claudePermissionMode";
 
 export type PermissionProvider = "original" | "claude" | "codex";
@@ -20,35 +20,36 @@ export type CodexPermissionProfile = {
   disabledReason?: string;
 };
 
-const ORIGINAL_OPTIONS: Record<AgentLibraryWriteMode, PermissionOption> = {
-  safe: {
-    provider: "original",
-    selectionKey: "original:safe",
-    fullLabel: "Safe",
-    compactLabel: "safe",
-    description:
-      "Review every library change before it happens; batch jobs pause on each page.",
-    available: true,
-  },
-  auto: {
-    provider: "original",
-    selectionKey: "original:auto",
-    fullLabel: "Auto",
-    compactLabel: "auto",
-    description:
-      "Apply reversible library changes automatically and ask before irreversible changes.",
-    available: true,
-  },
-  yolo: {
-    provider: "original",
-    selectionKey: "original:yolo",
-    fullLabel: "Yolo",
-    compactLabel: "yolo",
-    description:
-      "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.",
-    available: true,
-  },
-};
+const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
+  {
+    safe: {
+      provider: "original",
+      selectionKey: "original:safe",
+      fullLabel: "Safe",
+      compactLabel: "safe",
+      description:
+        "Review filesystem reads outside the current context and every write, command, script, or network action.",
+      available: true,
+    },
+    auto: {
+      provider: "original",
+      selectionKey: "original:auto",
+      fullLabel: "Auto",
+      compactLabel: "auto",
+      description:
+        "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.",
+      available: true,
+    },
+    yolo: {
+      provider: "original",
+      selectionKey: "original:yolo",
+      fullLabel: "Yolo",
+      compactLabel: "yolo",
+      description:
+        "Execute every valid in-scope Original Agent action without mode-based prompts.",
+      available: true,
+    },
+  };
 
 const CLAUDE_PRESENTATION: Record<
   ClaudePermissionMode,
@@ -89,13 +90,13 @@ const CLAUDE_PRESENTATION: Record<
 
 export function getOriginalPermissionOptions(): PermissionOption[] {
   return ["safe", "auto", "yolo"].map(
-    (id) => ORIGINAL_OPTIONS[id as AgentLibraryWriteMode],
+    (id) => ORIGINAL_OPTIONS[id as OriginalAgentPermissionMode],
   );
 }
 
 export function getOriginalPermissionModeFromSelectionKey(
   selectionKey: string,
-): AgentLibraryWriteMode | null {
+): OriginalAgentPermissionMode | null {
   const mode = selectionKey.replace(/^original:/, "");
   return mode === "safe" || mode === "auto" || mode === "yolo" ? mode : null;
 }

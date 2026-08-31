@@ -41,7 +41,8 @@ describe("zotero_script chaining", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "read",
+      access: "library",
+      effect: "read",
       script,
       description: "enumerate",
     });
@@ -153,7 +154,8 @@ describe("zotero_script write-mode snapshotting", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       script:
         "const item = Zotero.Items.get(51); env.snapshot(item); item.addTag('x'); await item.saveTx(); return 'ok';",
       description: "tag one item",
@@ -181,7 +183,8 @@ describe("zotero_script write-mode snapshotting", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       script:
         "const n = Zotero.Items.get(51); env.snapshot(n); await n.saveTx(); return 'ok';",
       description: "touch a note",
@@ -233,7 +236,8 @@ describe("zotero_script scope control", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "write",
+      access: "privileged",
+      effect: "write",
       script:
         "env.addInverse({ version: 1, kind: 'library_operations', operations: [] }); await Zotero.DB.queryAsync('DELETE FROM items'); return 'done';",
       description: "raw sql",
@@ -244,7 +248,7 @@ describe("zotero_script scope control", function () {
     const result = (await tool.execute(validated.value, context))
       .content as Record<string, unknown>;
     assert.isDefined(result.error, "raw SQL must not silently succeed");
-    assert.include(String(result.error), "Zotero.DB");
+    assert.include(String(result.error), "DB is not available");
   });
 
   it("still allows Zotero.DB to read scripts, which change nothing", async function () {
@@ -257,7 +261,8 @@ describe("zotero_script scope control", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "read",
+      access: "privileged",
+      effect: "read",
       script:
         "const rows = await Zotero.DB.queryAsync('SELECT 1'); return rows.length;",
       description: "count",
@@ -332,7 +337,8 @@ describe("zotero_script sandbox engagement", function () {
       allowUnsandboxedTestExecution: true,
     });
     const validated = tool.validate({
-      mode: "read",
+      access: "library",
+      effect: "read",
       script: "return 7;",
       description: "seven",
     });
@@ -359,7 +365,8 @@ describe("zotero_script sandbox engagement", function () {
 
     const tool = createZoteroScriptTool();
     const validated = tool.validate({
-      mode: "write",
+      access: "library",
+      effect: "write",
       script:
         "env.addInverse({ version: 1, kind: 'library_operations', operations: [] }); await Zotero.DB.queryAsync('x');",
       description: "sql",

@@ -118,6 +118,11 @@ export type AgentActionObligation = AgentActionIntent & {
 export type AgentActionContract = {
   version: 2;
   id: string;
+  /** Only explicit user restrictions are authoritative at execution time. */
+  hardConstraints?: Array<{
+    kind: "no_write";
+    description: string;
+  }>;
   writeDisposition: "none" | "required" | "uncertain";
   interpretationSource: "classifier" | "deterministic_fallback";
   obligations: AgentActionObligation[];
@@ -152,6 +157,13 @@ export type AgentActionProgressLedger = {
   correctionCount: number;
   obligations: AgentActionObligationProgress[];
   appliedReceiptKeys: string[];
+  authorizationGrants?: Array<{
+    proposalDigest: string;
+    toolName: string;
+    authority: "safe_confirmation" | "auto_policy" | "yolo";
+    status: "staged" | "executed" | "failed" | "uncertain";
+    createdAt: number;
+  }>;
   updatedAt: number;
 };
 

@@ -734,11 +734,14 @@ describe("Action Contract V2", function () {
     }
   });
 
-  it("rejects every model-originated write for a no-write contract", async function () {
+  it("rejects every model-originated write for an explicit no-write constraint", async function () {
     const { service } = createHarness();
     const contract = await service.createContract(
       requestWithIntents([], { disposition: "none" }),
     );
+    contract.hardConstraints = [
+      { kind: "no_write", description: "The user explicitly prohibited it." },
+    ];
     const prepared = await service.prepare(mutationTool(), {
       operation: {
         type: "apply_tags",
@@ -748,7 +751,7 @@ describe("Action Contract V2", function () {
     });
     assert.include(
       (await service.validateScope(contract, prepared))?.message || "",
-      "authorizes no mutations",
+      "explicitly prohibited",
     );
   });
 
@@ -820,6 +823,42 @@ describe("Action Contract V2", function () {
         })
       )?.message || "",
       "did not produce a typed action proposal",
+    );
+  });
+
+  it("treats a classifier no-write prediction as a hint when issue #413 later produces an exact metadata proposal", async function () {
+    const { service } = createHarness();
+    const contract = await service.createContract(
+      requestWithIntents([], {
+        disposition: "none",
+        userText: "Update item 42 title to Corrected title.",
+      }),
+    );
+    const prepared = await service.prepare(
+      {
+        ...mutationTool(),
+        describeAction: () => [
+          {
+            id: "update_metadata:item-42",
+            proofDomain: "zotero_state",
+            capability: "zotero.metadata",
+            operation: "update_metadata",
+            source: "zotero_native",
+            parameters: { fields: { title: "Corrected title" } },
+            requestedTargets: ["item:42"],
+            destinationCollectionIds: [],
+          },
+        ],
+      },
+      { itemIds: [42], fields: { title: "Corrected title" } },
+    );
+
+    assert.equal(contract.writeDisposition, "none");
+    assert.deepEqual(contract.hardConstraints, []);
+    assert.isNull(
+      await service.validateScope(contract, prepared, {
+        concreteWrite: true,
+      }),
     );
   });
 

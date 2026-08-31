@@ -1730,7 +1730,7 @@ export function setupHandlers(
       system: ConversationSystem;
     }> = [
       {
-        key: `${config.prefsPrefix}.agentLibraryWriteMode`,
+        key: `${config.prefsPrefix}.originalAgentPermissionMode`,
         system: "upstream",
       },
       {

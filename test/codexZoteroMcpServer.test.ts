@@ -1,6 +1,5 @@
 import { assert } from "chai";
 import {
-  addZoteroMcpConfirmationHandler,
   addZoteroMcpToolActivityObserver,
   getOrCreateZoteroMcpBearerToken,
   getZoteroMcpServerUrl,
@@ -155,7 +154,6 @@ describe("Zotero MCP server", function () {
       (tool: { name: string }) => tool.name,
     );
     assert.deepEqual(names.sort(), [
-      "file_io",
       "library_delete",
       "library_search",
       "library_update",
@@ -182,18 +180,7 @@ describe("Zotero MCP server", function () {
       openWorldHint: false,
       destructiveHint: false,
     });
-    assert.include(
-      writeTool.description,
-      "Write operations pause in Zotero for user review",
-    );
-    const fileIoTool = payload.result.tools.find(
-      (tool: { name: string }) => tool.name === "file_io",
-    );
-    assert.deepEqual(fileIoTool.annotations, {
-      readOnlyHint: false,
-      openWorldHint: false,
-      destructiveHint: false,
-    });
+    assert.include(writeTool.description, "native runtime permission profile");
     const trashTool = payload.result.tools.find(
       (tool: { name: string }) => tool.name === "library_delete",
     );
@@ -904,8 +891,9 @@ describe("Zotero MCP server", function () {
           [
             "zotero_script",
             {
-              mode: "read",
-              code: "return Zotero.Items.get(99).getFilePath();",
+              access: "library",
+              effect: "read",
+              script: "return Zotero.Items.get(99).getFilePath();",
             },
           ],
         ];
@@ -933,7 +921,7 @@ describe("Zotero MCP server", function () {
     });
   }
 
-  it("keeps native filesystem and Zotero-script tools unchanged outside raw-PDF scope", async function () {
+  it("keeps local filesystem tools out of MCP while retaining Zotero scripts", async function () {
     const executed: string[] = [];
     const registry = new AgentToolRegistry();
     for (const name of ["run_command", "file_io", "zotero_script"]) {
@@ -961,6 +949,7 @@ describe("Zotero MCP server", function () {
       conversationKey: 7_920_003,
       libraryID: 7,
       kind: "global",
+      runtimeAuthority: "codex",
     });
     const headers = { [ZOTERO_MCP_SCOPE_HEADER]: scope.token };
 
@@ -973,12 +962,19 @@ describe("Zotero MCP server", function () {
       const names = JSON.parse(listResponse[2]).result.tools.map(
         (tool: { name: string }) => tool.name,
       );
-      assert.includeMembers(names, ["run_command", "file_io", "zotero_script"]);
+      assert.notInclude(names, "run_command");
+      assert.notInclude(names, "file_io");
+      assert.include(names, "zotero_script");
 
       for (const [index, [name, args]] of [
-        ["run_command", { command: "pwd" }],
-        ["file_io", { action: "read", filePath: "/tmp/source.md" }],
-        ["zotero_script", { mode: "read", code: "return 1" }],
+        [
+          "zotero_script",
+          {
+            access: "library",
+            effect: "read",
+            script: "return 1",
+          },
+        ],
       ].entries()) {
         const response = await invokeMcpEndpoint({
           token: getOrCreateZoteroMcpBearerToken(),
@@ -992,7 +988,7 @@ describe("Zotero MCP server", function () {
         });
         assert.isNotTrue(JSON.parse(response[2]).result.isError);
       }
-      assert.deepEqual(executed, ["run_command", "file_io", "zotero_script"]);
+      assert.deepEqual(executed, ["zotero_script"]);
     } finally {
       scope.clear();
     }
@@ -1860,6 +1856,7 @@ describe("Zotero MCP server", function () {
         libraryID: 1,
         kind: "global",
         userText: "move and verify",
+        runtimeAuthority: "codex",
       },
       { token: "dedupe-write-scope-token" },
     );
@@ -2158,7 +2155,7 @@ describe("Zotero MCP server", function () {
     }
   });
 
-  it("routes pending MCP confirmations through the registered Zotero UI handler", async function () {
+  it("does not add a plugin-side prompt to a native MCP read", async function () {
     const registry = new AgentToolRegistry();
     registry.register({
       spec: {
@@ -2191,21 +2188,6 @@ describe("Zotero MCP server", function () {
       },
       { token: "confirm-scope-token" },
     );
-    const requests: Array<{ requestId: string; toolName: string }> = [];
-    const clearHandler = addZoteroMcpConfirmationHandler(
-      {
-        profileSignature: "profile-dev",
-        conversationKey: 123,
-      },
-      async (request) => {
-        requests.push({
-          requestId: request.requestId,
-          toolName: request.toolName,
-        });
-        return { approved: true };
-      },
-    );
-
     try {
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),
@@ -2227,17 +2209,12 @@ describe("Zotero MCP server", function () {
         delivered: true,
         input: { attachFile: true },
       });
-      assert.deepEqual(
-        requests.map((entry) => entry.toolName),
-        ["paper_read"],
-      );
     } finally {
-      clearHandler();
       scoped.clear();
     }
   });
 
-  it("forces write tools through Zotero UI approval and does not execute denied writes", async function () {
+  it("accepts native-runtime authorization without a duplicate Zotero prompt", async function () {
     let executeCount = 0;
     const registry = new AgentToolRegistry();
     registry.register({
@@ -2271,17 +2248,10 @@ describe("Zotero MCP server", function () {
         conversationKey: 456,
         libraryID: 1,
         kind: "global",
+        runtimeAuthority: "codex",
       },
       { token: "deny-scope-token" },
     );
-    const clearHandler = addZoteroMcpConfirmationHandler(
-      {
-        profileSignature: "profile-dev",
-        conversationKey: 456,
-      },
-      async () => ({ approved: false }),
-    );
-
     try {
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),
@@ -2298,17 +2268,16 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(payload.result.isError, true);
-      assert.equal(content.ok, false);
-      assert.equal(content.result.error, "User denied action");
-      assert.equal(executeCount, 0);
+      assert.isUndefined(payload.result.isError);
+      assert.equal(content.ok, true);
+      assert.deepEqual(content.result, { applied: true });
+      assert.equal(executeCount, 1);
     } finally {
-      clearHandler();
       scoped.clear();
     }
   });
 
-  it("lets run_command and file_io use their own confirmation policy in native MCP mode", async function () {
+  it("rejects run_command and file_io at the native MCP boundary", async function () {
     const executed: string[] = [];
     const registry = new AgentToolRegistry();
     for (const name of ["run_command", "file_io"]) {
@@ -2371,13 +2340,15 @@ describe("Zotero MCP server", function () {
             },
           },
         });
+        assert.equal(response[0], 200);
         const payload = JSON.parse(response[2]);
-        const content = JSON.parse(payload.result.content[0].text);
-        assert.isUndefined(payload.result.isError);
-        assert.equal(content.ok, true);
-        assert.deepEqual(content.result, { direct: true, name });
+        assert.equal(payload.result.isError, true);
+        assert.include(
+          payload.result.content[0].text,
+          "Zotero MCP tool is not available",
+        );
       }
-      assert.deepEqual(executed, ["run_command", "file_io"]);
+      assert.deepEqual(executed, []);
     } finally {
       scoped.clear();
     }
@@ -2434,25 +2405,10 @@ describe("Zotero MCP server", function () {
         conversationKey: 789,
         libraryID: 1,
         kind: "global",
+        runtimeAuthority: "codex",
       },
       { token: "note-scope-token" },
     );
-    const clearHandler = addZoteroMcpConfirmationHandler(
-      {
-        profileSignature: "profile-dev",
-        conversationKey: 789,
-      },
-      async (request) => {
-        assert.equal(request.action.title, "Review new note");
-        return {
-          approved: true,
-          data: {
-            content: "Approved standalone note",
-          },
-        };
-      },
-    );
-
     try {
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),
@@ -2481,7 +2437,6 @@ describe("Zotero MCP server", function () {
         noteContent: "Draft standalone note",
       });
     } finally {
-      clearHandler();
       scoped.clear();
     }
   });
@@ -2557,28 +2512,10 @@ describe("Zotero MCP server", function () {
         activeNoteId: 501,
         activeNoteKind: "standalone",
         activeNoteTitle: "Active Note",
+        runtimeAuthority: "codex",
       },
       { token: "active-note-scope-token" },
     );
-    const clearHandler = addZoteroMcpConfirmationHandler(
-      {
-        profileSignature: "profile-note",
-        conversationKey: 5010,
-      },
-      async (request) => {
-        assert.equal(request.action.title, "Review note update");
-        const diffField = request.action.fields[0] as {
-          type?: string;
-          before?: string;
-          after?: string;
-        };
-        assert.equal(diffField.type, "diff_preview");
-        assert.equal(diffField.before, "Original active note");
-        assert.equal(diffField.after, "Updated active note");
-        return { approved: true };
-      },
-    );
-
     try {
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),
@@ -2604,7 +2541,6 @@ describe("Zotero MCP server", function () {
         noteId: 501,
       });
     } finally {
-      clearHandler();
       scoped.clear();
     }
   });
@@ -2798,17 +2734,6 @@ describe("Zotero MCP server", function () {
       kind: "global",
       activeItemId: 20,
     });
-    const clearHandler = addZoteroMcpConfirmationHandler(
-      {
-        profileSignature: "profile-stale",
-        conversationKey: 200,
-      },
-      async (request) => {
-        assert.equal(request.action.title, "Apply Tags");
-        return { approved: true };
-      },
-    );
-
     try {
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),
@@ -2827,7 +2752,6 @@ describe("Zotero MCP server", function () {
       assert.include(payload.error.message, "invalid or expired");
       assert.isUndefined(pendingConversationKey);
     } finally {
-      clearHandler();
       clearActiveScope();
     }
   });
@@ -2866,6 +2790,7 @@ describe("Zotero MCP server", function () {
         conversationKey: 5020,
         libraryID: 1,
         kind: "global",
+        runtimeAuthority: "codex",
       },
       { token: "script-scope-token" },
     );
@@ -2881,7 +2806,8 @@ describe("Zotero MCP server", function () {
           params: {
             name: "zotero_script",
             arguments: {
-              mode: "write",
+              access: "privileged",
+              effect: "write",
               description: "Run directly",
               script:
                 "env.addInverse({ version: 1, kind: 'library_operations', operations: [] });",

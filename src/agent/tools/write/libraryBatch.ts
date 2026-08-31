@@ -10,7 +10,6 @@ import type { ActionRegistry } from "../../actions";
 import type { ActionCheckpoint } from "../../actions/types";
 import { buildActionExecutionContext } from "../../actions/toolContextBridge";
 import { summarizeMutationOutcomes } from "../../services/mutationCoordinator";
-import { getAgentLibraryWriteMode } from "../../libraryWriteMode";
 import {
   advanceBatchJob,
   createBatchJob,
@@ -485,14 +484,6 @@ export function createLibraryBatchTool(deps: {
           },
           effect: "none",
         };
-      }
-
-      const mode = getAgentLibraryWriteMode();
-      if (mode !== "yolo") {
-        const actionName = input.kind === "run" ? input.job : "the batch job";
-        throw new Error(
-          `Library batch jobs run unattended, so they require the agent library write mode to be "yolo" (currently "${mode}"). Either change it in the plugin preferences, or run this from the chat surface with /${actionName}, which reviews each page before applying it.`,
-        );
       }
 
       const prepared = await prepareBatchRun({

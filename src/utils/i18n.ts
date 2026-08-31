@@ -97,7 +97,6 @@ const zhCN: Record<string, string> = {
   "Select figure screenshot": "选择图片截图",
   "Context actions": "上下文操作",
   Reasoning: "推理",
-  "Permission mode": "权限模式",
   "Coming later": "即将推出",
   "Context window:": "上下文窗口：",
   "Context window usage unavailable": "上下文窗口使用量不可用",
@@ -360,20 +359,19 @@ const zhCN: Record<string, string> = {
   'Shows the "Agent (beta)" toggle in the context bar, enabling the agentic multi-step assistant. Off by default — enable only if you want to experiment with the beta feature.':
     '在上下文栏显示"Agent（测试版）"切换按钮，启用多步骤 Agent 助手。默认关闭 — 仅在你想体验测试版功能时启用。',
   "Original Agent Mode": "原生 Agent 模式",
-  "This panel configures the in-plugin Original Agent. Its library permissions are independent from the permission controls for Claude Code and Codex.":
-    "此面板用于配置插件内的原生 Agent。其文献库权限与 Claude Code 和 Codex 的权限控制彼此独立。",
-  "Library permissions": "文献库权限",
-  "Library Write Mode": "文献库写入模式",
+  "This panel configures the in-plugin Original Agent. Its permissions are independent from the native permission controls for Claude Code and Codex.":
+    "此面板用于配置插件内的原生 Agent。其权限与 Claude Code 和 Codex 的原生权限控制彼此独立。",
+  "Permission mode": "权限模式",
   safe: "安全",
   yolo: "全自动",
-  "Review every library change before it happens; batch jobs pause on each page.":
-    "每次更改文献库前都需审核；批处理任务会在每一页暂停。",
-  "Apply reversible library changes automatically and ask before irreversible changes.":
-    "自动应用可撤销的文献库更改，并在不可撤销的更改前询问。",
-  "Let the Original Agent apply changes on its own judgement, including irreversible changes and whole-library batch jobs.":
-    "允许原生 Agent 自主判断并应用更改，包括不可撤销的更改和整个文献库的批处理任务。",
-  "This setting controls only Original Agent library actions. Original Agent, Claude Code, and Codex each use separate permission controls; changing one does not affect the other two. Reversible changes in all three Original Agent permission modes are recorded and can be reverted from Agent history.":
-    "此设置仅控制原生 Agent 的文献库操作。原生 Agent、Claude Code 和 Codex 各自使用独立的权限控制；更改任一模式都不会影响另外两种模式。原生 Agent 三种权限模式下的可撤销更改都会被记录，并可从 Agent 历史记录中撤销。",
+  "Review filesystem reads outside the current context and every write, command, script, or network action.":
+    "审核当前上下文之外的文件系统读取，以及每次写入、命令、脚本或网络操作。",
+  "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.":
+    "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。",
+  "Execute every valid in-scope Original Agent action without mode-based prompts.":
+    "执行原生 Agent 所有有效且在范围内的操作，不显示基于模式的确认提示。",
+  "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
+    "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",
   "Adds current, general web search and focused page reading to the in-plugin Agent. The key stays in your local Zotero preferences.":
     "为插件内的 Agent 提供最新的通用网页搜索和针对性网页读取功能。API 密钥仅保存在本机的 Zotero 偏好设置中。",

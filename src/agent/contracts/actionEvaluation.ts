@@ -130,7 +130,7 @@ export function createFallbackToolReceipts(params: {
         ? "command_execute"
         : params.toolName === "zotero_script"
           ? "zotero_script_execute"
-          : "read_full";
+          : "command_execute";
   const capability: AgentActionCapability =
     params.toolName === "file_io"
       ? "file.write"
@@ -138,7 +138,7 @@ export function createFallbackToolReceipts(params: {
         ? "command.execute"
         : params.toolName === "zotero_script"
           ? "zotero.script"
-          : "zotero.read";
+          : "command.execute";
   if (params.toolName === "file_io" && params.ok) {
     const content = innermostToolResult(params.content);
     const filePath = String(content.filePath || "");
@@ -250,27 +250,49 @@ export function evaluateActionContract(
   receipts: AgentActionReceipt[],
   progress?: AgentActionProgressLedger,
 ): ContractEvaluation {
-  if (contract.writeDisposition === "uncertain") {
+  const explicitNoWrite = contract.hardConstraints?.some(
+    (constraint) => constraint.kind === "no_write",
+  );
+  if (explicitNoWrite) {
+    const attemptedEffect = receipts.some(
+      (receipt) => receipt.operation !== "read_full",
+    );
+    if (!attemptedEffect) return { state: "satisfied" };
     return {
       state: "failed",
+      correction:
+        "Correction for this turn: the user explicitly prohibited changes or execution. Do not retry or claim that anything changed.",
       failure:
-        "I could not determine whether you intended a write, so no mutation was allowed. Please state the exact action and target scope.",
+        "An effectful action was blocked by an explicit user constraint.",
     };
   }
   if (!contract.obligations.length) {
-    if (contract.writeDisposition === "none") {
-      const blockedWrites = receipts.filter(
-        (receipt) =>
-          receipt.proposalId === "missing-proposal" ||
-          receipt.operation !== "read_full",
-      );
-      if (!blockedWrites.length) return { state: "satisfied" };
+    const effectReceipts = receipts.filter(
+      (receipt) =>
+        receipt.operation !== "read_full" ||
+        receipt.proposalId === "missing-proposal",
+    );
+    const verifiedEffect = receipts.some(receiptVerified);
+    if (
+      verifiedEffect ||
+      (!effectReceipts.length && contract.writeDisposition === "none")
+    ) {
+      return { state: "satisfied" };
+    }
+    if (effectReceipts.length) {
       return {
         state: "failed",
         correction:
-          "Correction for this turn: the request authorized no writes, and a mutation attempt was blocked. Do not retry or claim that anything changed; answer the original request using read-only tools only.",
+          "Correction for this turn: an effect was proposed, but no verified result proves that it completed. Do not claim that anything changed.",
         failure:
-          "A model-originated write was blocked because this request authorized no mutations. No library or file change was verified.",
+          "The write was blocked or did not produce a verified action receipt.",
+      };
+    }
+    if (contract.writeDisposition === "uncertain") {
+      return {
+        state: "failed",
+        failure:
+          "I could not determine whether you intended an action. Please state the exact action and target scope.",
       };
     }
     return {

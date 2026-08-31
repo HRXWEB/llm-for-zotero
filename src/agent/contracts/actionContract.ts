@@ -27,6 +27,7 @@ import {
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
+import { hasExplicitNoWriteConstraint } from "../authorization/policy";
 
 export type {
   ActionContractGateway,
@@ -320,6 +321,15 @@ export class ActionContractService {
     return {
       version: 2,
       id: contractId,
+      hardConstraints: hasExplicitNoWriteConstraint(request.userText || "")
+        ? [
+            {
+              kind: "no_write",
+              description:
+                "The user explicitly prohibited changes or execution in this request.",
+            },
+          ]
+        : [],
       writeDisposition,
       interpretationSource:
         request.classifiedIntent?.actionInterpretationSource ||
@@ -349,6 +359,7 @@ export class ActionContractService {
         failureReasons: [],
       })),
       appliedReceiptKeys: [],
+      authorizationGrants: [],
       updatedAt: Date.now(),
     };
   }
@@ -444,21 +455,23 @@ export class ActionContractService {
     const hasWriteProposal = prepared.proposals.some(
       (proposal) => proposal.operation !== "read_full",
     );
-    if (hasWriteProposal && contract.writeDisposition !== "required") {
+    if (
+      hasWriteProposal &&
+      contract.hardConstraints?.some(
+        (constraint) => constraint.kind === "no_write",
+      )
+    ) {
       return failure(
-        contract.writeDisposition === "uncertain"
-          ? "Write blocked because the user intent is uncertain and requires clarification."
-          : "Write blocked because this request authorizes no mutations.",
+        "Write blocked because the user explicitly prohibited changes or execution.",
         contract,
         prepared,
       );
     }
     if (!contract.obligations.length) {
-      return failure(
-        "Write blocked because the required-write contract contains no valid obligations.",
-        contract,
-        prepared,
-      );
+      // Classifier output is a planning hint, not permission authority.
+      // A concrete proposal that emerges later is reconciled by the runtime's
+      // permission policy. This is the issue #413 path.
+      return null;
     }
 
     for (const proposal of prepared.proposals) {
