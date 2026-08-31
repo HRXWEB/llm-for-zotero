@@ -41,6 +41,24 @@ export type WorkflowTestRuntimeSystemToggle = {
   ariaPressed: boolean;
 };
 
+export type WorkflowTestPermissionSurfaceDiagnostics = {
+  provider: ConversationSystem | null;
+  visible: boolean;
+  compactLabel: string;
+  accessibleName: string;
+  disabled: boolean;
+  expanded: boolean;
+  menuVisible: boolean;
+  rows: Array<{
+    id: string;
+    label: string;
+    level: string;
+    risk: string;
+    disabled: boolean;
+    accessibleName: string;
+  }>;
+};
+
 export type WorkflowTestDuplicatePanelSetupDiagnostics = {
   samePanelRoot: boolean;
   initializationGenerationBefore: string;
@@ -490,6 +508,23 @@ export type WorkflowTestApi = {
   closeStandalone: () => Promise<void>;
   getLastSend: () => SendQuestionOptions | null;
   getDiagnostics: (panelId?: string) => Promise<WorkflowTestDiagnostics>;
+  configurePermissionCatalogs: (input?: { delayFirstCodex?: boolean }) => void;
+  resolveDelayedCodexPermissionCatalog: () => Promise<void>;
+  getPanelPermissionSurface: (
+    panelId: string,
+  ) => WorkflowTestPermissionSurfaceDiagnostics;
+  clickPanelPermissionToggle: (
+    panelId: string,
+  ) => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
+  clickPanelPermissionOption: (
+    panelId: string,
+    permissionId: string,
+  ) => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
+  getStandalonePermissionSurface: () => WorkflowTestPermissionSurfaceDiagnostics;
+  clickStandalonePermissionToggle: () => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
+  clickStandalonePermissionOption: (
+    permissionId: string,
+  ) => Promise<WorkflowTestPermissionSurfaceDiagnostics>;
   exerciseReaderSelectionTrackingRecovery: () => Promise<WorkflowTestReaderSelectionTrackingDiagnostics>;
   exerciseReaderPopupActiveTabRouting: (input: {
     firstPanelId: string;

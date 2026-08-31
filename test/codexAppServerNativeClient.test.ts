@@ -53,6 +53,7 @@ function createNativeLifecycleTestProcess(params: {
   requests: Array<{ method: string; params: Record<string, any> }>;
   deltaForTurn?: (turnNumber: number) => string;
   skillsListResult?: unknown;
+  permissionProfilesResult?: unknown;
 }): CodexAppServerProcess {
   let turnNumber = 0;
   const threadIds = [...params.newThreadIds];
@@ -71,6 +72,20 @@ function createNativeLifecycleTestProcess(params: {
             handleMessage: (message: Record<string, unknown>) => void;
           }
         ).handleMessage.bind(proc);
+        if (
+          request.method === "permissionProfile/list" &&
+          params.permissionProfilesResult !== undefined
+        ) {
+          setTimeout(
+            () =>
+              handleMessage({
+                id: request.id,
+                result: params.permissionProfilesResult,
+              }),
+            0,
+          );
+          return;
+        }
         if (
           request.method === "skills/list" &&
           params.skillsListResult !== undefined
@@ -152,10 +167,16 @@ function createNativeLifecycleTestProcess(params: {
     },
     kill: () => {},
   });
+  if (params.permissionProfilesResult !== undefined) {
+    proc.isProtocolInitialized = () => true;
+  }
   return proc;
 }
 
-function installDirectPathTestPrefs(skillMode: "native" | "off" = "off") {
+function installDirectPathTestPrefs(
+  skillMode: "native" | "off" = "off",
+  permissionProfile = ":read-only",
+) {
   const originalZotero = (globalThis as any).Zotero;
   (globalThis as any).Zotero = {
     ...(originalZotero || {}),
@@ -166,6 +187,9 @@ function installDirectPathTestPrefs(skillMode: "native" | "off" = "off") {
       get: (key: string) => {
         if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled")) return false;
         if (key.endsWith(".codexNativeSkillMode")) return skillMode;
+        if (key.endsWith(".codexAppServerPermissionProfile")) {
+          return permissionProfile;
+        }
         return undefined;
       },
     },
@@ -567,6 +591,7 @@ describe("Codex app-server native client", function () {
     });
     const originalSpawn = CodexAppServerProcess.spawn;
     const restorePrefs = installDirectPathTestPrefs("native");
+    const expectedRuntimeCwd = getUserSkillsRuntimeRootDir();
     const activatedSkills: string[] = [];
     CodexAppServerProcess.spawn = async () => proc;
     const pdf = createDirectPdfSelection({
@@ -617,11 +642,11 @@ describe("Codex app-server native client", function () {
     const threadStart = requests.find(
       (request) => request.method === "thread/start",
     );
-    assert.notProperty(threadStart?.params || {}, "cwd");
+    assert.equal(threadStart?.params.cwd, expectedRuntimeCwd);
     const turnStart = requests.find(
       (request) => request.method === "turn/start",
     );
-    assert.notProperty(turnStart?.params || {}, "cwd");
+    assert.equal(turnStart?.params.cwd, expectedRuntimeCwd);
     const turnInput = turnStart?.params.input as Record<string, unknown>[];
     assert.isFalse(turnInput.some((input) => input.type === "skill"));
     assert.deepEqual(activatedSkills, []);
@@ -954,6 +979,72 @@ describe("Codex app-server native client", function () {
     const turnInput = turnStart?.params.input as Record<string, unknown>[];
     assert.include(JSON.stringify(turnInput), "$external-pdf-workflow");
     assert.isFalse(turnInput.some((input) => input.type === "skill"));
+  });
+
+  it("uses named permission profiles without composing legacy sandbox fields", async function () {
+    const processKey = "native-permission-profile";
+    const requests: Array<{
+      method: string;
+      params: Record<string, any>;
+    }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["thread-permission-profile"],
+      requests,
+      permissionProfilesResult: {
+        data: [
+          { id: ":read-only", description: "Read", allowed: true },
+          { id: ":workspace", description: "Workspace", allowed: true },
+        ],
+      },
+    });
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const restorePrefs = installDirectPathTestPrefs("off", ":workspace");
+    let storedThreadId: string | undefined;
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      const turnParams = {
+        scope: {
+          conversationKey: 6_000_000_046,
+          libraryID: 1,
+          kind: "global",
+          title: "Permission profile",
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user", content: "Inspect the project." }],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => storedThreadId,
+          persistProviderSessionId: async (threadId: string) => {
+            storedThreadId = threadId;
+          },
+        },
+      };
+      await runCodexAppServerNativeTurn(turnParams);
+      await runCodexAppServerNativeTurn(turnParams);
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      restorePrefs();
+    }
+
+    const profileList = requests.find(
+      (request) => request.method === "permissionProfile/list",
+    );
+    assert.isString(profileList?.params.cwd);
+    const threadStart = requests.find(
+      (request) => request.method === "thread/start",
+    );
+    assert.equal(threadStart?.params.permissions, ":workspace");
+    assert.notProperty(threadStart?.params || {}, "sandbox");
+    const threadResume = requests.find(
+      (request) => request.method === "thread/resume",
+    );
+    assert.equal(threadResume?.params.permissions, ":workspace");
+    assert.notProperty(threadResume?.params || {}, "sandbox");
+    const turnStart = requests.find(
+      (request) => request.method === "turn/start",
+    );
+    assert.notProperty(turnStart?.params || {}, "sandboxPolicy");
   });
 
   afterEach(function () {

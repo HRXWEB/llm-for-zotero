@@ -67,6 +67,7 @@ import {
   isCodexZoteroMcpToolsEnabled,
   type CodexAppServerApprovalsReviewer,
 } from "./prefs";
+import { resolveCodexPermissionExecution } from "./permissionProfiles";
 import { getCodexProfileSignature } from "./constants";
 import {
   assertRequiredCodexZoteroMcpToolsReady,
@@ -87,7 +88,14 @@ import {
 import { buildNotesDirectoryConfigSection } from "../utils/notesDirectoryConfig";
 import { buildVisibleTurnContextBlock } from "../agent/context/turnContextEnvelope";
 import { renderSelectedTextAnchorContext } from "../modules/contextPanel/selectedTextAnchorFormatting";
-import { getUserSkillsRuntimeRootDir } from "../agent/skills/userSkills";
+import {
+  CODEX_APP_SERVER_NATIVE_PROCESS_KEY,
+  resolveCodexNativeRuntimeCwd,
+} from "./runtimeCwd";
+export {
+  CODEX_APP_SERVER_NATIVE_PROCESS_KEY,
+  resolveCodexNativeRuntimeCwd,
+} from "./runtimeCwd";
 import { getCanonicalSkillFilePath } from "../agent/skills/nativeSkillPaths";
 import { areEquivalentLocalPaths } from "../utils/localPath";
 import {
@@ -105,18 +113,9 @@ import {
 } from "../shared/conversationWriteFence";
 import { enqueueConversationCleanupJob } from "../core/conversations/conversationCleanupJobs";
 
-export const CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
 export const NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE =
   "No Codex context to compact yet. Send a message first.";
-
-function resolveCodexNativeRuntimeCwd(): string | undefined {
-  try {
-    return getUserSkillsRuntimeRootDir();
-  } catch {
-    return undefined;
-  }
-}
 
 export type CodexNativeConversationScope = {
   profileSignature?: string;
@@ -1688,6 +1687,8 @@ async function startNativeThread(params: {
   config?: Record<string, unknown>;
   cwd?: string;
   ephemeral?: boolean;
+  permissionProfileId: string;
+  legacyPermissions: boolean;
 }): Promise<{
   threadId: string;
   developerInstructionsAccepted: boolean;
@@ -1698,7 +1699,9 @@ async function startNativeThread(params: {
     ephemeral: Boolean(params.ephemeral),
     ...buildCodexAppServerNativeApprovalParams(),
     serviceName: CODEX_APP_SERVER_SERVICE_NAME,
-    sandbox: "read-only",
+    ...(params.legacyPermissions
+      ? { sandbox: "read-only" }
+      : { permissions: params.permissionProfileId }),
     ...(params.cwd ? { cwd: params.cwd } : {}),
     ...(params.config ? { config: params.config } : {}),
     ...(params.developerInstructions
@@ -1748,6 +1751,8 @@ async function resumeNativeThread(params: {
   developerInstructions?: string;
   config?: Record<string, unknown>;
   cwd?: string;
+  permissionProfileId: string;
+  legacyPermissions: boolean;
 }): Promise<{
   threadId: string;
   developerInstructionsAccepted: boolean;
@@ -1756,7 +1761,9 @@ async function resumeNativeThread(params: {
   const threadResumeParams: Record<string, unknown> = {
     threadId: params.threadId,
     model: params.model,
-    sandbox: "read-only",
+    ...(params.legacyPermissions
+      ? { sandbox: "read-only" }
+      : { permissions: params.permissionProfileId }),
     ...buildCodexAppServerNativeApprovalParams(),
     ...(params.cwd ? { cwd: params.cwd } : {}),
     ...(params.config ? { config: params.config } : {}),
@@ -1866,6 +1873,8 @@ async function resolveNativeThread(params: {
   cwd?: string;
   hooks?: CodexNativeStoreHooks;
   storedThreadId?: string | null;
+  permissionProfileId: string;
+  legacyPermissions: boolean;
 }): Promise<NativeThreadResolution> {
   const expectedGeneration = getConversationWriteGeneration(
     params.scope.conversationKey,
@@ -1890,6 +1899,8 @@ async function resolveNativeThread(params: {
         developerInstructions: params.developerInstructions,
         config: params.config,
         cwd: params.cwd,
+        permissionProfileId: params.permissionProfileId,
+        legacyPermissions: params.legacyPermissions,
       });
       replacementThreadId =
         resumedThread.threadId !== storedThreadId
@@ -1965,6 +1976,8 @@ async function resolveNativeThread(params: {
       params.newThreadDeveloperInstructions ?? params.developerInstructions,
     config: params.config,
     cwd: params.cwd,
+    permissionProfileId: params.permissionProfileId,
+    legacyPermissions: params.legacyPermissions,
   });
   if (
     areConversationWritesFrozen(params.scope.conversationKey) ||
@@ -2432,6 +2445,13 @@ export async function runCodexAppServerNativeTurn(params: {
       codexPath,
     });
     return await proc.runTurnExclusive(async () => {
+      const codexNativeRuntimeCwd = resolveCodexNativeRuntimeCwd();
+      const permissionExecution = await resolveCodexPermissionExecution({
+        proc,
+        cwd: codexNativeRuntimeCwd,
+      });
+      const selectedPermissionProfile = permissionExecution.profileId;
+      const legacyPermissions = permissionExecution.legacy;
       const assertApprovalTurnStillLive = () => {
         if (params.signal?.aborted) throw createNativeClientAbortError();
         if (
@@ -2534,10 +2554,7 @@ export async function runCodexAppServerNativeTurn(params: {
       const useNativeSkillInputs =
         codexNativeSkillMode === "native" || explicitPdfSkillIds.length > 0;
       const codexNativeSkillLookupCwd = useNativeSkillInputs
-        ? resolveCodexNativeRuntimeCwd()
-        : undefined;
-      const codexNativeRuntimeCwd = useNativeSkillInputs
-        ? codexNativeSkillLookupCwd
+        ? codexNativeRuntimeCwd
         : undefined;
       const unavailableExplicitPdfSkillIds = Array.from(
         new Set([
@@ -2654,7 +2671,9 @@ export async function runCodexAppServerNativeTurn(params: {
               model: params.model,
               ...(codexNativeRuntimeCwd ? { cwd: codexNativeRuntimeCwd } : {}),
               ...buildCodexAppServerNativeApprovalParams(),
-              sandboxPolicy: { type: "readOnly", networkAccess: false },
+              ...(legacyPermissions
+                ? { sandboxPolicy: { type: "readOnly", networkAccess: false } }
+                : {}),
               ...reasoningParams,
             });
             const turnId = extractCodexAppServerTurnId(turnResult);
@@ -2900,6 +2919,8 @@ export async function runCodexAppServerNativeTurn(params: {
                   config: threadConfig,
                   cwd: codexNativeRuntimeCwd,
                   ephemeral: true,
+                  permissionProfileId: selectedPermissionProfile,
+                  legacyPermissions,
                 })),
                 resumed: false,
               };
@@ -2915,6 +2936,8 @@ export async function runCodexAppServerNativeTurn(params: {
               cwd: codexNativeRuntimeCwd,
               hooks: params.hooks,
               storedThreadId: storedThreadId || null,
+              permissionProfileId: selectedPermissionProfile,
+              legacyPermissions,
             });
         if (rawPdfMode) {
           try {

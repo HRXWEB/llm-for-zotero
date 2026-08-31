@@ -149,6 +149,18 @@ export function setCodexBinaryPathPref(path: string): void {
   setPref("codexAppServerPath", String(path || "").trim());
 }
 
+export function getCodexPermissionProfilePref(): string {
+  return (
+    getStringPref("codexAppServerPermissionProfile").trim() || ":read-only"
+  );
+}
+
+export function setCodexPermissionProfilePref(profileId: string): void {
+  const normalized = String(profileId || "").trim();
+  if (!normalized) return;
+  setPref("codexAppServerPermissionProfile", normalized);
+}
+
 export function isCodexZoteroMcpToolsEnabled(): boolean {
   const value = getZoteroPrefs()?.get?.(
     prefKey("codexAppServerZoteroMcpToolsEnabled"),

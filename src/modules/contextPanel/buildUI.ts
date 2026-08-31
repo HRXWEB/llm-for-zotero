@@ -25,7 +25,6 @@ import {
 } from "./portalScope";
 import { getConversationKey } from "./conversationIdentity";
 import { createRuntimeSystemControls } from "./runtimeSystemControls";
-import { FOOTER_PERMISSION_MODE_OPTIONS } from "./footerPermissionControl";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -965,7 +964,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     {
       id: "llm-permission-toggle",
       type: "button",
-      textContent: "auto",
       title: t("Permission mode"),
     },
   );
@@ -976,17 +974,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   });
   permissionMenu.setAttribute("role", "menu");
   permissionMenu.style.display = "none";
-  for (const option of FOOTER_PERMISSION_MODE_OPTIONS) {
-    const optionButton = createElement(doc, "button", "llm-permission-option", {
-      type: "button",
-      textContent: option.mode,
-      disabled: !option.available,
-    });
-    optionButton.dataset.permissionMode = option.mode;
-    optionButton.setAttribute("role", "menuitemradio");
-    optionButton.setAttribute("aria-checked", "false");
-    permissionMenu.appendChild(optionButton);
-  }
   permissionControl.append(permissionButton, permissionMenu);
 
   const contextUsageControl = createElement(

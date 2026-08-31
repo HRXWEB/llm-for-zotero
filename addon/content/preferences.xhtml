@@ -646,6 +646,15 @@
             <html:option value="zh-CN">中文 (简体)</html:option>
           </html:select>
           <html:span
+            id="__addonRef__-agent-library-write-mode-description"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              line-height: 1.45;
+              overflow-wrap: anywhere;
+            "
+          />
+          <html:span
             id="__addonRef__-locale-restart-hint"
             style="
               font-size: 11px;
@@ -705,7 +714,7 @@
               color: var(--fill-primary, inherit);
             "
           >
-            Library Write Mode
+            Original Agent library permissions
           </html:label>
           <html:select
             id="__addonRef__-agent-library-write-mode"
@@ -725,9 +734,9 @@
               color: FieldText;
             "
           >
-            <html:option value="auto">auto</html:option>
-            <html:option value="safe">safe</html:option>
-            <html:option value="yolo">yolo</html:option>
+            <html:option value="safe">Safe — Restricted</html:option>
+            <html:option value="auto">Auto — Standard</html:option>
+            <html:option value="yolo">Yolo — Full access</html:option>
           </html:select>
           <html:span
             style="
@@ -1112,6 +1121,45 @@
                       <html:option value="high">High</html:option>
                       <html:option value="xhigh">XHigh</html:option>
                     </html:select>
+                  </html:div>
+                  <html:div
+                    style="display: flex; flex-direction: column; gap: 4px"
+                  >
+                    <html:label
+                      for="__addonRef__-codex-app-server-permission-profile"
+                      style="font-weight: 600; font-size: 12px"
+                    >
+                      Codex permission profile
+                    </html:label>
+                    <html:select
+                      id="__addonRef__-codex-app-server-permission-profile"
+                      style="
+                        width: 100%;
+                        height: 28px;
+                        padding: 4px 8px;
+                        font-size: 12px;
+                      "
+                    />
+                    <html:span
+                      id="__addonRef__-codex-app-server-permission-status"
+                      role="status"
+                      aria-live="polite"
+                      style="
+                        font-size: 11px;
+                        color: var(--fill-secondary, #777);
+                        line-height: 1.4;
+                      "
+                    />
+                    <html:button
+                      id="__addonRef__-codex-app-server-permission-refresh"
+                      type="button"
+                      style="
+                        align-self: flex-start;
+                        padding: 2px 8px;
+                        font-size: 11px;
+                      "
+                      >Refresh</html:button
+                    >
                   </html:div>
                 </html:div>
                 <html:span
@@ -2038,7 +2086,7 @@
                         color: var(--fill-primary, inherit);
                       "
                     >
-                      Permission Mode
+                      Claude Code permission mode
                     </html:label>
                     <html:select
                       id="__addonRef__-agent-permission-mode"
@@ -2057,24 +2105,28 @@
                         background: Field;
                         color: FieldText;
                       "
-                    >
-                      <html:option value="safe">safe</html:option>
-                      <html:option value="yolo">yolo</html:option>
-                    </html:select>
+                    />
                     <html:span
+                      id="__addonRef__-claude-code-permission-status"
+                      role="status"
+                      aria-live="polite"
                       style="
                         font-size: 11px;
                         color: var(--fill-secondary, #777);
                         line-height: 1.45;
                         overflow-wrap: anywhere;
                       "
+                    />
+                    <html:button
+                      id="__addonRef__-claude-code-permission-refresh"
+                      type="button"
+                      style="
+                        align-self: flex-start;
+                        padding: 2px 8px;
+                        font-size: 11px;
+                      "
+                      >Refresh</html:button
                     >
-                      <html:code>safe</html:code>
-                      is recommended.
-                      <html:code>yolo</html:code>
-                      changes bridge permissions only; Zotero safety checks
-                      still apply.
-                    </html:span>
                   </html:div>
 
                   <html:div

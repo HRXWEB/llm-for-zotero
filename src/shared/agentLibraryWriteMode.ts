@@ -1,12 +1,9 @@
 /**
  * How much the in-plugin agent may change the Zotero library without asking.
  *
- * This is deliberately a SEPARATE key from `agentPermissionMode`. That one's
- * on-screen help text promises users it "affects Claude Code's bridge
- * permission mode only; Zotero MCP and tool-specific safety checks can still
- * require confirmation" — a promise the MCP path still keeps. Reusing the
- * stored value would silently convert consent given for bash prompting into
- * consent for unattended whole-library rewrites.
+ * This is deliberately separate from `claudeCodePermissionMode`. Reusing a
+ * Claude Code value would silently convert consent given for runtime tool
+ * prompting into consent for unattended whole-library rewrites.
  *
  * - `auto`   — the default. Confirms only what cannot be undone. Everything
  *              else applies immediately and stays revertible from the agent

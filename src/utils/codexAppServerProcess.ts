@@ -143,6 +143,7 @@ export class CodexAppServerProcess {
   private destroyed = false;
   private didNotifyClose = false;
   private injectItemsSupport: CodexAppServerInjectItemsSupport = "unknown";
+  private protocolInitialized = false;
 
   private constructor(proc: unknown, launchDescription = "") {
     this.proc = proc;
@@ -540,6 +541,10 @@ export class CodexAppServerProcess {
     this.injectItemsSupport = value;
   }
 
+  isProtocolInitialized(): boolean {
+    return this.protocolInitialized;
+  }
+
   private async initialize(): Promise<void> {
     await this.sendRequest("initialize", {
       clientInfo: {
@@ -550,6 +555,7 @@ export class CodexAppServerProcess {
       capabilities: { experimentalApi: true },
     });
     this.sendNotification("initialized");
+    this.protocolInitialized = true;
   }
 
   private writeRawMessage(message: Record<string, unknown>): void {

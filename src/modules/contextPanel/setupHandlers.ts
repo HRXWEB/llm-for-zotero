@@ -1157,10 +1157,10 @@ export function setupHandlers(
       lastUsedRuntimeMode: getLastUsedRuntimeMode(),
     });
   };
-  let syncFooterPermissionControl = () => {};
+  let syncFooterPermissionControl = () => Promise.resolve();
   let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
-    syncFooterPermissionControl();
+    void syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
       ".llm-agent-toggle-indicator",
@@ -1725,11 +1725,39 @@ export function setupHandlers(
     const agentPrefKey = `${config.prefsPrefix}.enableAgentMode`;
     const claudeModePrefKey = `${config.prefsPrefix}.enableClaudeCodeMode`;
     const codexModePrefKey = `${config.prefsPrefix}.enableCodexAppServerMode`;
-    const libraryWriteModePrefKey = `${config.prefsPrefix}.agentLibraryWriteMode`;
+    const permissionPrefObservers: Array<{
+      key: string;
+      system: ConversationSystem;
+    }> = [
+      {
+        key: `${config.prefsPrefix}.agentLibraryWriteMode`,
+        system: "upstream",
+      },
+      {
+        key: `${config.prefsPrefix}.claudeCodePermissionMode`,
+        system: "claude_code",
+      },
+      {
+        key: `${config.prefsPrefix}.agentBackendBridgeUrl`,
+        system: "claude_code",
+      },
+      {
+        key: `${config.prefsPrefix}.agentClaudeConfigSource`,
+        system: "claude_code",
+      },
+      {
+        key: `${config.prefsPrefix}.codexAppServerPermissionProfile`,
+        system: "codex",
+      },
+      {
+        key: `${config.prefsPrefix}.codexAppServerPath`,
+        system: "codex",
+      },
+    ];
     let agentObserverId: symbol | undefined;
     let claudeObserverId: symbol | undefined;
     let codexObserverId: symbol | undefined;
-    let libraryWriteModeObserverId: symbol | undefined;
+    const permissionObserverIds: symbol[] = [];
     const unregister = (observerId: symbol | undefined) => {
       if (observerId === undefined) return;
       try {
@@ -1742,11 +1770,12 @@ export function setupHandlers(
       unregister(agentObserverId);
       unregister(claudeObserverId);
       unregister(codexObserverId);
-      unregister(libraryWriteModeObserverId);
+      for (const observerId of permissionObserverIds.splice(0)) {
+        unregister(observerId);
+      }
       agentObserverId = undefined;
       claudeObserverId = undefined;
       codexObserverId = undefined;
-      libraryWriteModeObserverId = undefined;
     };
     const isPanelUnavailable = () =>
       !(body as Element).isConnected ||
@@ -1800,13 +1829,6 @@ export function setupHandlers(
       updateRuntimeSystemToggles();
       updateRuntimeModeButton();
     };
-    const onLibraryWriteModePrefChange = () => {
-      if (isPanelUnavailable()) {
-        cleanupPrefObservers?.();
-        return;
-      }
-      syncFooterPermissionControl();
-    };
     try {
       agentObserverId = (Zotero as any).Prefs.registerObserver(
         agentPrefKey,
@@ -1823,11 +1845,22 @@ export function setupHandlers(
         onCodexModePrefChange,
         true,
       );
-      libraryWriteModeObserverId = (Zotero as any).Prefs.registerObserver(
-        libraryWriteModePrefKey,
-        onLibraryWriteModePrefChange,
-        true,
-      );
+      for (const observer of permissionPrefObservers) {
+        permissionObserverIds.push(
+          (Zotero as any).Prefs.registerObserver(
+            observer.key,
+            () => {
+              if (isPanelUnavailable()) {
+                cleanupPrefObservers?.();
+                return;
+              }
+              if (getConversationSystem() !== observer.system) return;
+              void syncFooterPermissionControl();
+            },
+            true,
+          ),
+        );
+      }
     } catch {
       // Zotero.Prefs.registerObserver not available – no live sync
     }
@@ -2057,10 +2090,13 @@ export function setupHandlers(
       menu: permissionMenu,
       getConversationSystem,
       getRuntimeMode: getCurrentRuntimeMode,
+      onWarning: (message) => {
+        if (status) setStatus(status, message, "warning");
+      },
     });
     syncFooterPermissionControl = controller.sync;
     disposeFooterPermissionControl = controller.dispose;
-    syncFooterPermissionControl();
+    void syncFooterPermissionControl();
   }
   let openReasoningMenu = () => {};
   let closeReasoningMenu = () => {

@@ -83,7 +83,12 @@ import {
   runProviderSettingsChecks,
   runCodexAppServerConnectionTest,
 } from "../utils/providerConnectionTest";
-import { normalizeAgentPermissionMode } from "../shared/agentPermissionMode";
+import { normalizeClaudePermissionMode } from "../shared/claudePermissionMode";
+import {
+  buildCodexPermissionOption,
+  getOriginalPermissionOptions,
+  type PermissionOption,
+} from "../shared/permissionOptions";
 import { normalizeAgentLibraryWriteMode } from "../shared/agentLibraryWriteMode";
 import {
   getAgentLibraryWriteMode,
@@ -229,9 +234,14 @@ import {
   type ClaudeModelPreferenceOption,
 } from "../claudeCode/modelCatalog";
 import {
+  fetchClaudePermissionModeCatalog,
+  reconcileClaudePermissionMode,
+} from "../claudeCode/permissionModes";
+import {
   getCodexAppServerApprovalsReviewerPref,
   getCodexBinaryPathPref,
   getCodexReasoningModePref,
+  getCodexPermissionProfilePref,
   getCodexRuntimeModelPref,
   isCodexAppServerNativeApprovalsEnabled,
   isCodexAppServerModeEnabled,
@@ -241,9 +251,11 @@ import {
   setCodexBinaryPathPref,
   setNativeZoteroMcpToolsEnabled,
   setCodexReasoningModePref,
+  setCodexPermissionProfilePref,
   setCodexRuntimeModelPref,
   type CodexAppServerApprovalsReviewer,
 } from "../codexAppServer/prefs";
+import { listCodexPermissionProfiles } from "../codexAppServer/permissionProfiles";
 import { applyCodexAppServerModePreferenceChange } from "../codexAppServer/modePreference";
 import { getConfiguredCodexAppServerBinaryPath } from "../codexAppServer/binaryPath";
 import {
@@ -1067,6 +1079,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const codexAppServerReasoningSelect = doc.querySelector(
     `#${config.addonRef}-codex-app-server-reasoning`,
   ) as HTMLSelectElement | null;
+  const codexPermissionProfileSelect = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-permission-profile`,
+  ) as HTMLSelectElement | null;
+  const codexPermissionProfileStatus = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-permission-status`,
+  ) as HTMLSpanElement | null;
+  const codexPermissionProfileRefresh = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-permission-refresh`,
+  ) as HTMLButtonElement | null;
   const codexAppServerPathInput = doc.querySelector(
     `#${config.addonRef}-codex-app-server-path`,
   ) as HTMLInputElement | null;
@@ -2776,9 +2797,18 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const agentLibraryWriteModeSelect = doc.querySelector(
     `#${config.addonRef}-agent-library-write-mode`,
   ) as HTMLSelectElement | null;
+  const agentLibraryWriteModeDescription = doc.querySelector(
+    `#${config.addonRef}-agent-library-write-mode-description`,
+  ) as HTMLSpanElement | null;
   const agentPermissionModeSelect = doc.querySelector(
     `#${config.addonRef}-agent-permission-mode`,
   ) as HTMLSelectElement | null;
+  const claudePermissionModeStatus = doc.querySelector(
+    `#${config.addonRef}-claude-code-permission-status`,
+  ) as HTMLSpanElement | null;
+  const claudePermissionModeRefresh = doc.querySelector(
+    `#${config.addonRef}-claude-code-permission-refresh`,
+  ) as HTMLButtonElement | null;
   const claudeConfigPathsWrap = doc.querySelector(
     `#${config.addonRef}-claude-config-paths`,
   ) as HTMLDivElement | null;
@@ -2905,6 +2935,220 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
+  const renderPermissionPreferenceOptions = (params: {
+    select: HTMLSelectElement;
+    options: PermissionOption[];
+    selectedId: string;
+    legacyCodex?: boolean;
+  }): boolean => {
+    const optionElements = params.options.map((entry) => {
+      const option = el(doc, "option") as HTMLOptionElement;
+      option.value = entry.id;
+      option.textContent = `${entry.fullLabel}${
+        params.legacyCodex && entry.id === ":read-only" ? " (legacy)" : ""
+      } — ${entry.levelLabel}`;
+      option.title = `${entry.id} — ${entry.description}`;
+      option.disabled = !entry.available;
+      return option;
+    });
+    const selectedOption = params.options.find(
+      (entry) => entry.id === params.selectedId,
+    );
+    if (!selectedOption) {
+      const invalid = el(doc, "option") as HTMLOptionElement;
+      invalid.value = params.selectedId;
+      invalid.textContent = `${params.selectedId} — Unavailable`;
+      invalid.disabled = true;
+      optionElements.push(invalid);
+    }
+    params.select.replaceChildren(...optionElements);
+    params.select.value = params.selectedId;
+    return selectedOption?.available === true;
+  };
+
+  let claudePermissionRefreshId = 0;
+  const refreshClaudePermissionOptions = async () => {
+    if (!agentPermissionModeSelect) return;
+    const refreshId = ++claudePermissionRefreshId;
+    agentPermissionModeSelect.disabled = true;
+    if (claudePermissionModeRefresh) {
+      claudePermissionModeRefresh.disabled = true;
+    }
+    if (claudePermissionModeStatus) {
+      claudePermissionModeStatus.textContent =
+        "Loading Claude Code permission modes…";
+      claudePermissionModeStatus.style.color = "var(--fill-secondary, #777)";
+    }
+    try {
+      const catalog = await fetchClaudePermissionModeCatalog({
+        bridgeUrl: getClaudeBridgeUrl(),
+        settingSources: getClaudeSettingSourcesByPref(),
+      });
+      if (refreshId !== claudePermissionRefreshId) return;
+      const reconciliation = reconcileClaudePermissionMode({
+        selectedId: getClaudePermissionModePref(),
+        options: catalog.options,
+      });
+      if (reconciliation.selectedId !== getClaudePermissionModePref()) {
+        setClaudePermissionModePref(reconciliation.selectedId);
+      }
+      renderPermissionPreferenceOptions({
+        select: agentPermissionModeSelect,
+        options: catalog.options,
+        selectedId: reconciliation.selectedId,
+      });
+      agentPermissionModeSelect.disabled = false;
+      if (claudePermissionModeStatus) {
+        const selected = catalog.options.find(
+          (option) => option.id === reconciliation.selectedId,
+        );
+        const selectedDescription = selected
+          ? `${selected.fullLabel}: ${selected.description} `
+          : "";
+        const configured = catalog.configuredDefaultMode
+          ? ` Claude configuration default: ${catalog.configuredDefaultMode}.`
+          : "";
+        claudePermissionModeStatus.textContent = `${reconciliation.warning ? `${reconciliation.warning} ` : ""}${selectedDescription}Descriptions and availability come from the active Claude Code settings.${configured}`;
+        claudePermissionModeStatus.style.color = reconciliation.warning
+          ? "#f39c12"
+          : "var(--fill-secondary, #777)";
+      }
+    } catch (error) {
+      if (refreshId !== claudePermissionRefreshId) return;
+      agentPermissionModeSelect.replaceChildren();
+      agentPermissionModeSelect.disabled = true;
+      if (claudePermissionModeStatus) {
+        claudePermissionModeStatus.textContent =
+          error instanceof Error ? error.message : String(error);
+        claudePermissionModeStatus.style.color = "#e74c3c";
+      }
+    } finally {
+      if (
+        refreshId === claudePermissionRefreshId &&
+        claudePermissionModeRefresh
+      ) {
+        claudePermissionModeRefresh.disabled = false;
+      }
+    }
+  };
+
+  let codexPermissionRefreshId = 0;
+  const refreshCodexPermissionOptions = async () => {
+    if (!codexPermissionProfileSelect) return;
+    const refreshId = ++codexPermissionRefreshId;
+    codexPermissionProfileSelect.disabled = true;
+    if (codexPermissionProfileRefresh) {
+      codexPermissionProfileRefresh.disabled = true;
+    }
+    if (codexPermissionProfileStatus) {
+      codexPermissionProfileStatus.textContent =
+        "Loading Codex permission profiles…";
+      codexPermissionProfileStatus.style.color = "var(--fill-secondary, #777)";
+    }
+    try {
+      const catalog = await listCodexPermissionProfiles({
+        codexPath: getConfiguredCodexAppServerBinaryPath(),
+      });
+      if (refreshId !== codexPermissionRefreshId) return;
+      const selectedId = getCodexPermissionProfilePref();
+      const options = catalog.profiles.map(buildCodexPermissionOption);
+      const selectedAvailable = renderPermissionPreferenceOptions({
+        select: codexPermissionProfileSelect,
+        options,
+        selectedId,
+        legacyCodex: catalog.kind === "legacy",
+      });
+      codexPermissionProfileSelect.disabled = false;
+      if (codexPermissionProfileStatus) {
+        const selected = options.find((option) => option.id === selectedId);
+        const selectedDescription = selected
+          ? `${selected.fullLabel}: ${selected.disabledReason || selected.description} `
+          : `${selectedId}: Unavailable. `;
+        codexPermissionProfileStatus.textContent = `${selectedDescription}${
+          selectedAvailable
+            ? catalog.kind === "legacy"
+              ? "Update Codex to use named permission profiles."
+              : "Profiles and managed availability come from Codex."
+            : "Choose an allowed Codex permission profile before sending."
+        }`;
+        codexPermissionProfileStatus.style.color = selectedAvailable
+          ? "var(--fill-secondary, #777)"
+          : "#e74c3c";
+      }
+    } catch (error) {
+      if (refreshId !== codexPermissionRefreshId) return;
+      const selectedId = getCodexPermissionProfilePref();
+      renderPermissionPreferenceOptions({
+        select: codexPermissionProfileSelect,
+        options: [],
+        selectedId,
+      });
+      if (codexPermissionProfileStatus) {
+        codexPermissionProfileStatus.textContent =
+          error instanceof Error ? error.message : String(error);
+        codexPermissionProfileStatus.style.color = "#e74c3c";
+      }
+    } finally {
+      if (
+        refreshId === codexPermissionRefreshId &&
+        codexPermissionProfileRefresh
+      ) {
+        codexPermissionProfileRefresh.disabled = false;
+      }
+    }
+  };
+
+  agentPermissionModeSelect?.addEventListener("change", () => {
+    setClaudePermissionModePref(
+      normalizeClaudePermissionMode(agentPermissionModeSelect.value),
+    );
+  });
+  claudePermissionModeRefresh?.addEventListener("click", () => {
+    void refreshClaudePermissionOptions();
+  });
+  codexPermissionProfileSelect?.addEventListener("change", () => {
+    setCodexPermissionProfilePref(codexPermissionProfileSelect.value);
+  });
+  codexPermissionProfileRefresh?.addEventListener("click", () => {
+    void refreshCodexPermissionOptions();
+  });
+  const permissionPreferenceObserverIds: symbol[] = [];
+  const observePermissionPreference = (
+    key: string,
+    refresh: () => void,
+  ): void => {
+    try {
+      permissionPreferenceObserverIds.push(
+        (Zotero as any).Prefs.registerObserver(key, refresh, true),
+      );
+    } catch {
+      // Preference observers are available in Zotero but not every test DOM.
+    }
+  };
+  observePermissionPreference(
+    `${config.prefsPrefix}.claudeCodePermissionMode`,
+    () => void refreshClaudePermissionOptions(),
+  );
+  observePermissionPreference(
+    `${config.prefsPrefix}.codexAppServerPermissionProfile`,
+    () => void refreshCodexPermissionOptions(),
+  );
+  _window.addEventListener(
+    "unload",
+    () => {
+      for (const observerId of permissionPreferenceObserverIds.splice(0)) {
+        try {
+          (Zotero as any).Prefs.unregisterObserver(observerId);
+        } catch {
+          void 0;
+        }
+      }
+    },
+    { once: true },
+  );
+  void refreshClaudePermissionOptions();
+  void refreshCodexPermissionOptions();
+
   if (codexAppServerEnableSelect) {
     const applyCodexAppServerUi = (enabled: boolean) => {
       codexAppServerEnableSelect.value = enabled ? "enabled" : "disabled";
@@ -2919,6 +3163,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       applyCodexAppServerModePreferenceChange(enabled);
       if (enabled) {
         void refreshCodexReasoningOptions();
+        void refreshCodexPermissionOptions();
       }
     });
   }
@@ -2977,6 +3222,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       setCodexRuntimeModelPref(codexAppServerModelInput.value);
       codexAppServerModelInput.value = getCodexRuntimeModelPref();
       void refreshCodexReasoningOptions();
+      void refreshCodexPermissionOptions();
     };
     codexAppServerModelInput.addEventListener("change", commitCodexModel);
     codexAppServerModelInput.addEventListener("blur", commitCodexModel);
@@ -2999,6 +3245,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       setCodexBinaryPathPref(codexAppServerPathInput.value);
       codexAppServerPathInput.value = getCodexBinaryPathPref();
       void refreshCodexReasoningOptions();
+      void refreshCodexPermissionOptions();
     };
     codexAppServerPathInput.addEventListener("change", commitCodexPath);
     codexAppServerPathInput.addEventListener("blur", commitCodexPath);
@@ -3341,6 +3588,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     const commitBridgeUrl = () => {
       setClaudeBridgeUrl(agentBridgeUrlInput.value);
       void refreshClaudeModelSuggestions(true, true);
+      void refreshClaudePermissionOptions();
     };
     agentBridgeUrlInput.addEventListener("change", commitBridgeUrl);
     agentBridgeUrlInput.addEventListener("blur", commitBridgeUrl);
@@ -3621,6 +3869,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       );
       renderClaudeConfigPaths();
       void refreshClaudeModelSuggestions(true, true);
+      void refreshClaudePermissionOptions();
     });
   }
   renderClaudeConfigPaths();
@@ -3736,22 +3985,36 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   }
 
   if (agentLibraryWriteModeSelect) {
-    agentLibraryWriteModeSelect.value = getAgentLibraryWriteMode();
+    const originalPermissionOptions = getOriginalPermissionOptions();
+    const updateOriginalPermissionDescription = () => {
+      if (!agentLibraryWriteModeDescription) return;
+      const selected = originalPermissionOptions.find(
+        (option) => option.id === agentLibraryWriteModeSelect.value,
+      );
+      agentLibraryWriteModeDescription.textContent = selected
+        ? `${selected.fullLabel}: ${selected.description}`
+        : "";
+    };
+    renderPermissionPreferenceOptions({
+      select: agentLibraryWriteModeSelect,
+      options: originalPermissionOptions,
+      selectedId: getAgentLibraryWriteMode(),
+    });
+    updateOriginalPermissionDescription();
+    observePermissionPreference(
+      `${config.prefsPrefix}.agentLibraryWriteMode`,
+      () => {
+        agentLibraryWriteModeSelect.value = getAgentLibraryWriteMode();
+        updateOriginalPermissionDescription();
+      },
+    );
     agentLibraryWriteModeSelect.addEventListener("change", () => {
       setAgentLibraryWriteMode(
         normalizeAgentLibraryWriteMode(agentLibraryWriteModeSelect.value),
       );
+      updateOriginalPermissionDescription();
     });
   }
-  if (agentPermissionModeSelect) {
-    agentPermissionModeSelect.value = getClaudePermissionModePref();
-    agentPermissionModeSelect.addEventListener("change", () => {
-      setClaudePermissionModePref(
-        normalizeAgentPermissionMode(agentPermissionModeSelect.value),
-      );
-    });
-  }
-
   if (claudeCodeModelSelect) {
     claudeCodeModelSelect.addEventListener("change", () => {
       const selectedKey = claudeCodeModelSelect.value;

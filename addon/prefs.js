@@ -24,9 +24,11 @@ pref("enableClaudeCodeMode", false);
 pref("agentBackendBridgeUrl", "http://127.0.0.1:19787");
 pref("agentClaudeConfigSource", "default");
 pref("agentPermissionMode", "safe");
+pref("claudeCodePermissionMode", "default");
+pref("claudeCodePermissionModeMigrationDone", false);
 // How much the in-plugin agent may change the library unattended. Separate
-// from agentPermissionMode, whose help text promises it governs the Claude
-// Code bridge only -- see src/shared/agentLibraryWriteMode.ts.
+// from claudeCodePermissionMode, which governs the Claude Code bridge only --
+// see src/shared/agentLibraryWriteMode.ts.
 pref("agentLibraryWriteMode", "auto");
 pref("tavilyApiKey", "");
 pref("conversationSystem", "upstream");
@@ -38,6 +40,7 @@ pref("codexAppServerConversationModeMap", "");
 pref("codexAppServerZoteroMcpToolsEnabled", true);
 pref("codexAppServerNativeApprovalsEnabled", false);
 pref("codexAppServerApprovalsReviewer", "user");
+pref("codexAppServerPermissionProfile", ":read-only");
 pref("codexNativeSkillMode", "native");
 pref("codexNativeSkillRoutingMode", "hybrid");
 pref("codexAppServerGlobalConversationMap", "");

@@ -15,6 +15,9 @@ const PREF_MINERU_CONTENT_MD_CLEANUP = `${config.prefsPrefix}.migrationMineruCon
 const PREF_MINERU_MANIFEST_BUILD = `${config.prefsPrefix}.migrationMineruManifestBuildDone`;
 const PREF_NICKNAME_MIGRATION = `${config.prefsPrefix}.migrationNicknameAutoSetDone`;
 const PREF_ATTACHMENTS_VAULT_RELATIVE = `${config.prefsPrefix}.migrationAttachmentsVaultRelativeDone`;
+const PREF_CLAUDE_PERMISSION_MODE = `${config.prefsPrefix}.claudeCodePermissionMode`;
+const PREF_CLAUDE_PERMISSION_MODE_MIGRATION = `${config.prefsPrefix}.claudeCodePermissionModeMigrationDone`;
+const PREF_LEGACY_AGENT_PERMISSION_MODE = `${config.prefsPrefix}.agentPermissionMode`;
 
 const MIGRATABLE_PREF_KEYS = [
   "enable",
@@ -257,8 +260,26 @@ function migrateAttachmentsVaultRelative(): void {
   Zotero.Prefs.set(PREF_ATTACHMENTS_VAULT_RELATIVE, true, true);
 }
 
+export function migrateClaudePermissionMode(): void {
+  if (Zotero.Prefs.get(PREF_CLAUDE_PERMISSION_MODE_MIGRATION, true)) return;
+
+  if (!hasUserPref(PREF_CLAUDE_PERMISSION_MODE)) {
+    const legacyValue = hasUserPref(PREF_LEGACY_AGENT_PERMISSION_MODE)
+      ? Zotero.Prefs.get(PREF_LEGACY_AGENT_PERMISSION_MODE, true)
+      : undefined;
+    Zotero.Prefs.set(
+      PREF_CLAUDE_PERMISSION_MODE,
+      legacyValue === "yolo" ? "bypassPermissions" : "default",
+      true,
+    );
+  }
+
+  Zotero.Prefs.set(PREF_CLAUDE_PERMISSION_MODE_MIGRATION, true, true);
+}
+
 export function runStartupPreferenceMigrations(): void {
   migrateLegacyPrefs();
+  migrateClaudePermissionMode();
   migrateNickname();
   migrateAttachmentsVaultRelative();
 }

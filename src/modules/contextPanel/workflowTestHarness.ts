@@ -46,12 +46,19 @@ import type {
   WorkflowTestWebChatPdfTurn,
   WorkflowTestPendingDeletionState,
   WorkflowTestPendingSendDeleteResult,
+  WorkflowTestPermissionSurfaceDiagnostics,
   WorkflowTestHistoryRow,
   WorkflowTestHistorySearchResult,
   WorkflowTestSeededTurn,
   WorkflowTestConversationPersistenceSnapshot,
   WorkflowTestStaleAgentTraceIsolationResult,
 } from "./workflowTestTypes";
+import { setFooterPermissionCatalogLoadersForTests } from "./footerPermissionControl";
+import {
+  buildClaudePermissionOption,
+  buildCodexPermissionOption,
+  type PermissionOption,
+} from "../../shared/permissionOptions";
 import { forcePendingTurnFinalizeFailuresForTests } from "./pendingDeletionWiring";
 import {
   pendingDeletionStore,
@@ -119,6 +126,181 @@ import {
   activeCodexGlobalConversationByLibrary,
   activeCodexPaperConversationByPaper,
 } from "../../codexAppServer/state";
+
+let resolveDelayedCodexPermissionCatalog: (() => void) | null = null;
+
+function configurePermissionCatalogs(input?: {
+  delayFirstCodex?: boolean;
+}): void {
+  assertWorkflowTestEnabled();
+  let codexRequestCount = 0;
+  const claudeOptions = [
+    "plan",
+    "dontAsk",
+    "default",
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+  ].map((id) =>
+    buildClaudePermissionOption({
+      id: id as Parameters<typeof buildClaudePermissionOption>[0]["id"],
+    }),
+  );
+  const currentCodexOptions = [
+    { id: ":read-only", description: "Read files only.", allowed: true },
+    { id: ":workspace", description: "Write in the workspace.", allowed: true },
+    {
+      id: ":danger-full-access",
+      description: "Use the full local environment.",
+      allowed: true,
+    },
+    {
+      id: ":team_custom_profile",
+      description: "A custom managed team profile.",
+      allowed: true,
+    },
+  ].map(buildCodexPermissionOption);
+  const staleCodexOptions = [
+    {
+      id: ":stale-profile",
+      description: "A deliberately stale workflow response.",
+      allowed: true,
+    },
+  ].map(buildCodexPermissionOption);
+  resolveDelayedCodexPermissionCatalog = null;
+  setFooterPermissionCatalogLoadersForTests({
+    loadClaudeOptions: async () => claudeOptions,
+    loadCodexOptions: () => {
+      codexRequestCount += 1;
+      if (input?.delayFirstCodex && codexRequestCount === 1) {
+        return new Promise<PermissionOption[]>((resolve) => {
+          resolveDelayedCodexPermissionCatalog = () => {
+            resolve(staleCodexOptions);
+            resolveDelayedCodexPermissionCatalog = null;
+          };
+        });
+      }
+      return Promise.resolve(currentCodexOptions);
+    },
+  });
+}
+
+async function resolveDelayedCodexCatalog(): Promise<void> {
+  assertWorkflowTestEnabled();
+  resolveDelayedCodexPermissionCatalog?.();
+  await Zotero.Promise.delay(100);
+}
+
+function readPermissionSurface(
+  root: ParentNode | null | undefined,
+): WorkflowTestPermissionSurfaceDiagnostics {
+  const main = root?.querySelector("#llm-main") as HTMLElement | null;
+  const control = root?.querySelector(
+    "#llm-permission-control",
+  ) as HTMLElement | null;
+  const button = root?.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLButtonElement | null;
+  const menu = root?.querySelector(
+    "#llm-permission-menu",
+  ) as HTMLDivElement | null;
+  const rows = Array.from(
+    root?.querySelectorAll("#llm-permission-menu .llm-permission-option") || [],
+  ) as HTMLButtonElement[];
+  return {
+    provider:
+      (main?.dataset.conversationSystem as ConversationSystem | undefined) ??
+      null,
+    visible: Boolean(control && control.style.display !== "none"),
+    compactLabel: button?.textContent?.trim() || "",
+    accessibleName: button?.getAttribute("aria-label") || "",
+    disabled: button?.disabled ?? true,
+    expanded: button?.getAttribute("aria-expanded") === "true",
+    menuVisible: Boolean(menu && menu.style.display !== "none"),
+    rows: rows.map((row) => ({
+      id: row.dataset.permissionId || "",
+      label: row.textContent?.trim() || "",
+      level: "",
+      risk: "",
+      disabled: row.disabled,
+      accessibleName: row.getAttribute("aria-label") || "",
+    })),
+  };
+}
+
+async function clickPermissionToggle(
+  root: ParentNode,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const button = root.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error("Permission toggle was not rendered");
+  button.click();
+  await Zotero.Promise.delay(50);
+  return readPermissionSurface(root);
+}
+
+async function clickPermissionOption(
+  root: ParentNode,
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const deadline = Date.now() + 3000;
+  let row: HTMLButtonElement | undefined;
+  while (!row && Date.now() < deadline) {
+    row = (
+      Array.from(
+        root.querySelectorAll("#llm-permission-menu .llm-permission-option"),
+      ) as HTMLButtonElement[]
+    ).find((candidate) => candidate.dataset.permissionId === permissionId);
+    if (!row) await Zotero.Promise.delay(25);
+  }
+  if (!row)
+    throw new Error(`Permission option ${permissionId} was not rendered`);
+  row.click();
+  await Zotero.Promise.delay(100);
+  return readPermissionSurface(root);
+}
+
+function getPanelPermissionSurface(
+  panelId: string,
+): WorkflowTestPermissionSurfaceDiagnostics {
+  assertWorkflowTestEnabled();
+  return readPermissionSurface(getPanel(panelId).body);
+}
+
+async function clickPanelPermissionToggle(
+  panelId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return clickPermissionToggle(getPanel(panelId).body);
+}
+
+async function clickPanelPermissionOption(
+  panelId: string,
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return clickPermissionOption(getPanel(panelId).body, permissionId);
+}
+
+function getStandalonePermissionSurface(): WorkflowTestPermissionSurfaceDiagnostics {
+  assertWorkflowTestEnabled();
+  return readPermissionSurface(getStandaloneWindowForTest()?.document);
+}
+
+async function clickStandalonePermissionToggle(): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  return clickPermissionToggle(doc);
+}
+
+async function clickStandalonePermissionOption(
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  return clickPermissionOption(doc, permissionId);
+}
 import {
   removeLastUsedUpstreamConversationMode,
   removeLastUsedUpstreamGlobalConversationKey,
@@ -3266,6 +3448,9 @@ async function exerciseHighlightAwareContextRetrieval(input: {
 
 async function reset(): Promise<void> {
   assertWorkflowTestEnabled();
+  resolveDelayedCodexPermissionCatalog?.();
+  resolveDelayedCodexPermissionCatalog = null;
+  setFooterPermissionCatalogLoadersForTests();
   setAgentRunTraceLoaderForTests();
   await closeStandalone();
   lastSend = null;
@@ -3871,6 +4056,14 @@ export function installWorkflowTestHarness(targetAddon: {
     closeStandalone,
     getLastSend: () => lastSend,
     getDiagnostics,
+    configurePermissionCatalogs,
+    resolveDelayedCodexPermissionCatalog: resolveDelayedCodexCatalog,
+    getPanelPermissionSurface,
+    clickPanelPermissionToggle,
+    clickPanelPermissionOption,
+    getStandalonePermissionSurface,
+    clickStandalonePermissionToggle,
+    clickStandalonePermissionOption,
     exerciseReaderSelectionTrackingRecovery,
     exerciseReaderPopupActiveTabRouting,
     exerciseReaderPopupStandaloneRouting,

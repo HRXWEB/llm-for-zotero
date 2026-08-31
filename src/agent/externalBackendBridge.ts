@@ -18,10 +18,8 @@ import { buildScopedConversationKey } from "../shared/conversationScopedKey";
 import { getClaudeConversationSummary } from "../claudeCode/store";
 import { hasPendingEmptyClaudeCleanupJob } from "../core/conversations/conversationCleanupJobs";
 import { isNativeZoteroMcpToolsEnabled } from "../codexAppServer/prefs";
-import {
-  normalizeAgentPermissionMode,
-  type AgentPermissionMode,
-} from "../shared/agentPermissionMode";
+import type { ClaudePermissionMode } from "../shared/claudePermissionMode";
+import { getClaudePermissionModePref } from "../claudeCode/prefs";
 import {
   assertRequiredCodexZoteroMcpToolsReady,
   buildClaudeZoteroMcpServerConfig,
@@ -634,24 +632,12 @@ function getClaudeSettingSourcesCsvByPref(): string {
   return getClaudeSettingSourcesByPref().join(",");
 }
 
-function getAgentPermissionModePref(): AgentPermissionMode {
-  try {
-    const raw = Zotero.Prefs.get(
-      `${config.prefsPrefix}.agentPermissionMode`,
-      true,
-    );
-    return normalizeAgentPermissionMode(raw);
-  } catch {
-    return "safe";
-  }
-}
-
 function buildAgentPermissionMetadata(): {
-  permissionMode: AgentPermissionMode;
+  permissionMode: ClaudePermissionMode;
   allowDangerouslySkipPermissions?: true;
 } {
-  const permissionMode = getAgentPermissionModePref();
-  if (permissionMode === "yolo") {
+  const permissionMode = getClaudePermissionModePref();
+  if (permissionMode === "bypassPermissions") {
     return {
       permissionMode,
       allowDangerouslySkipPermissions: true,

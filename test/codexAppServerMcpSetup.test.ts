@@ -89,6 +89,7 @@ describe("Codex app-server MCP setup", function () {
   it("writes the Zotero MCP server config and reloads Codex MCP servers", async function () {
     const calls: Array<{ method: string; params: unknown }> = [];
     const proc = {
+      isProtocolInitialized: () => false,
       sendRequest: async (method: string, params?: unknown) => {
         calls.push({ method, params });
         if (method === "config/value/write") return {};
@@ -188,6 +189,7 @@ describe("Codex app-server MCP setup", function () {
   it("falls back to legacy config write shapes when dotted keyPath is unsupported", async function () {
     const calls: Array<{ method: string; params: unknown }> = [];
     const proc = {
+      isProtocolInitialized: () => false,
       sendRequest: async (method: string, params?: unknown) => {
         calls.push({ method, params });
         if (method === "config/value/write") {
@@ -243,6 +245,7 @@ describe("Codex app-server MCP setup", function () {
   it("probes a required profile-scoped MCP server without sending a model turn", async function () {
     const calls: Array<{ method: string; params: unknown }> = [];
     const proc = {
+      isProtocolInitialized: () => false,
       sendRequest: async (method: string, params?: unknown) => {
         calls.push({ method, params });
         if (method === "thread/start") {
@@ -298,6 +301,7 @@ describe("Codex app-server MCP setup", function () {
     assert.isTrue(localStatus.connected);
 
     const proc = {
+      isProtocolInitialized: () => false,
       sendRequest: async (method: string) => {
         if (method === "config/value/write") return {};
         if (method === "config/mcpServer/reload") return {};

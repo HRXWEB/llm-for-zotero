@@ -15,6 +15,8 @@ import {
   resolveCodexAppServerBinaryPath,
   type CodexAppServerProcess,
 } from "../utils/codexAppServerProcess";
+import { resolveCodexPermissionExecution } from "./permissionProfiles";
+import { resolveCodexNativeRuntimeCwd } from "./runtimeCwd";
 
 const DEFAULT_CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
 const MCP_PREFLIGHT_SUCCESS_TTL_MS = 5 * 60 * 1000;
@@ -58,6 +60,9 @@ type SetupParams = {
   scopeToken?: string;
   required?: boolean;
   rawPdfMode?: boolean;
+  permissionExecution?: Awaited<
+    ReturnType<typeof resolveCodexPermissionExecution>
+  >;
 };
 
 type PreflightCacheEntry =
@@ -524,6 +529,10 @@ export async function probeCodexZoteroMcpThroughAppServer(
   params: SetupParams = {},
 ): Promise<void> {
   const proc = await resolveProcess(params);
+  const cwd = resolveCodexNativeRuntimeCwd();
+  const permissionExecution =
+    params.permissionExecution ??
+    (await resolveCodexPermissionExecution({ proc, cwd }));
   codexMcpProbeSequence += 1;
   const profileSignature = `connection_probe_${Date.now().toString(36)}_${codexMcpProbeSequence}`;
   const threadConfig = buildCodexZoteroMcpThreadConfig({
@@ -535,7 +544,8 @@ export async function probeCodexZoteroMcpThroughAppServer(
     const threadResult = await proc.sendRequest("thread/start", {
       ephemeral: true,
       approvalPolicy: "never",
-      sandbox: "read-only",
+      ...permissionExecution.threadParams,
+      ...(cwd ? { cwd } : {}),
       config: threadConfig.config,
     });
     threadId = extractCodexAppServerThreadId(threadResult);

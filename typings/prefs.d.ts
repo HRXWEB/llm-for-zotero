@@ -33,6 +33,8 @@ declare namespace _ZoteroTypes {
       "agentBackendBridgeUrl": string;
       "agentClaudeConfigSource": string;
       "agentPermissionMode": string;
+      "claudeCodePermissionMode": string;
+      "claudeCodePermissionModeMigrationDone": boolean;
       "agentLibraryWriteMode": string;
       "tavilyApiKey": string;
       "conversationSystem": string;
@@ -44,6 +46,7 @@ declare namespace _ZoteroTypes {
       "codexAppServerZoteroMcpToolsEnabled": boolean;
       "codexAppServerNativeApprovalsEnabled": boolean;
       "codexAppServerApprovalsReviewer": string;
+      "codexAppServerPermissionProfile": string;
       "codexNativeSkillMode": string;
       "codexNativeSkillRoutingMode": string;
       "codexAppServerGlobalConversationMap": string;

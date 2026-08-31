@@ -49,7 +49,7 @@ describe("external bridge action approval handling", function () {
         get(key: string) {
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           if (key.endsWith("codexAppServerZoteroMcpToolsEnabled")) return false;
           return "";
@@ -120,7 +120,7 @@ describe("external bridge action approval handling", function () {
         get(key: string) {
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           if (key.endsWith("codexAppServerZoteroMcpToolsEnabled")) return false;
           return "";
@@ -188,7 +188,7 @@ describe("external bridge action approval handling", function () {
         get(key: string) {
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           return "";
         },
@@ -235,7 +235,7 @@ describe("external bridge action approval handling", function () {
     }
   });
 
-  it("sends Claude dangerous skip acknowledgement when permission mode is yolo", async function () {
+  it("sends Claude dangerous skip acknowledgement only for bypassPermissions", async function () {
     const originalFetch = globalThis.fetch;
     const originalZotero = (
       globalThis as typeof globalThis & { Zotero?: unknown }
@@ -247,7 +247,9 @@ describe("external bridge action approval handling", function () {
         get(key: string) {
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "yolo";
+          if (key.endsWith("claudeCodePermissionMode")) {
+            return "bypassPermissions";
+          }
           if (key.endsWith("conversationSystem")) return "claude_code";
           return "";
         },
@@ -282,7 +284,7 @@ describe("external bridge action approval handling", function () {
         file_path: "note.md",
       });
 
-      assert.equal(capturedBody?.metadata?.permissionMode, "yolo");
+      assert.equal(capturedBody?.metadata?.permissionMode, "bypassPermissions");
       assert.equal(
         capturedBody?.metadata?.allowDangerouslySkipPermissions,
         true,
@@ -309,7 +311,7 @@ describe("external bridge action approval handling", function () {
           if (prefStore.has(key)) return prefStore.get(key);
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           if (key.endsWith("codexAppServerZoteroMcpToolsEnabled")) return true;
           if (key.endsWith("obsidianVaultPath")) return "/tmp/obsidian-vault";
@@ -560,7 +562,7 @@ describe("external bridge action approval handling", function () {
           if (key === "httpServer.port") return 24680;
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           if (key.endsWith("codexAppServerZoteroMcpToolsEnabled")) return false;
           return "";
@@ -648,7 +650,7 @@ describe("external bridge action approval handling", function () {
         get(key: string) {
           if (key.endsWith("enableClaudeCodeMode")) return true;
           if (key.endsWith("agentClaudeConfigSource")) return "default";
-          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("claudeCodePermissionMode")) return "default";
           if (key.endsWith("conversationSystem")) return "claude_code";
           if (key.endsWith("codexAppServerZoteroMcpToolsEnabled")) return false;
           if (key.endsWith("agentTraceExportEnabled")) return false;

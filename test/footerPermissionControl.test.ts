@@ -1,48 +1,8 @@
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
-import {
-  FOOTER_PERMISSION_MODE_OPTIONS,
-  shouldShowFooterPermissionControl,
-} from "../src/modules/contextPanel/footerPermissionControl";
 import { positionFloatingMenu } from "../src/modules/contextPanel/setupHandlers/controllers/menuController";
 
 describe("footer permission control", function () {
-  it("exposes implemented modes and keeps plan as an honest placeholder", function () {
-    assert.deepEqual(FOOTER_PERMISSION_MODE_OPTIONS, [
-      { mode: "safe", available: true },
-      { mode: "auto", available: true },
-      { mode: "yolo", available: true },
-      { mode: "plan", available: false },
-    ]);
-  });
-
-  it("shows only for the original Agent Mode runtime", function () {
-    assert.isTrue(
-      shouldShowFooterPermissionControl({
-        conversationSystem: "upstream",
-        runtimeMode: "agent",
-      }),
-    );
-    assert.isFalse(
-      shouldShowFooterPermissionControl({
-        conversationSystem: "upstream",
-        runtimeMode: "chat",
-      }),
-    );
-    assert.isFalse(
-      shouldShowFooterPermissionControl({
-        conversationSystem: "claude_code",
-        runtimeMode: "agent",
-      }),
-    );
-    assert.isFalse(
-      shouldShowFooterPermissionControl({
-        conversationSystem: "codex",
-        runtimeMode: "chat",
-      }),
-    );
-  });
-
   it("keeps the permission selector and context gauge together on the footer right", function () {
     const buildUi = readFileSync("src/modules/contextPanel/buildUI.ts", "utf8");
 
@@ -54,7 +14,7 @@ describe("footer permission control", function () {
     assert.notInclude(buildUi, "llm-claude-context-gauge");
   });
 
-  it("uses mode-colored backgrounds only while an available option is hovered", function () {
+  it("preserves the committed one-label mode colors without secondary row text", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     const buildUi = readFileSync("src/modules/contextPanel/buildUI.ts", "utf8");
 
@@ -76,10 +36,8 @@ describe("footer permission control", function () {
       css,
       /\.llm-permission-option\[data-permission-mode="yolo"\]:hover:not\(:disabled\)\s*\{[\s\S]*?#eab308 14%/,
     );
-    assert.notInclude(
-      css,
-      '.llm-permission-option[data-permission-mode="plan"]',
-    );
+    assert.notInclude(css, 'data-permission-mode="plan"');
+    assert.notInclude(css, ".llm-permission-option-level");
     const selectedRules = css.match(
       /\.llm-permission-option-selected:not\(:disabled\)\s*\{([\s\S]*?)\n\}/,
     )?.[1];
