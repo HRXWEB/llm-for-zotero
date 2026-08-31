@@ -85,7 +85,13 @@ export function attachFooterPermissionControl(
   const open = () => {
     sync();
     if (control.style.display === "none") return;
-    positionFloatingMenu(body, menu, button);
+    positionFloatingMenu(body, menu, button, {
+      horizontalAlignment: "center",
+      verticalPlacement: "above",
+    });
+    if (menu.scrollHeight <= menu.clientHeight) {
+      menu.style.overflowY = "hidden";
+    }
     setFloatingMenuOpen(menu, FOOTER_PERMISSION_MENU_OPEN_CLASS, true);
     button.setAttribute("aria-expanded", "true");
   };

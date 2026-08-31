@@ -981,7 +981,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       type: "button",
       textContent: option.mode,
       disabled: !option.available,
-      title: option.available ? option.mode : t("Coming later"),
     });
     optionButton.dataset.permissionMode = option.mode;
     optionButton.setAttribute("role", "menuitemradio");
