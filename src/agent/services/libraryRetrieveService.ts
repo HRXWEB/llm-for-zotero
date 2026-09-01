@@ -21,6 +21,7 @@ import type {
   PdfChunkKind,
 } from "../../modules/contextPanel/types";
 import type { AgentRuntimeRequest } from "../types";
+import { resolveResearchPolicy } from "../research/policy";
 import { getTurnPaperScopeFromRequest } from "../context/requestTurnPaperScope";
 import type {
   PaperContextRef,
@@ -270,22 +271,26 @@ export type LibraryRetrieveResult = {
   warnings: string[];
 };
 
+const CHAT_RESEARCH_POLICY = resolveResearchPolicy("chat");
+
 export const LIBRARY_RETRIEVE_DEFAULT_BUDGETS = {
-  maxMetadataItems: 500,
-  maxCollectionMetadataItems: 2000,
-  maxCandidatePapers: 80,
-  maxEnumerateCandidatePapers: 200,
-  maxFullTextPapers: 30,
-  perPaperTopK: 3,
-  maxTotalSnippets: 80,
+  maxMetadataItems: CHAT_RESEARCH_POLICY.defaultMetadataItems,
+  maxCollectionMetadataItems:
+    CHAT_RESEARCH_POLICY.defaultCollectionMetadataItems,
+  maxCandidatePapers: CHAT_RESEARCH_POLICY.defaultCandidatePapers,
+  maxEnumerateCandidatePapers:
+    CHAT_RESEARCH_POLICY.defaultEnumerateCandidatePapers,
+  maxFullTextPapers: CHAT_RESEARCH_POLICY.defaultFullTextPapers,
+  perPaperTopK: CHAT_RESEARCH_POLICY.defaultSnippetsPerPaper,
+  maxTotalSnippets: CHAT_RESEARCH_POLICY.defaultTotalSnippets,
 } as const;
 
 export const LIBRARY_RETRIEVE_HARD_CAPS = {
-  maxMetadataItems: 5000,
-  maxCandidatePapers: 200,
-  maxFullTextPapers: 100,
-  perPaperTopK: 5,
-  maxTotalSnippets: 200,
+  maxMetadataItems: CHAT_RESEARCH_POLICY.maxMetadataItemsPerCall,
+  maxCandidatePapers: CHAT_RESEARCH_POLICY.maxCandidatePapersPerCall,
+  maxFullTextPapers: CHAT_RESEARCH_POLICY.maxFullTextPapersPerCall,
+  perPaperTopK: CHAT_RESEARCH_POLICY.maxSnippetsPerPaper,
+  maxTotalSnippets: CHAT_RESEARCH_POLICY.maxTotalSnippetsPerCall,
 } as const;
 
 function buildSnippetQuoteCitation(

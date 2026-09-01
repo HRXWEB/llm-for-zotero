@@ -1,3 +1,5 @@
+import { resolveResearchPolicy } from "../agent/research/policy";
+
 export type LibraryChatReadStrategy =
   | "catalog"
   | "abstract_map"
@@ -50,8 +52,11 @@ export type LibraryChatReadStrategyInput = {
   explicitPaperScope?: boolean;
 };
 
-export const DEEP_SYNTHESIS_MAX_PAPERS = 25;
-export const EVIDENCE_OVERVIEW_MAX_PAPERS = 80;
+const CHAT_RESEARCH_POLICY = resolveResearchPolicy("chat");
+export const DEEP_SYNTHESIS_MAX_PAPERS =
+  CHAT_RESEARCH_POLICY.deepSynthesisMaxPapers;
+export const EVIDENCE_OVERVIEW_MAX_PAPERS =
+  CHAT_RESEARCH_POLICY.evidenceOverviewMaxPapers;
 
 function normalizeText(value: unknown): string {
   return `${value ?? ""}`.replace(/\s+/g, " ").trim().toLowerCase();

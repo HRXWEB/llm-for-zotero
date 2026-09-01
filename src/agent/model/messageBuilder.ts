@@ -210,7 +210,25 @@ function buildFullUserMessage(
       | import("../plans/types").PlanExecutionLedger
       | null
       | undefined;
+    const approvedContract = request.metadata?.approvedPlanContract as
+      | import("../plans/types").PlanContract
+      | null
+      | undefined;
     if (ledger) {
+      const deliverableLines = approvedContract
+        ? approvedContract.deliverable.kind === "document"
+          ? [
+              "Approved document contract:",
+              `- Exact title: ${approvedContract.deliverable.spec.title}`,
+              `- Kind: ${approvedContract.deliverable.spec.kind}`,
+              `- Required sections: ${approvedContract.deliverable.spec.requiredSections.join("; ")}`,
+              `- References required: ${approvedContract.deliverable.spec.requiresReferences ? "yes" : "no"}`,
+              `- Coverage section required: ${approvedContract.deliverable.spec.requiresCoverageSection ? "yes" : "no"}`,
+              `- Citation style: ${approvedContract.deliverable.spec.citationStyle.styleTitle} (${approvedContract.deliverable.spec.citationStyle.locale})`,
+              "submit_plan_document.title must match the exact approved title above.",
+            ]
+          : [`Approved deliverable: ${approvedContract.deliverable.kind}.`]
+        : [];
       contextLines.push(
         [
           "APPROVED PLAN EXECUTION:",
@@ -224,6 +242,7 @@ function buildFullUserMessage(
               `   While active: ${task.activeForm}\n` +
               `   Acceptance: ${task.acceptanceCriteria.join("; ")}`,
           ),
+          ...deliverableLines,
           "The host has already started the first pending task and owns the full ledger. After evidence exists, call task_update with only the task or tasks whose status changes, using their exact taskId values. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks.",
           "Your final answer should answer the original request naturally. Do not expose plan IDs, execution IDs, task IDs, digests, or append a plan-status/checklist recap; the host renders progress separately.",
         ].join("\n"),

@@ -4,6 +4,7 @@ import type {
   ExecutionTaskStatus,
 } from "../../types";
 import { planExecutionCoordinator } from "../../plans/coordinator";
+import { listTaskEvidence } from "../../plans/store";
 import type { TaskEvidence } from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
 
@@ -118,7 +119,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
     spec: {
       name: "task_update",
       description:
-        "Update one or more task statuses in the approved plan. Submit only tasks whose status changes, using immutable task IDs; the host owns the full ledger, validates transitions and evidence, and automatically starts the next pending step.",
+        "Update one or more task statuses in the approved plan. Submit only tasks whose status changes, using immutable task IDs; the host owns the full ledger, validates transitions and evidence, and automatically starts the next pending step. Completing a reasoning task requires reasoningAssertion in the same task update.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -138,7 +139,11 @@ export function createTaskUpdateTool(): AgentToolDefinition<
                   enum: Array.from(STATUSES),
                 },
                 reason: { type: "string" },
-                reasoningAssertion: { type: "string" },
+                reasoningAssertion: {
+                  type: "string",
+                  description:
+                    "Required when completing a reasoning task. State the bounded conclusion that satisfies the approved acceptance criteria; this becomes verified reasoning evidence.",
+                },
                 parentTaskId: { type: "string" },
                 content: { type: "string" },
                 activeForm: { type: "string" },
@@ -159,13 +164,12 @@ export function createTaskUpdateTool(): AgentToolDefinition<
       },
       mutability: "read",
       requiresConfirmation: false,
-      localAgentOnly: true,
     },
     isAvailable: (request) => request.planContext?.phase === "executing",
     guidance: {
       matches: (request) => request.planContext?.phase === "executing",
       instruction:
-        "Execute the approved plan in order. The host starts the active task and owns the authoritative ledger. Call task_update with only the task or tasks whose status changes, using the immutable taskId from the approved-plan context. Existing tasks need only taskId and status. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, delete, reorder, or silently skip an approved task.",
+        "Execute the approved plan in order. The host starts the active task and owns the authoritative ledger. Call task_update with only the task or tasks whose status changes, using the immutable taskId from the approved-plan context. Existing tasks normally need only taskId and status, but when completing a task whose expectedEffect is reasoning or whose completion requirement is bounded_reasoning, include reasoningAssertion in that same update; otherwise completion is rejected. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, delete, reorder, or silently skip an approved task.",
     },
     validate: validateTaskUpdateInput,
     execute: async (input, context) => {
@@ -215,13 +219,24 @@ export function createTaskUpdateTool(): AgentToolDefinition<
               "Reasoning assertions cannot verify an external-effect task",
             );
           }
+          const requirement = current.completionRequirements?.find(
+            (entry) => entry.kind === "bounded_reasoning",
+          );
           const evidence: TaskEvidence = {
-            version: 1,
+            version: requirement ? 2 : 1,
             evidenceId: `${plan.executionId}:${request.taskId}:reasoning:${Date.now()}`,
             executionId: plan.executionId,
             taskId: request.taskId,
             kind: "reasoning_assertion",
             verified: true,
+            requirementId: requirement?.requirementId,
+            contractDigest: requirement?.contractDigest,
+            payload: requirement
+              ? {
+                  type: "bounded_reasoning",
+                  assertion: request.reasoningAssertion,
+                }
+              : undefined,
             summary: request.reasoningAssertion,
             createdAt: Date.now(),
           };
@@ -231,12 +246,23 @@ export function createTaskUpdateTool(): AgentToolDefinition<
           (task) => task.taskId === request.taskId,
         );
         if (latest && latest.status !== request.status) {
+          const requestedBy =
+            request.status === "skipped" && latest.expectedEffect === "mutation"
+              ? (await listTaskEvidence(plan.executionId, request.taskId)).some(
+                  (entry) =>
+                    entry.verified &&
+                    entry.kind === "validation" &&
+                    entry.reference?.startsWith("user-declined:"),
+                )
+                ? "user"
+                : plan.provider
+              : plan.provider;
           ledger = await planExecutionCoordinator.requestTransition({
             executionId: plan.executionId,
             taskId: request.taskId,
             toStatus: request.status,
             reason: request.reason,
-            requestedBy: plan.provider,
+            requestedBy,
           });
         }
       }

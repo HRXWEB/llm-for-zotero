@@ -535,8 +535,9 @@ function createAgentTurnEventHandler(
         return;
       }
       case "final":
+        assistantMessage.planDocumentId = event.planDocumentId;
         assistantMessage.text =
-          deps.sanitizeText(event.text) ||
+          (event.planDocumentId ? event.text : deps.sanitizeText(event.text)) ||
           assistantMessage.pendingFinalText ||
           assistantMessage.text;
         assistantMessage.pendingFinalText = undefined;
@@ -601,12 +602,16 @@ async function finalizeAgentTurnOutcome(ctx: {
 
   assistantMessage.agentRunId = outcome.runId;
   assistantMessage.runMode = "agent";
+  assistantMessage.planDocumentId =
+    outcome.kind === "completed" ? outcome.planDocumentId : undefined;
   const finalOutcomeText =
     outcome.kind === "completed"
       ? outcome.text
       : assistantMessage.pendingFinalText || assistantMessage.text;
   assistantMessage.text =
-    deps.sanitizeText(finalOutcomeText) ||
+    (assistantMessage.planDocumentId
+      ? finalOutcomeText
+      : deps.sanitizeText(finalOutcomeText)) ||
     assistantMessage.pendingFinalText ||
     assistantMessage.text ||
     "No response.";

@@ -6,6 +6,7 @@ import {
   buildAgentTraceMarkdownForRender,
   formatAgentActivityDuration,
   getPendingActionButtonLayout,
+  isFloatingPlanExecutionStatus,
   renderAgentTrace,
   renderAgentTraceDetailsBodyForTests,
   renderPendingActionCard,
@@ -64,6 +65,13 @@ class FakeClassList {
     for (const cls of classes) this.classes.delete(cls);
   }
 
+  toggle(cls: string, force?: boolean): boolean {
+    const enabled = force === undefined ? !this.classes.has(cls) : force;
+    if (enabled) this.classes.add(cls);
+    else this.classes.delete(cls);
+    return enabled;
+  }
+
   toString(): string {
     return Array.from(this.classes).join(" ");
   }
@@ -79,6 +87,7 @@ class FakeElement {
   public title = "";
   public disabled = false;
   public attributes: Record<string, string> = {};
+  public style: Record<string, string> = {};
   private copyableChildren: FakeElement[] = [];
   private html = "";
   private listeners = new Map<string, Array<(event: any) => void>>();
@@ -224,6 +233,12 @@ class FakeElement {
     return child;
   }
 
+  replaceChildren(...children: FakeElement[]): void {
+    this.children.splice(0, this.children.length, ...children);
+  }
+
+  focus(): void {}
+
   findByClass(className: string): FakeElement | null {
     if (this.classList.contains(className)) return this;
     for (const child of this.children) {
@@ -302,6 +317,7 @@ const fakeDocument = {
   createElement: (tagName: string) => new FakeElement(tagName),
   createElementNS: (_namespace: string, tagName: string) =>
     new FakeElement(tagName),
+  querySelectorAll: () => [],
 } as unknown as Document;
 
 const throwingTemplateDocument = {
@@ -999,6 +1015,14 @@ describe("rendered Markdown code block source controls", function () {
 });
 
 describe("agentTrace render", function () {
+  it("floats only active or recoverable Plan execution states", function () {
+    assert.isTrue(isFloatingPlanExecutionStatus("running"));
+    assert.isTrue(isFloatingPlanExecutionStatus("interrupted"));
+    assert.isTrue(isFloatingPlanExecutionStatus("waiting_for_user"));
+    assert.isFalse(isFloatingPlanExecutionStatus("completed"));
+    assert.isFalse(isFloatingPlanExecutionStatus("failed"));
+  });
+
   it("formats compact Codex-style activity durations", function () {
     assert.equal(formatAgentActivityDuration(250), "1s");
     assert.equal(formatAgentActivityDuration(259_000), "4m 19s");
@@ -1230,6 +1254,106 @@ describe("agentTrace render", function () {
       "Executing plan…",
     );
     assert.isNull(executing.findByClass("llm-at-planning-drive"));
+  });
+
+  it("renders execution progress as a compact accessible pill with the full ledger in a popover", function () {
+    const makeTask = (
+      id: string,
+      status: "completed" | "in_progress" | "pending",
+      content: string,
+    ) => ({
+      version: 1 as const,
+      taskId: id,
+      executionId: "execution-pill",
+      planStepId: id,
+      kind: "required_step" as const,
+      content,
+      activeForm: status === "in_progress" ? "Drafting the brief" : content,
+      acceptanceCriteria: [`${content} is complete`],
+      expectedEffect: "artifact" as const,
+      obligationIds: [],
+      status,
+      attemptCount: status === "pending" ? 0 : 1,
+      evidenceIds: status === "completed" ? [`evidence-${id}`] : [],
+      failureReasons: [],
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-plan-pill",
+        seq: 1,
+        eventType: "plan_execution_updated",
+        payload: {
+          type: "plan_execution_updated",
+          ledger: {
+            version: 1,
+            executionId: "execution-pill",
+            planId: "plan-pill",
+            revision: 1,
+            planDigest: "digest",
+            conversationKey: 1,
+            attempt: 1,
+            provider: "original",
+            grant: {
+              version: 1,
+              planId: "plan-pill",
+              revision: 1,
+              planDigest: "digest",
+              conversationKey: 1,
+              conversationGeneration: 1,
+              approvedAt: 1,
+            },
+            status: "running",
+            activeTaskId: "step-2",
+            tasks: [
+              makeTask("step-1", "completed", "Search the library"),
+              makeTask("step-2", "in_progress", "Draft the document"),
+              makeTask("step-3", "pending", "Finalize references"),
+            ],
+            evidence: [],
+            startedAt: 1,
+            updatedAt: 2,
+          },
+        },
+        createdAt: 2,
+      },
+    ];
+
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text: "Evidence is being synthesized.",
+        timestamp: 2,
+        runMode: "agent",
+        streaming: true,
+      },
+      events,
+    }) as unknown as FakeElement;
+    const root = trace.findByClass("llm-plan-container-execution");
+    const trigger = root?.findByClass("llm-plan-progress-trigger");
+    const popover = root?.findByClass("llm-plan-progress-popover");
+
+    assert.exists(root);
+    assert.equal(root?.dataset.llmPlanExecutionId, "execution-pill");
+    assert.equal(root?.dataset.llmPlanExecutionStatus, "running");
+    assert.include(collectFakeText(trigger), "Task progress");
+    assert.include(collectFakeText(trigger), "1 / 3");
+    assert.include(collectFakeText(trigger), "Drafting the brief");
+    assert.equal(trigger?.attributes["aria-expanded"], "false");
+    assert.exists(popover?.findByClass("llm-plan-task-list"));
+
+    root?.dispatchFakeEvent("mouseenter");
+    assert.isTrue(root?.classList.contains("llm-plan-progress-hover"));
+    root?.dispatchFakeEvent("mouseleave");
+    assert.isFalse(root?.classList.contains("llm-plan-progress-hover"));
+
+    trigger?.dispatchFakeEvent("click");
+    assert.isTrue(root?.classList.contains("llm-plan-progress-open"));
+    assert.equal(trigger?.attributes["aria-expanded"], "true");
+    trigger?.dispatchFakeEvent("click");
+    assert.isFalse(root?.classList.contains("llm-plan-progress-open"));
   });
 
   it("keeps host-owned plan bookkeeping out of the visible tool trace", function () {

@@ -54,7 +54,10 @@ import type {
   PlanExecutionLedger,
 } from "../../../agent/types";
 import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import { loadPlanArtifact } from "../../../agent/plans/store";
+import {
+  loadPlanArtifact,
+  loadPlanExecutionLedger,
+} from "../../../agent/plans/store";
 import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import {
   PLAN_APPROVED_EVENT,
@@ -63,6 +66,21 @@ import {
   stageApprovedPlanExecution,
 } from "../planModeState";
 import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
+import { loadPlanDocument } from "../../../agent/documents/store";
+import {
+  exportPlanDocumentMarkdown,
+  savePlanDocumentAsNote,
+} from "../../../agent/documents/actions";
+import { copyTextToClipboard } from "../clipboard";
+import type { PlanDocument } from "../../../agent/documents/types";
+import {
+  decoratePlanDocumentCitations,
+  getPlanDocumentItemTitle as itemTitle,
+  navigatePlanDocumentCitationSource,
+  planDocumentCitationSourceHref as citationSourceHref,
+  renderPlanDocumentFigures,
+} from "../planDocumentPresentation";
+import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -70,6 +88,10 @@ const INTERNAL_PLAN_TOOL_NAMES = new Set([
   "update_plan",
   "task_update",
   "request_user_input",
+  "submit_plan_document",
+  "research_update",
+  "approve_research_expansion",
+  "approve_research_mutation",
 ]);
 
 type AgentTraceSummaryRow = {
@@ -4062,6 +4084,20 @@ const PLAN_STATUS_SYMBOLS: Record<string, string> = {
   cancelled: "×",
 };
 
+export function isFloatingPlanExecutionStatus(
+  status: string | undefined,
+): boolean {
+  return [
+    "pending",
+    "running",
+    "waiting_for_user",
+    "interrupted",
+    "blocked",
+  ].includes(status || "");
+}
+
+let planContainerRenderSequence = 0;
+
 function dispatchPlanEvent(
   root: HTMLElement,
   name: string,
@@ -4115,6 +4151,7 @@ function renderPlanContainer(params: {
 }): HTMLElement {
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container";
+  root.dataset.llmPlanRenderSequence = `${++planContainerRenderSequence}`;
   const actionContract = getPlanActionContract(params.events);
 
   const artifactStatusLabel = (status: PlanArtifact["status"]): string => {
@@ -4280,6 +4317,110 @@ function renderPlanContainer(params: {
     return tasks;
   };
 
+  const wrapExecutionProgress = (ledger: PlanExecutionLedger): void => {
+    const required = ledger.tasks.filter(
+      (entry) => entry.kind === "required_step",
+    );
+    const completed = required.filter(
+      (entry) => entry.status === "completed",
+    ).length;
+    const activeTask = ledger.tasks.find(
+      (entry) => entry.status === "in_progress",
+    );
+    const detailChildren = Array.from(root.children);
+    const liveRegion = detailChildren.find((child) =>
+      child.classList.contains("llm-plan-live-region"),
+    );
+
+    const trigger = params.doc.createElement("button");
+    trigger.type = "button";
+    trigger.className = "llm-plan-progress-trigger";
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-label", "Show task progress details");
+    const dot = params.doc.createElement("span");
+    dot.className = "llm-plan-progress-trigger-dot";
+    dot.dataset.status = ledger.status;
+    dot.setAttribute("aria-hidden", "true");
+    const label = params.doc.createElement("strong");
+    label.className = "llm-plan-progress-trigger-label";
+    label.textContent = "Task progress";
+    const count = params.doc.createElement("span");
+    count.className = "llm-plan-progress-trigger-count";
+    count.textContent = `${completed} / ${required.length}`;
+    const current = params.doc.createElement("span");
+    current.className = "llm-plan-progress-trigger-current";
+    current.textContent =
+      activeTask?.activeForm || executionStatusLabel(ledger.status);
+    const chevron = params.doc.createElement("span");
+    chevron.className = "llm-plan-progress-trigger-chevron";
+    chevron.textContent = "⌃";
+    chevron.setAttribute("aria-hidden", "true");
+    trigger.append(dot, label, count, current, chevron);
+
+    const popover = params.doc.createElement("div");
+    popover.className = "llm-plan-progress-popover";
+    popover.setAttribute("aria-label", "Task progress details");
+    for (const child of detailChildren) {
+      if (child !== liveRegion) popover.appendChild(child);
+    }
+
+    const positionFloatingPopover = () => {
+      if (!root.classList.contains("llm-plan-progress-floating")) return;
+      const anchor = trigger.getBoundingClientRect();
+      const container = root.parentElement?.getBoundingClientRect();
+      const viewportWidth = params.doc.documentElement.clientWidth;
+      const viewportHeight = params.doc.documentElement.clientHeight;
+      const boundaryLeft = container?.left ?? 0;
+      const boundaryRight = container?.right ?? viewportWidth;
+      const availableWidth = Math.max(260, boundaryRight - boundaryLeft - 16);
+      const width = Math.min(640, availableWidth);
+      const centeredLeft = anchor.left + anchor.width / 2 - width / 2;
+      const left = Math.max(
+        boundaryLeft + 8,
+        Math.min(centeredLeft, boundaryRight - width - 8),
+      );
+      popover.style.position = "fixed";
+      popover.style.right = "auto";
+      popover.style.bottom = `${Math.max(8, viewportHeight - anchor.top + 7)}px`;
+      popover.style.left = `${left}px`;
+      popover.style.width = `${width}px`;
+      popover.style.maxHeight = `${Math.max(
+        160,
+        Math.min(viewportHeight * 0.7, anchor.top - 24),
+      )}px`;
+    };
+
+    const setPinnedOpen = (open: boolean) => {
+      if (open) positionFloatingPopover();
+      root.classList.toggle("llm-plan-progress-open", open);
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+      trigger.setAttribute(
+        "aria-label",
+        open ? "Hide task progress details" : "Show task progress details",
+      );
+    };
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPinnedOpen(!root.classList.contains("llm-plan-progress-open"));
+    });
+    root.addEventListener("mouseenter", () => {
+      positionFloatingPopover();
+      root.classList.add("llm-plan-progress-hover");
+    });
+    root.addEventListener("mouseleave", () => {
+      root.classList.remove("llm-plan-progress-hover");
+    });
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      setPinnedOpen(false);
+      trigger.focus();
+    });
+
+    root.replaceChildren(trigger, popover);
+    if (liveRegion) root.appendChild(liveRegion);
+  };
+
   const paint = (
     projection:
       | { artifact: PlanArtifact; ledger?: undefined }
@@ -4292,6 +4433,13 @@ function renderPlanContainer(params: {
     const revision = artifact?.revision || ledger!.revision;
     root.dataset.llmPlanId = planId;
     root.dataset.llmPlanRevision = `${revision}`;
+    if (ledger) {
+      root.dataset.llmPlanExecutionId = ledger.executionId;
+      root.dataset.llmPlanExecutionStatus = ledger.status;
+    } else {
+      delete root.dataset.llmPlanExecutionId;
+      delete root.dataset.llmPlanExecutionStatus;
+    }
     root.classList.toggle("llm-plan-container-execution", Boolean(ledger));
     root.setAttribute("aria-label", ledger ? "Task progress" : "Plan");
 
@@ -4320,6 +4468,19 @@ function renderPlanContainer(params: {
 
     if (artifact) {
       root.appendChild(renderArtifactMarkdown(artifact));
+      const snapshot = artifact.contract?.investigation?.scopeSnapshot;
+      if (snapshot) {
+        const scope = params.doc.createElement("div");
+        scope.className = "llm-plan-scope-snapshot";
+        const createdAt = new Date(snapshot.createdAt).toLocaleString();
+        const shortDigest =
+          snapshot.digest.length > 24
+            ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
+            : snapshot.digest;
+        scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
+        scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
+        root.appendChild(scope);
+      }
     } else {
       const required = ledger!.tasks.filter(
         (entry) => entry.kind === "required_step",
@@ -4342,6 +4503,20 @@ function renderPlanContainer(params: {
       progressTrack.appendChild(progressFill);
       progress.append(progressCopy, progressTrack);
       root.append(progress, renderExecutionTasks(ledger!));
+      const researchProgress = [...params.events]
+        .reverse()
+        .map((entry) => entry.payload)
+        .find(
+          (event) =>
+            event.type === "plan_research_progress" &&
+            event.progress.executionId === ledger!.executionId,
+        );
+      if (researchProgress?.type === "plan_research_progress") {
+        const research = params.doc.createElement("div");
+        research.className = "llm-plan-research-progress";
+        research.textContent = `Screened ${researchProgress.progress.screenedItems.toLocaleString()}/${researchProgress.progress.totalItems.toLocaleString()}; deep-read ${researchProgress.progress.deepReadCompleted.toLocaleString()}/${researchProgress.progress.candidateItems.toLocaleString()}`;
+        root.appendChild(research);
+      }
     }
 
     const live = params.doc.createElement("div");
@@ -4497,6 +4672,17 @@ function renderPlanContainer(params: {
         })();
       });
     }
+
+    if (ledger) {
+      const wasFloating = root.classList.contains("llm-plan-progress-floating");
+      wrapExecutionProgress(ledger);
+      if (wasFloating && !isFloatingPlanExecutionStatus(ledger.status)) {
+        root.classList.remove("llm-plan-progress-floating");
+        if (root.parentElement?.classList.contains("llm-messages")) {
+          root.remove();
+        }
+      }
+    }
   };
 
   paint(params.projection);
@@ -4507,6 +4693,312 @@ function renderPlanContainer(params: {
       if (stored) paint({ artifact: stored });
     });
   }
+  const ledger = params.projection.ledger;
+  if (ledger) {
+    params.doc.defaultView?.setTimeout(() => {
+      if (!root.isConnected && !root.parentElement) return;
+      void loadPlanExecutionLedger(ledger.executionId)
+        .then((stored) => {
+          if (stored && stored.updatedAt > ledger.updatedAt) {
+            paint({ ledger: stored });
+          }
+        })
+        .catch((error) => {
+          ztoolkit.log("LLM: Failed to refresh Plan execution ledger:", error);
+        });
+    }, 0);
+  }
+  return root;
+}
+
+function getPlanDocumentId(events: AgentRunEventRecord[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index].payload;
+    if (event.type === "plan_document_ready") return event.documentId;
+  }
+  return null;
+}
+
+function createDocumentActionButton(params: {
+  doc: Document;
+  className: string;
+  title: string;
+}): HTMLButtonElement {
+  const button = params.doc.createElement("button") as HTMLButtonElement;
+  button.type = "button";
+  button.className = `llm-plan-document-action ${params.className}`;
+  button.title = params.title;
+  button.setAttribute("aria-label", params.title);
+  return button;
+}
+
+function renderCoverageInspector(
+  doc: Document,
+  document: PlanDocument,
+): HTMLElement | null {
+  if (!document.coverageItems.length) return null;
+  const details = doc.createElement("details");
+  details.className = "llm-plan-document-coverage";
+  const summary = doc.createElement("summary");
+  summary.textContent = "View coverage";
+  const controls = doc.createElement("div");
+  controls.className = "llm-plan-document-coverage-controls";
+  const search = doc.createElement("input") as HTMLInputElement;
+  search.type = "search";
+  search.placeholder = "Search papers";
+  search.setAttribute("aria-label", "Search covered papers");
+  const filter = doc.createElement("select") as HTMLSelectElement;
+  filter.setAttribute("aria-label", "Filter coverage status");
+  for (const value of [
+    "all",
+    "included",
+    "excluded",
+    "unresolved",
+    "unreadable",
+    "missing",
+  ]) {
+    const option = doc.createElement("option");
+    option.value = value;
+    option.textContent = value[0].toUpperCase() + value.slice(1);
+    filter.appendChild(option);
+  }
+  controls.append(search, filter);
+  const list = doc.createElement("div");
+  list.className = "llm-plan-document-coverage-list";
+  const paint = () => {
+    list.replaceChildren();
+    const term = search.value.trim().toLowerCase();
+    const status = filter.value;
+    for (const entry of document.coverageItems) {
+      const title = entry.title || itemTitle(entry.libraryID, entry.itemKey);
+      if (status !== "all" && entry.status !== status) continue;
+      if (
+        term &&
+        !`${title} ${entry.reason || ""} ${entry.itemKey}`
+          .toLowerCase()
+          .includes(term)
+      ) {
+        continue;
+      }
+      const row = doc.createElement("div");
+      row.className = "llm-plan-document-coverage-row";
+      const link = doc.createElement("a");
+      const source = {
+        libraryID: entry.libraryID,
+        itemKey: entry.itemKey,
+        evidenceRefs: [],
+      };
+      link.href = citationSourceHref(source);
+      link.textContent = title;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        void navigatePlanDocumentCitationSource(source);
+      });
+      const metadata = doc.createElement("span");
+      metadata.textContent = `${entry.status} · ${entry.evidenceDepth}${
+        entry.reason ? ` · ${entry.reason}` : ""
+      }`;
+      row.append(link, metadata);
+      list.appendChild(row);
+    }
+    if (!list.childElementCount) {
+      const empty = doc.createElement("div");
+      empty.className = "llm-plan-document-coverage-empty";
+      empty.textContent = "No matching papers";
+      list.appendChild(empty);
+    }
+  };
+  search.addEventListener("input", paint);
+  filter.addEventListener("change", paint);
+  paint();
+  details.append(summary, controls, list);
+  return details;
+}
+
+type DocumentFilePicker = {
+  init?: (parent: unknown, title: string, mode: number) => void;
+  appendFilter?: (title: string, pattern: string) => void;
+  open?: (callback: (result: number) => void) => void;
+  show?: () => number | Promise<number>;
+  defaultString?: string;
+  defaultExtension?: string;
+  file?: string | { path?: string };
+  modeSave?: number;
+  returnOK?: number;
+  returnReplace?: number;
+};
+
+async function pickMarkdownExportPath(
+  doc: Document,
+  defaultName: string,
+): Promise<string | null> {
+  let Constructor = (
+    Zotero as unknown as { FilePicker?: new () => DocumentFilePicker }
+  ).FilePicker;
+  if (!Constructor) {
+    try {
+      Constructor = (globalThis as any).ChromeUtils?.importESModule?.(
+        "chrome://zotero/content/modules/filePicker.mjs",
+      )?.FilePicker;
+    } catch {
+      Constructor = undefined;
+    }
+  }
+  if (!Constructor) throw new Error("Zotero file picker is unavailable");
+  const picker = new Constructor();
+  const parent = Zotero.getMainWindow?.() || doc.defaultView;
+  picker.init?.(parent, "Export plan document", picker.modeSave ?? 0);
+  picker.defaultString = defaultName.endsWith(".md")
+    ? defaultName
+    : `${defaultName}.md`;
+  picker.defaultExtension = "md";
+  picker.appendFilter?.("Markdown", "*.md");
+  const result = await new Promise<number>((resolve, reject) => {
+    try {
+      if (picker.open) picker.open(resolve);
+      else if (picker.show)
+        void Promise.resolve(picker.show()).then(resolve, reject);
+      else resolve(-1);
+    } catch (error) {
+      reject(error);
+    }
+  });
+  const accepted =
+    result === picker.returnOK ||
+    result === picker.returnReplace ||
+    (picker.returnOK === undefined &&
+      picker.returnReplace === undefined &&
+      result === 0);
+  if (!accepted) return null;
+  return typeof picker.file === "string"
+    ? picker.file
+    : picker.file?.path || null;
+}
+
+function renderPlanDocumentCard(params: {
+  doc: Document;
+  documentId: string;
+}): HTMLElement {
+  const root = params.doc.createElement("section");
+  root.className = "llm-plan-container llm-plan-document-card";
+  root.dataset.llmPlanDocumentId = params.documentId;
+  root.textContent = "Loading document…";
+
+  const paint = (document: PlanDocument) => {
+    root.replaceChildren();
+    const header = params.doc.createElement("header");
+    header.className = "llm-plan-header llm-plan-document-header";
+    const heading = params.doc.createElement("div");
+    heading.className = "llm-plan-heading";
+    const title = params.doc.createElement("span");
+    title.className = "llm-plan-title";
+    title.textContent = document.title;
+    const status = params.doc.createElement("span");
+    status.className = "llm-plan-status";
+    status.dataset.status = document.validation.integrityValidated
+      ? "completed"
+      : "failed";
+    status.textContent = document.coverageStatus
+      ? document.coverageStatus.replace(/_/g, " ")
+      : "Ready";
+    heading.append(title, status);
+    const actions = params.doc.createElement("div");
+    actions.className = "llm-plan-document-actions";
+    const actionStatus = params.doc.createElement("span");
+    actionStatus.className = "llm-plan-document-action-status";
+    const setActionStatus = (text: string, error = false) => {
+      actionStatus.textContent = text;
+      actionStatus.dataset.error = error ? "true" : "false";
+    };
+    const copy = createDocumentActionButton({
+      doc: params.doc,
+      className: "llm-plan-document-action-copy",
+      title: "Copy Markdown",
+    });
+    copy.addEventListener("click", async () => {
+      await copyTextToClipboard(root, document.visibleMarkdown);
+      setActionStatus("Copied");
+    });
+    const note = createDocumentActionButton({
+      doc: params.doc,
+      className: "llm-plan-document-action-note",
+      title: "Save into Zotero note",
+    });
+    note.addEventListener("click", async () => {
+      note.disabled = true;
+      try {
+        const saved = await savePlanDocumentAsNote(document.documentId);
+        const label = saved.created ? "Saved as note" : "Note already saved";
+        setActionStatus(
+          saved.warnings.length
+            ? `${label}; ${saved.warnings.join("; ")}`
+            : label,
+          saved.warnings.length > 0,
+        );
+      } catch (error) {
+        setActionStatus(
+          error instanceof Error ? error.message : String(error),
+          true,
+        );
+      } finally {
+        note.disabled = false;
+      }
+    });
+    const exportButton = createDocumentActionButton({
+      doc: params.doc,
+      className: "llm-plan-document-action-export",
+      title: "Export Markdown",
+    });
+    exportButton.addEventListener("click", async () => {
+      try {
+        const path = await pickMarkdownExportPath(params.doc, document.title);
+        if (!path) return;
+        await exportPlanDocumentMarkdown(document.documentId, path);
+        setActionStatus("Exported");
+      } catch (error) {
+        setActionStatus(
+          error instanceof Error ? error.message : String(error),
+          true,
+        );
+      }
+    });
+    const expand = createDocumentActionButton({
+      doc: params.doc,
+      className: "llm-plan-document-action-expand",
+      title: "Open larger view",
+    });
+    expand.addEventListener("click", () => {
+      if (openStandalonePlanDocumentWindow(params.doc, document)) {
+        setActionStatus("Opened in a separate window");
+      } else {
+        setActionStatus("The document window could not be opened", true);
+      }
+    });
+    actions.append(copy, note, exportButton, expand);
+    header.append(heading, actions);
+    const content = params.doc.createElement("article");
+    content.className = "llm-plan-markdown llm-plan-document-content";
+    renderRenderedMarkdownInto(content, document.visibleMarkdown, params.doc);
+    decoratePlanDocumentCitations({
+      doc: params.doc,
+      root: content,
+      document,
+    });
+    const coverage = renderCoverageInspector(params.doc, document);
+    root.append(header, actionStatus, content);
+    const figures = renderPlanDocumentFigures(params.doc, document);
+    if (figures) root.appendChild(figures);
+    if (coverage) root.appendChild(coverage);
+  };
+
+  void loadPlanDocument(params.documentId)
+    .then((document) => {
+      if (document) paint(document);
+      else root.textContent = "Document is unavailable";
+    })
+    .catch((error) => {
+      root.textContent = error instanceof Error ? error.message : String(error);
+    });
   return root;
 }
 
@@ -4767,6 +5259,20 @@ export function renderAgentTrace({
       events,
       projection: planProjection,
     });
+    if (planProjection.ledger) {
+      const priorExecutionCards = Array.from(
+        doc.querySelectorAll(
+          ".llm-plan-container-execution[data-llm-plan-execution-id]",
+        ),
+      ).filter(Boolean) as HTMLElement[];
+      for (const node of priorExecutionCards) {
+        if (
+          node.dataset.llmPlanExecutionId === planProjection.ledger.executionId
+        ) {
+          node.remove();
+        }
+      }
+    }
     const planId =
       planProjection.artifact?.planId || planProjection.ledger!.planId;
     for (const node of Array.from(
@@ -4792,11 +5298,25 @@ export function renderAgentTrace({
     wrap.appendChild(planContainer);
   }
 
+  const planDocumentId = getPlanDocumentId(events);
+  if (planDocumentId) {
+    // The immutable card is the visible deliverable. The message text remains
+    // byte-identical durable history and future-model context, but rendering it
+    // again below the card would create two apparent answers.
+    onInterleavedText?.();
+    wrap.appendChild(
+      renderPlanDocumentCard({ doc, documentId: planDocumentId }),
+    );
+  }
+
   // The rule separates the activity trace from the answer, so visible answer
   // text is authoritative even when a restored row retained a stale streaming
   // flag or no longer has its original `final` event.
   const hasAnswerText = Boolean(message.text?.trim());
-  if (hasFinalResponse || (hasAnswerText && !inlineTextReplacesAssistantText)) {
+  if (
+    !planDocumentId &&
+    (hasFinalResponse || (hasAnswerText && !inlineTextReplacesAssistantText))
+  ) {
     const divider = doc.createElement("div");
     divider.className = "llm-agent-output-divider";
     divider.setAttribute("aria-hidden", "true");

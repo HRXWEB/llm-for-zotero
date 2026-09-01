@@ -39,9 +39,9 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
     "Zotero.Items.getAll",
   ],
   "literature-review.md": [
-    "Phase 1 — Paper Discovery",
-    "Phase 2 — Selective Deep Reading",
-    "Phase 3 — Synthesis and Writing",
+    "central ResearchPolicy owns corpus budgets",
+    "inventory every frozen item",
+    "finish with `submit_plan_document`",
   ],
   "simple-paper-qa.md": [
     "one read, then answer",

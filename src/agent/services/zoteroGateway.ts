@@ -5040,6 +5040,166 @@ export class ZoteroGateway {
     }
   }
 
+  /**
+   * Formats document citation clusters and keeps bibliography entries paired
+   * with their Zotero items. Unlike formatBibliography(), this preserves the
+   * structure needed for source navigation and multi-surface serialization.
+   */
+  formatStructuredCitations(params: {
+    clusters: Array<{
+      citationId: string;
+      items: Array<{ itemId: number; pageIndex?: number }>;
+    }>;
+    styleId?: string;
+    locale?: string;
+  }): {
+    styleId: string;
+    styleTitle: string;
+    locale: string;
+    clusters: Array<{ citationId: string; text: string; html: string }>;
+    bibliographyEntries: Array<{
+      itemId: number;
+      text: string;
+      html: string;
+    }>;
+  } {
+    const Styles = (
+      Zotero as unknown as {
+        Styles?: { get?: (id: string) => unknown };
+      }
+    ).Styles;
+    if (!Styles?.get) {
+      throw new Error("Zotero's citation style registry is unavailable");
+    }
+    const styleId =
+      params.styleId ||
+      String(
+        (
+          Zotero as unknown as {
+            Prefs?: { get?: (key: string) => unknown };
+          }
+        ).Prefs?.get?.("export.quickCopy.setting") || "",
+      ).replace(/^bibliography(?:\/[^/]*)?=/, "") ||
+      "http://www.zotero.org/styles/apa";
+    const locale = params.locale || "en-US";
+    const style = Styles.get(styleId) as {
+      title?: string;
+      getCiteProc?: (
+        locale: string,
+        format: string,
+        options?: { cache?: boolean },
+      ) => {
+        free?: () => void;
+        updateItems?: (ids: number[]) => void;
+        previewCitationCluster?: (
+          citation: unknown,
+          citationsPre: Array<[string, number]>,
+          citationsPost: Array<[string, number]>,
+          format: string,
+        ) => string;
+        makeBibliography?: () =>
+          | [{ entry_ids?: Array<Array<string | number>> }, string[]]
+          | false;
+      };
+    };
+    if (!style?.getCiteProc) {
+      throw new Error(`Citation style "${styleId}" is not installed`);
+    }
+    const itemIds = Array.from(
+      new Set(
+        params.clusters.flatMap((cluster) =>
+          cluster.items.map((item) => Number(item.itemId)),
+        ),
+      ),
+    ).filter((itemId) => Number.isInteger(itemId) && itemId > 0);
+    if (!itemIds.length) {
+      throw new Error("A structured citation bundle requires citable items");
+    }
+    const format = (outputFormat: "text" | "html") => {
+      const engine = style.getCiteProc!(locale, outputFormat, { cache: true });
+      try {
+        engine.updateItems?.(itemIds);
+        const clusters = params.clusters.map((cluster) => {
+          const output =
+            engine.previewCitationCluster?.(
+              {
+                citationID: cluster.citationId,
+                citationItems: cluster.items.map((item) => ({
+                  id: item.itemId,
+                  ...(typeof item.pageIndex === "number"
+                    ? { locator: String(item.pageIndex + 1), label: "page" }
+                    : {}),
+                })),
+                properties: { noteIndex: 0 },
+              },
+              // previewCitationCluster() does not register the previewed
+              // citation in citeproc's citation registry. Passing an earlier
+              // preview as citationsPre therefore makes Zotero look up a
+              // citation that does not exist and crashes on citationItems.
+              // Document clusters are serialized independently, so preview
+              // each one without synthetic prior/post citation IDs.
+              [],
+              [],
+              outputFormat,
+            ) || "";
+          return { citationId: cluster.citationId, output };
+        });
+        const bibliography = engine.makeBibliography?.();
+        if (!bibliography) {
+          throw new Error(
+            `Citation style "${styleId}" did not produce a bibliography`,
+          );
+        }
+        const [metadata, entries] = bibliography;
+        const entryIds = metadata.entry_ids || [];
+        const bibliographyEntries = entries.map((output, index) => ({
+          itemId: Number(entryIds[index]?.[0] || 0),
+          output,
+        }));
+        if (
+          bibliographyEntries.length !== itemIds.length ||
+          bibliographyEntries.some((entry) => !entry.itemId)
+        ) {
+          throw new Error(
+            "Zotero's citation engine returned an unresolvable bibliography",
+          );
+        }
+        return { clusters, bibliographyEntries };
+      } finally {
+        engine.free?.();
+      }
+    };
+    const textOutput = format("text");
+    const htmlOutput = format("html");
+    const htmlClusters = new Map(
+      htmlOutput.clusters.map((cluster) => [
+        cluster.citationId,
+        cluster.output,
+      ]),
+    );
+    const htmlEntries = new Map(
+      htmlOutput.bibliographyEntries.map((entry) => [
+        entry.itemId,
+        entry.output,
+      ]),
+    );
+    return {
+      styleId,
+      styleTitle: normalizeText(style.title) || styleId,
+      locale,
+      clusters: textOutput.clusters.map((cluster) => ({
+        citationId: cluster.citationId,
+        text: cluster.output,
+        html: htmlClusters.get(cluster.citationId) || cluster.output,
+      })),
+      bibliographyEntries: textOutput.bibliographyEntries.map((entry) => ({
+        itemId: entry.itemId,
+        text: entry.output,
+        html: htmlEntries.get(entry.itemId) || entry.output,
+      })),
+    };
+  }
+
   async deleteCollection(params: {
     collectionId: number;
     deleteItems?: boolean;

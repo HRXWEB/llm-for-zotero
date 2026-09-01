@@ -57,6 +57,11 @@ import {
   type McpToolDefinition,
   type McpToolsListResult,
 } from "./protocol";
+import { loadPlanArtifact } from "../plans/store";
+import { loadLatestResearchMutationApprovalGrant } from "../research/store";
+import { validateResearchMutationGrant } from "../research/mutationApproval";
+import { extractVerifiedReadSources } from "../plans/readEvidence";
+import type { VerifiedReadSource } from "../plans/types";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -75,7 +80,17 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "paper_read",
   "literature_search",
 ] as const;
+export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
+  "update_plan",
+  "task_update",
+  "research_update",
+  "approve_research_expansion",
+  "approve_research_mutation",
+  "submit_plan_document",
+] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
+  "approve_research_expansion",
+  "approve_research_mutation",
   "library_update",
   "collection_update",
   "note_write",
@@ -112,9 +127,11 @@ export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
   tool_result_read:
     "tool_result_read is gated on an in-plugin metadata flag that the MCP path does not set.",
 };
-const CURATED_READ_TOOL_NAMES = new Set<string>(
-  ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
-);
+const CURATED_READ_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+]);
+const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -292,6 +309,7 @@ export type ZoteroMcpToolActivityEvent = {
   libraryID?: number;
   kind?: "global" | "paper";
   quoteCitations?: QuoteCitation[];
+  verifiedReadSources?: VerifiedReadSource[];
   timestamp: number;
 };
 
@@ -425,9 +443,11 @@ function getZoteroMcpToolApprovalOverrides(
     toolNames.map((name) => [
       name,
       {
-        approval_mode: CURATED_READ_TOOL_NAMES.has(name)
-          ? CODEX_MCP_READ_APPROVAL_MODE
-          : CODEX_MCP_EFFECT_APPROVAL_MODE,
+        approval_mode: CURATED_PLAN_TOOL_NAMES.has(name)
+          ? CODEX_MCP_EFFECT_APPROVAL_MODE
+          : CURATED_READ_TOOL_NAMES.has(name)
+            ? CODEX_MCP_READ_APPROVAL_MODE
+            : CODEX_MCP_EFFECT_APPROVAL_MODE,
       },
     ]),
   );
@@ -1227,6 +1247,11 @@ function isMcpToolVisibleInScope(
   scope: ZoteroMcpActiveScope | null,
 ): boolean {
   if (!isMcpExposedTool(tool)) return false;
+  if (CURATED_PLAN_TOOL_NAMES.has(tool.name)) {
+    const phase = scope?.planContext?.phase;
+    if (tool.name === "update_plan") return phase === "planning";
+    if (phase !== "executing") return false;
+  }
   if (!hasRawPdfScope(scope)) return true;
   return getZoteroMcpDirectPdfToolNames().includes(tool.name);
 }
@@ -1464,6 +1489,7 @@ function buildMcpToolActivityEvent(params: {
   quoteCitations?: QuoteCitation[];
   artifacts?: AgentToolArtifact[];
   actionReceipts?: AgentActionReceipt[];
+  verifiedReadSources?: VerifiedReadSource[];
   mutability?: "read" | "write";
   headers?: Record<string, string>;
 }): ZoteroMcpToolActivityEvent {
@@ -1481,6 +1507,7 @@ function buildMcpToolActivityEvent(params: {
     actionReceipts: params.actionReceipts,
     mutability: params.mutability,
     quoteCitations: params.quoteCitations,
+    verifiedReadSources: params.verifiedReadSources,
     profileSignature: scope?.profileSignature,
     conversationKey: scope?.conversationKey,
     libraryID: scope?.libraryID,
@@ -1610,6 +1637,29 @@ function createToolContext(
   };
 }
 
+async function restoreResearchMutationAuthority(
+  context: AgentToolContext,
+  toolRegistry: AgentToolRegistry,
+): Promise<void> {
+  const plan = context.request.planContext;
+  if (plan?.phase !== "executing" || context.request.actionContract) {
+    return;
+  }
+  const artifact = await loadPlanArtifact(plan.planId, plan.revision);
+  if (
+    !artifact ||
+    artifact.digest !== plan.approvedDigest ||
+    artifact.contract?.effects?.libraryMutation.approval !== "after_research"
+  ) {
+    return;
+  }
+  const grant = await loadLatestResearchMutationApprovalGrant(plan.executionId);
+  if (!grant || grant.status !== "approved") return;
+  const contract = await validateResearchMutationGrant({ grant, artifact });
+  context.request.actionContract = contract;
+  context.request.actionProgress = toolRegistry.createActionProgress(contract);
+}
+
 function formatToolResult(
   execution: Extract<PreparedToolExecution, { kind: "result" }>["execution"],
 ): McpToolCallResult {
@@ -1701,6 +1751,7 @@ async function handleToolsCall(
     quoteCitations?: QuoteCitation[];
     artifacts?: AgentToolArtifact[];
     actionReceipts?: AgentActionReceipt[];
+    verifiedReadSources?: VerifiedReadSource[];
   }) => {
     emitZoteroMcpToolActivity(
       buildMcpToolActivityEvent({
@@ -1713,6 +1764,7 @@ async function handleToolsCall(
         error: result.error,
         artifacts: result.artifacts,
         actionReceipts: result.actionReceipts,
+        verifiedReadSources: result.verifiedReadSources,
         mutability: tool?.spec.mutability,
         quoteCitations: result.quoteCitations,
         headers,
@@ -1806,17 +1858,20 @@ async function handleToolsCall(
         ok: true,
         quoteCitations: extractQuoteCitationsFromToolContent(cachedReadResult),
         artifacts: extractArtifactsFromMcpToolCallResult(cachedReadResult),
+        verifiedReadSources: extractVerifiedReadSources(cachedReadResult),
       });
       return cachedReadResult;
     }
 
+    const toolContext = createToolContext(rawArgs, headers, deps.zoteroGateway);
+    await restoreResearchMutationAuthority(toolContext, deps.toolRegistry);
     const prepared = await deps.toolRegistry.prepareExecution(
       {
         id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         name,
         arguments: scopeArgs.toolArgs,
       },
-      createToolContext(rawArgs, headers, deps.zoteroGateway),
+      toolContext,
       {
         callerKind: "mcp",
         isExecutionAllowed: () => {
@@ -1864,6 +1919,9 @@ async function handleToolsCall(
       ),
       artifacts: prepared.execution.result.artifacts,
       actionReceipts: prepared.execution.result.actionReceipts,
+      verifiedReadSources: extractVerifiedReadSources(
+        prepared.execution.result.content,
+      ),
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
     rememberMcpReadResult(readDedupeKey, result);

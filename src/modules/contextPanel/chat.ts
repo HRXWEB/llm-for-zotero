@@ -327,7 +327,11 @@ import { buildContextPlanSystemMessages } from "./requestSystemMessages";
 import { getWorkflowTestFinalRequestInterceptor } from "./workflowTestHooks";
 import { resolveSelectedTextAnchors } from "./selectedTextAnchors";
 import { canEditUserPromptTurn } from "./editability";
-import { renderAgentTrace, renderPendingActionCard } from "./agentTrace/render";
+import {
+  isFloatingPlanExecutionStatus,
+  renderAgentTrace,
+  renderPendingActionCard,
+} from "./agentTrace/render";
 import type { AgentActionContract } from "../../agent/contracts/types";
 import {
   inferPlanStepEffect,
@@ -390,7 +394,11 @@ import {
   initAgentSubsystem,
 } from "../../agent/index";
 import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
-import { getAgentRunTrace } from "../../agent/store/traceStore";
+import {
+  appendAgentRunEventAfterLatest,
+  getAgentRunTrace,
+} from "../../agent/store/traceStore";
+import { deliverPendingPlanDocumentMessage } from "../../agent/documents/finalizer";
 import {
   applyHistoryCompression,
   scheduleLLMSummary,
@@ -1772,11 +1780,57 @@ async function updateStoredLatestUserMessageByConversationUnlocked(
   await updateStoredLatestUserMessage(conversationKey, message);
 }
 
+async function publishPersistedPlanDocumentIfPresent(params: {
+  conversationKey: number;
+  text?: string;
+  timestamp?: number;
+  agentRunId?: string;
+  planDocumentId?: string;
+}): Promise<void> {
+  const visibleMarkdown = params.text || "";
+  if (!visibleMarkdown) return;
+  const document = await deliverPendingPlanDocumentMessage({
+    conversationKey: params.conversationKey,
+    visibleMarkdown,
+    messageTimestamp: Number.isFinite(Number(params.timestamp))
+      ? Math.floor(Number(params.timestamp))
+      : Date.now(),
+    documentId: params.planDocumentId,
+  });
+  if (!document) return;
+  const runId = params.agentRunId?.trim();
+  if (!runId) return;
+  const persistedTrace = await getAgentRunTrace(runId);
+  if (
+    persistedTrace.events.some(
+      (entry) =>
+        entry.payload.type === "plan_document_ready" &&
+        entry.payload.documentId === document.documentId,
+    )
+  ) {
+    return;
+  }
+  const event = {
+    type: "plan_document_ready" as const,
+    documentId: document.documentId,
+    executionId: document.executionId,
+    title: document.title,
+    contentHash: document.contentHash,
+  };
+  const record = await appendAgentRunEventAfterLatest(runId, event);
+  const cached = agentRunTraceCache.get(runId) || [];
+  if (!cached.some((entry) => entry.seq === record.seq)) {
+    agentRunTraceCache.set(runId, [...cached, record]);
+  }
+  refreshAllActiveConversationPanels();
+}
+
 async function updateStoredLatestAssistantMessageByConversationUnlocked(
   conversationKey: number,
-  message: Parameters<typeof updateStoredLatestAssistantMessage>[1] & {
-    conversationGeneration?: number;
-  },
+  message: Parameters<typeof updateStoredLatestAssistantMessage>[1] &
+    Pick<StoredChatMessage, "planDocumentId"> & {
+      conversationGeneration?: number;
+    },
   conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
   const expectedGeneration = Number(
@@ -1812,6 +1866,13 @@ async function updateStoredLatestAssistantMessageByConversationUnlocked(
             : latestContextSnapshot?.contextWindow,
       },
     );
+    await publishPersistedPlanDocumentIfPresent({
+      conversationKey,
+      text: message.text,
+      timestamp: message.timestamp,
+      agentRunId: message.agentRunId,
+      planDocumentId: message.planDocumentId,
+    });
     return;
   }
   if (storageSystem === "codex") {
@@ -1829,9 +1890,23 @@ async function updateStoredLatestAssistantMessageByConversationUnlocked(
           ? Math.floor(Number(message.contextWindow))
           : latestContextSnapshot?.contextWindow,
     });
+    await publishPersistedPlanDocumentIfPresent({
+      conversationKey,
+      text: message.text,
+      timestamp: message.timestamp,
+      agentRunId: message.agentRunId,
+      planDocumentId: message.planDocumentId,
+    });
     return;
   }
   await updateStoredLatestAssistantMessage(conversationKey, message);
+  await publishPersistedPlanDocumentIfPresent({
+    conversationKey,
+    text: message.text,
+    timestamp: message.timestamp,
+    agentRunId: message.agentRunId,
+    planDocumentId: message.planDocumentId,
+  });
 }
 
 async function updateStoredLatestUserMessageByConversation(
@@ -1908,6 +1983,15 @@ async function persistConversationMessage(
       } else {
         await appendStoredMessage(conversationKey, message, undefined);
         await pruneConversation(conversationKey, PERSISTED_HISTORY_LIMIT);
+      }
+      if (message.role === "assistant") {
+        await publishPersistedPlanDocumentIfPresent({
+          conversationKey,
+          text: message.text,
+          timestamp: message.timestamp,
+          agentRunId: message.agentRunId,
+          planDocumentId: message.planDocumentId,
+        });
       }
       const storedMessages = await loadStoredConversationByKey(
         conversationKey,
@@ -2320,6 +2404,17 @@ export async function ensureConversationLoaded(
         PERSISTED_HISTORY_LIMIT,
         conversationSystem,
       );
+      // Recover the application-level document outbox after a crash between
+      // durable message insertion and publication evidence/event delivery.
+      for (const storedMessage of storedMessages) {
+        if (storedMessage.role !== "assistant" || !storedMessage.text) continue;
+        await publishPersistedPlanDocumentIfPresent({
+          conversationKey,
+          text: storedMessage.text,
+          timestamp: storedMessage.timestamp,
+          agentRunId: storedMessage.agentRunId,
+        });
+      }
       if (isFrozen()) {
         chatHistory.delete(conversationKey);
         conversationForkLinks.delete(conversationKey);
@@ -2733,6 +2828,36 @@ function syncInlineActionCardAttr(body: Element): void {
   } else {
     delete panelRoot.dataset.hasActionCard;
   }
+}
+
+function syncFloatingPlanProgress(chatBox: HTMLElement): void {
+  const cards = Array.from(
+    chatBox.querySelectorAll(".llm-plan-container-execution"),
+  ).filter(Boolean) as HTMLElement[];
+  if (!cards.length) return;
+  const latest = cards.reduce((current, candidate) => {
+    const currentSequence = Number(
+      current.dataset.llmPlanRenderSequence || "0",
+    );
+    const candidateSequence = Number(
+      candidate.dataset.llmPlanRenderSequence || "0",
+    );
+    return candidateSequence > currentSequence ? candidate : current;
+  });
+  for (const card of cards) {
+    if (
+      card !== latest &&
+      card.classList.contains("llm-plan-progress-floating")
+    ) {
+      card.remove();
+    }
+  }
+  if (!isFloatingPlanExecutionStatus(latest.dataset.llmPlanExecutionStatus)) {
+    latest.classList.remove("llm-plan-progress-floating");
+    return;
+  }
+  latest.classList.add("llm-plan-progress-floating");
+  chatBox.appendChild(latest);
 }
 
 function findNativeMcpActionCard(
@@ -3501,6 +3626,21 @@ function buildCodexNativeTurnCallbacks(ctx: {
       const planning = ctx.planContext;
       if (!isLive() || planning?.phase !== "planning") return;
       flushResponseStream("event");
+      const { loadPlanArtifact } = await import("../../agent/plans/store");
+      const structured = await loadPlanArtifact(
+        planning.planId,
+        planning.revision,
+      );
+      if (structured?.sourceRunId) {
+        codexActivityTrace?.appendPlanEvent({
+          type:
+            structured.status === "awaiting_approval"
+              ? "plan_ready"
+              : "plan_updated",
+          artifact: structured,
+        });
+        return;
+      }
       const artifact = await planExecutionCoordinator.updateDraft({
         planId: planning.planId,
         conversationKey: ctx.conversationKey,
@@ -3542,6 +3682,59 @@ function buildCodexNativeTurnCallbacks(ctx: {
         assistantMessage.quoteCitations,
         event.quoteCitations,
       );
+      if (event.phase === "completed" && event.ok) {
+        void (async () => {
+          if (
+            event.toolName === "update_plan" &&
+            ctx.planContext?.phase === "planning"
+          ) {
+            const { loadPlanArtifact } =
+              await import("../../agent/plans/store");
+            const artifact = await loadPlanArtifact(
+              ctx.planContext.planId,
+              ctx.planContext.revision,
+            );
+            if (artifact) {
+              codexActivityTrace?.appendPlanEvent({
+                type:
+                  artifact.status === "awaiting_approval"
+                    ? "plan_ready"
+                    : "plan_updated",
+                artifact,
+              });
+            }
+          }
+          if (
+            event.toolName === "research_update" &&
+            ctx.planContext?.phase === "executing"
+          ) {
+            const { loadResearchJobForExecution } =
+              await import("../../agent/research/store");
+            const job = await loadResearchJobForExecution(
+              ctx.planContext.executionId,
+            );
+            if (job) {
+              codexActivityTrace?.appendPlanEvent({
+                type: "plan_research_progress",
+                progress: {
+                  researchJobId: job.researchJobId,
+                  executionId: job.executionId,
+                  parentTaskId: job.parentTaskId,
+                  stage: job.activeStage,
+                  totalItems: job.totalItems,
+                  screenedItems: job.screenedItems,
+                  candidateItems: job.candidateItems,
+                  deepReadCompleted: job.deepReadCompleted,
+                  deepReadPlanned: job.deepReadPlanned,
+                  coverageStatus: job.coverageStatus,
+                },
+              });
+            }
+          }
+        })().catch((error) =>
+          ztoolkit.log("LLM: Failed to synchronize MCP plan state", error),
+        );
+      }
       const label =
         sanitizeText(event.toolLabel || "").trim() ||
         sanitizeText(event.toolName || "")
@@ -3596,6 +3789,16 @@ async function finalizeCodexPlanExecution(params: {
   trace: ReturnType<typeof createCodexNativeActivityTraceController> | null;
 }): Promise<void> {
   if (params.planContext?.phase !== "executing") return;
+  const { loadLatestPlanDocumentForExecution } =
+    await import("../../agent/documents/store");
+  const document = await loadLatestPlanDocumentForExecution(
+    params.planContext.executionId,
+  );
+  if (document) {
+    params.assistantMessage.text = document.visibleMarkdown;
+    params.assistantMessage.planDocumentId = document.documentId;
+    return;
+  }
   const { loadPlanExecutionLedger } = await import("../../agent/plans/store");
   let ledger = await loadPlanExecutionLedger(params.planContext.executionId);
   const active = ledger?.tasks.find(
@@ -6757,6 +6960,23 @@ function createCodexNativeActivityTraceController(
   };
 
   const appendPlanEvent = (event: AgentEvent): void => {
+    if (event.type === "plan_research_progress") {
+      const priorIndex = events.findIndex(
+        (entry) =>
+          entry.payload.type === "plan_research_progress" &&
+          entry.payload.progress.researchJobId === event.progress.researchJobId,
+      );
+      const record = createEvent(event);
+      if (priorIndex >= 0) events[priorIndex] = record;
+      else events.push(record);
+      sync();
+      return;
+    }
+    if (event.type === "plan_document_ready") {
+      events.push(createEvent(event));
+      sync();
+      return;
+    }
     if (
       event.type !== "plan_updated" &&
       event.type !== "plan_ready" &&
@@ -8631,7 +8851,9 @@ export async function retryLatestAssistantResponse(
       assistantMessage.generatedImages,
     ).length;
     assistantMessage.text =
-      sanitizeText(answer) ||
+      (assistantMessage.planDocumentId
+        ? assistantMessage.text
+        : sanitizeText(answer)) ||
       responseStreamCoalescer?.getFullText() ||
       (hasGeneratedOutput ? "" : "No response.");
     await finalizeAssistantMessageQuoteCitations(assistantMessage, {
@@ -9880,6 +10102,7 @@ async function buildAgentRuntimeRequest(
       notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
       conversationInstanceID,
       planExecutionLedger: executingPlan?.ledger,
+      approvedPlanContract: executingPlan?.artifact.contract,
     },
   };
 }
@@ -13231,6 +13454,7 @@ export function refreshChat(
     }
   }
 
+  syncFloatingPlanProgress(chatBox);
   syncUserContextAlignmentWidths(body);
 
   applyChatScrollSnapshot(chatBox, baselineSnapshot);

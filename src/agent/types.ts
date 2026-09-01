@@ -432,6 +432,8 @@ export type AgentEvent =
   | {
       type: "final";
       text: string;
+      /** Immutable host-finalized document rendered for this visible answer. */
+      planDocumentId?: string;
       answerStartedAt?: number;
       webSourceAnchors?: WebSourceAnchor[];
     };
@@ -700,6 +702,7 @@ export type AgentRuntimeOutcome =
       kind: "completed";
       runId: string;
       text: string;
+      planDocumentId?: string;
       usedFallback: false;
     }
   | {
@@ -984,6 +987,27 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
     result: AgentToolResult,
     context: AgentToolContext,
   ) => Promise<AgentModelMessage | null>;
+  /**
+   * Allows a host-owned terminal artifact to become the application-visible
+   * answer without fabricating a provider assistant message. The exact
+   * provider tool call/result remains the transcript authority.
+   */
+  resolveTerminalResult?: (
+    input: TInput,
+    result: AgentToolResult,
+    context: AgentToolContext,
+  ) =>
+    | {
+        finalText: string;
+        planDocumentId?: string;
+        providerTranscript: "tool_only";
+      }
+    | null
+    | Promise<{
+        finalText: string;
+        planDocumentId?: string;
+        providerTranscript: "tool_only";
+      } | null>;
   createResultReviewAction?: (
     input: TInput,
     result: AgentToolResult,

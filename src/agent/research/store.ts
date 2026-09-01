@@ -1,0 +1,694 @@
+import type {
+  PaperFinding,
+  ResearchCorpusItem,
+  ResearchEvidenceRecord,
+  ResearchJob,
+  ResearchScopeSnapshotItem,
+  ResearchScopeSnapshotRef,
+  ResearchWorkItem,
+  ThemeFinding,
+  ResearchMutationApprovalGrant,
+  ResearchRecallProbe,
+} from "./types";
+import {
+  decodePaperFinding,
+  decodeResearchCorpusItem,
+  decodeResearchEvidenceRecord,
+  decodeResearchJob,
+  decodeResearchWorkItem,
+  decodeScopeSnapshotItem,
+  decodeThemeFinding,
+  decodeResearchMutationApprovalGrant,
+  decodeResearchRecallProbe,
+} from "./decoders";
+
+export const PLAN_SCOPE_SNAPSHOTS_TABLE = "llm_for_zotero_plan_scope_snapshots";
+export const PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE =
+  "llm_for_zotero_plan_scope_snapshot_items";
+export const RESEARCH_JOBS_TABLE = "llm_for_zotero_research_jobs";
+export const RESEARCH_CORPUS_ITEMS_TABLE =
+  "llm_for_zotero_research_corpus_items";
+export const RESEARCH_WORK_ITEMS_TABLE = "llm_for_zotero_research_work_items";
+export const RESEARCH_EVIDENCE_TABLE = "llm_for_zotero_research_evidence";
+export const RESEARCH_RECALL_PROBES_TABLE =
+  "llm_for_zotero_research_recall_probes";
+export const RESEARCH_PAPER_FINDINGS_TABLE =
+  "llm_for_zotero_research_paper_findings";
+export const RESEARCH_THEME_FINDINGS_TABLE =
+  "llm_for_zotero_research_theme_findings";
+export const RESEARCH_MUTATION_APPROVALS_TABLE =
+  "llm_for_zotero_research_mutation_approvals";
+
+type JsonRow = { payloadJson?: unknown };
+
+function parse<T>(
+  row: JsonRow | undefined,
+  decoder: (value: unknown) => T,
+): T | null {
+  if (typeof row?.payloadJson !== "string") return null;
+  return decoder(JSON.parse(row.payloadJson));
+}
+
+export async function initResearchStore(): Promise<void> {
+  await Zotero.DB.executeTransaction(async () => {
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${PLAN_SCOPE_SNAPSHOTS_TABLE} (
+        snapshot_id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        conversation_key INTEGER NOT NULL,
+        digest TEXT NOT NULL,
+        item_count INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_plan_scope_snapshot_conversation_idx
+       ON ${PLAN_SCOPE_SNAPSHOTS_TABLE} (conversation_key, created_at DESC)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE} (
+        snapshot_id TEXT NOT NULL,
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (snapshot_id, library_id, item_key)
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_plan_scope_snapshot_items_order_idx
+       ON ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE} (snapshot_id, ordinal)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_JOBS_TABLE} (
+        research_job_id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        conversation_key INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_jobs_execution_idx
+       ON ${RESEARCH_JOBS_TABLE} (execution_id, updated_at DESC)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_CORPUS_ITEMS_TABLE} (
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        screening_status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (research_job_id, library_id, item_key)
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_corpus_status_idx
+       ON ${RESEARCH_CORPUS_ITEMS_TABLE}
+       (research_job_id, screening_status, ordinal)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_WORK_ITEMS_TABLE} (
+        work_item_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_work_claim_idx
+       ON ${RESEARCH_WORK_ITEMS_TABLE}
+       (research_job_id, stage, status, updated_at)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_PAPER_FINDINGS_TABLE} (
+        finding_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_EVIDENCE_TABLE} (
+        evidence_ref TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_evidence_job_idx
+       ON ${RESEARCH_EVIDENCE_TABLE}
+       (research_job_id, library_id, item_key, created_at)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_RECALL_PROBES_TABLE} (
+        probe_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_recall_probe_job_idx
+       ON ${RESEARCH_RECALL_PROBES_TABLE} (research_job_id, created_at)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE UNIQUE INDEX IF NOT EXISTS llm_research_paper_finding_item_idx
+       ON ${RESEARCH_PAPER_FINDINGS_TABLE}
+       (research_job_id, library_id, item_key)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_THEME_FINDINGS_TABLE} (
+        theme_finding_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_MUTATION_APPROVALS_TABLE} (
+        grant_id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        conversation_key INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        approved_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_mutation_approval_execution_idx
+       ON ${RESEARCH_MUTATION_APPROVALS_TABLE} (execution_id, approved_at DESC)`,
+    );
+  });
+}
+
+export async function saveScopeSnapshot(params: {
+  planId: string;
+  revision: number;
+  conversationKey: number;
+  ref: ResearchScopeSnapshotRef;
+  items: readonly ResearchScopeSnapshotItem[];
+}): Promise<void> {
+  await Zotero.DB.executeTransaction(async () => {
+    await Zotero.DB.queryAsync(
+      `INSERT OR REPLACE INTO ${PLAN_SCOPE_SNAPSHOTS_TABLE}
+       (snapshot_id, plan_id, revision, conversation_key, digest, item_count,
+        created_at, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        params.ref.snapshotId,
+        params.planId,
+        params.revision,
+        params.conversationKey,
+        params.ref.digest,
+        params.ref.itemCount,
+        params.ref.createdAt,
+        JSON.stringify(params.ref),
+      ],
+    );
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE} WHERE snapshot_id = ?`,
+      [params.ref.snapshotId],
+    );
+    for (const item of params.items) {
+      await Zotero.DB.queryAsync(
+        `INSERT INTO ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE}
+         (snapshot_id, library_id, item_key, ordinal, payload_json)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          item.snapshotId,
+          item.libraryID,
+          item.itemKey,
+          item.ordinal,
+          JSON.stringify(item),
+        ],
+      );
+    }
+  });
+}
+
+export async function listScopeSnapshotItems(
+  snapshotId: string,
+): Promise<ResearchScopeSnapshotItem[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson
+     FROM ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE}
+     WHERE snapshot_id = ? ORDER BY ordinal ASC`,
+    [snapshotId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeScopeSnapshotItem))
+    .filter((item): item is ResearchScopeSnapshotItem => Boolean(item));
+}
+
+export async function saveResearchJob(
+  job: ResearchJob,
+  conversationKey: number,
+): Promise<void> {
+  decodeResearchJob(job);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_JOBS_TABLE}
+     (research_job_id, execution_id, parent_task_id, conversation_key, status,
+      payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      job.researchJobId,
+      job.executionId,
+      job.parentTaskId,
+      conversationKey,
+      job.status,
+      JSON.stringify(job),
+      job.createdAt,
+      job.updatedAt,
+    ],
+  );
+}
+
+export async function loadResearchJob(
+  researchJobId: string,
+): Promise<ResearchJob | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_JOBS_TABLE}
+     WHERE research_job_id = ? LIMIT 1`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return parse(rows?.[0], decodeResearchJob);
+}
+
+export async function loadResearchJobForExecution(
+  executionId: string,
+): Promise<ResearchJob | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_JOBS_TABLE}
+     WHERE execution_id = ? ORDER BY updated_at DESC LIMIT 1`,
+    [executionId],
+  )) as JsonRow[] | undefined;
+  return parse(rows?.[0], decodeResearchJob);
+}
+
+export async function saveResearchCorpusItem(
+  item: ResearchCorpusItem,
+): Promise<void> {
+  decodeResearchCorpusItem(item);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_CORPUS_ITEMS_TABLE}
+     (research_job_id, execution_id, parent_task_id, library_id, item_key,
+      ordinal, screening_status, payload_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      item.researchJobId,
+      item.executionId,
+      item.parentTaskId,
+      item.libraryID,
+      item.itemKey,
+      item.ordinal,
+      item.screeningStatus,
+      JSON.stringify(item),
+      item.updatedAt,
+    ],
+  );
+}
+
+export async function listResearchCorpusItems(params: {
+  researchJobId: string;
+  statuses?: readonly ResearchCorpusItem["screeningStatus"][];
+}): Promise<ResearchCorpusItem[]> {
+  const statuses = params.statuses?.length ? [...params.statuses] : [];
+  const where = statuses.length
+    ? `research_job_id = ? AND screening_status IN (${statuses.map(() => "?").join(", ")})`
+    : "research_job_id = ?";
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_CORPUS_ITEMS_TABLE}
+     WHERE ${where} ORDER BY ordinal ASC`,
+    [params.researchJobId, ...statuses],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchCorpusItem))
+    .filter((item): item is ResearchCorpusItem => Boolean(item));
+}
+
+export async function saveResearchWorkItem(
+  item: ResearchWorkItem,
+): Promise<void> {
+  decodeResearchWorkItem(item);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_WORK_ITEMS_TABLE}
+     (work_item_id, research_job_id, execution_id, parent_task_id, stage,
+      status, payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      item.workItemId,
+      item.researchJobId,
+      item.executionId,
+      item.parentTaskId,
+      item.stage,
+      item.status,
+      JSON.stringify(item),
+      item.createdAt,
+      item.updatedAt,
+    ],
+  );
+}
+
+export async function claimResearchWorkItems(params: {
+  researchJobId: string;
+  stage: ResearchWorkItem["stage"];
+  leaseOwner: string;
+  limit: number;
+  now?: number;
+  leaseMs?: number;
+}): Promise<ResearchWorkItem[]> {
+  const now = params.now ?? Date.now();
+  const leaseExpiresAt = now + Math.max(1, params.leaseMs ?? 60_000);
+  const claimed: ResearchWorkItem[] = [];
+  await Zotero.DB.executeTransaction(async () => {
+    const expired = (await Zotero.DB.queryAsync(
+      `SELECT payload_json AS payloadJson
+       FROM ${RESEARCH_WORK_ITEMS_TABLE}
+       WHERE research_job_id = ? AND stage = ? AND status = 'in_progress'`,
+      [params.researchJobId, params.stage],
+    )) as JsonRow[] | undefined;
+    for (const row of expired || []) {
+      const item = parse(row, decodeResearchWorkItem);
+      if (!item || !item.leaseExpiresAt || item.leaseExpiresAt > now) continue;
+      await saveResearchWorkItem({
+        ...item,
+        status: "interrupted",
+        leaseOwner: undefined,
+        leaseExpiresAt: undefined,
+        updatedAt: now,
+      });
+    }
+    const rows = (await Zotero.DB.queryAsync(
+      `SELECT payload_json AS payloadJson
+       FROM ${RESEARCH_WORK_ITEMS_TABLE}
+       WHERE research_job_id = ? AND stage = ?
+         AND (status = 'pending' OR status = 'interrupted')
+       ORDER BY created_at ASC LIMIT ?`,
+      [params.researchJobId, params.stage, Math.max(1, params.limit)],
+    )) as JsonRow[] | undefined;
+    for (const row of rows || []) {
+      const item = parse(row, decodeResearchWorkItem);
+      if (!item) continue;
+      const next: ResearchWorkItem = {
+        ...item,
+        status: "in_progress",
+        attemptCount: item.attemptCount + 1,
+        leaseOwner: params.leaseOwner,
+        leaseExpiresAt,
+        updatedAt: now,
+      };
+      await saveResearchWorkItem(next);
+      claimed.push(next);
+    }
+  });
+  return claimed;
+}
+
+export async function loadResearchWorkItem(
+  workItemId: string,
+): Promise<ResearchWorkItem | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_WORK_ITEMS_TABLE}
+     WHERE work_item_id = ? LIMIT 1`,
+    [workItemId],
+  )) as JsonRow[] | undefined;
+  return parse(rows?.[0], decodeResearchWorkItem);
+}
+
+export async function savePaperFinding(finding: PaperFinding): Promise<void> {
+  decodePaperFinding(finding);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_PAPER_FINDINGS_TABLE}
+     (finding_id, research_job_id, execution_id, parent_task_id, library_id,
+      item_key, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      finding.findingId,
+      finding.researchJobId,
+      finding.executionId,
+      finding.parentTaskId,
+      finding.libraryID,
+      finding.itemKey,
+      JSON.stringify(finding),
+      finding.createdAt,
+    ],
+  );
+}
+
+export async function saveResearchEvidence(
+  evidence: ResearchEvidenceRecord,
+): Promise<void> {
+  decodeResearchEvidenceRecord(evidence);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_EVIDENCE_TABLE}
+     (evidence_ref, research_job_id, execution_id, parent_task_id, library_id,
+      item_key, source_kind, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      evidence.evidenceRef,
+      evidence.researchJobId,
+      evidence.executionId,
+      evidence.parentTaskId,
+      evidence.libraryID,
+      evidence.itemKey,
+      evidence.sourceKind,
+      JSON.stringify(evidence),
+      evidence.createdAt,
+    ],
+  );
+}
+
+export async function listResearchEvidence(
+  researchJobId: string,
+): Promise<ResearchEvidenceRecord[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_EVIDENCE_TABLE}
+     WHERE research_job_id = ? ORDER BY created_at ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchEvidenceRecord))
+    .filter((evidence): evidence is ResearchEvidenceRecord =>
+      Boolean(evidence),
+    );
+}
+
+export async function loadResearchEvidence(
+  evidenceRef: string,
+): Promise<ResearchEvidenceRecord | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_EVIDENCE_TABLE}
+     WHERE evidence_ref = ? LIMIT 1`,
+    [evidenceRef],
+  )) as JsonRow[] | undefined;
+  return parse(rows?.[0], decodeResearchEvidenceRecord);
+}
+
+export async function saveResearchRecallProbe(
+  probe: ResearchRecallProbe,
+): Promise<void> {
+  decodeResearchRecallProbe(probe);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_RECALL_PROBES_TABLE}
+     (probe_id, research_job_id, execution_id, parent_task_id, payload_json,
+      created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      probe.probeId,
+      probe.researchJobId,
+      probe.executionId,
+      probe.parentTaskId,
+      JSON.stringify(probe),
+      probe.createdAt,
+    ],
+  );
+}
+
+export async function listResearchRecallProbes(
+  researchJobId: string,
+): Promise<ResearchRecallProbe[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_RECALL_PROBES_TABLE}
+     WHERE research_job_id = ? ORDER BY created_at ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchRecallProbe))
+    .filter((probe): probe is ResearchRecallProbe => Boolean(probe));
+}
+
+export async function listPaperFindings(
+  researchJobId: string,
+): Promise<PaperFinding[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_PAPER_FINDINGS_TABLE}
+     WHERE research_job_id = ? ORDER BY created_at ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodePaperFinding))
+    .filter((finding): finding is PaperFinding => Boolean(finding));
+}
+
+export async function saveThemeFinding(finding: ThemeFinding): Promise<void> {
+  decodeThemeFinding(finding);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_THEME_FINDINGS_TABLE}
+     (theme_finding_id, research_job_id, execution_id, parent_task_id,
+      payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      finding.themeFindingId,
+      finding.researchJobId,
+      finding.executionId,
+      finding.parentTaskId,
+      JSON.stringify(finding),
+      finding.createdAt,
+    ],
+  );
+}
+
+export async function listThemeFindings(
+  researchJobId: string,
+): Promise<ThemeFinding[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_THEME_FINDINGS_TABLE}
+     WHERE research_job_id = ? ORDER BY created_at ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeThemeFinding))
+    .filter((finding): finding is ThemeFinding => Boolean(finding));
+}
+
+export async function saveResearchMutationApprovalGrant(
+  grant: ResearchMutationApprovalGrant,
+): Promise<void> {
+  decodeResearchMutationApprovalGrant(grant);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_MUTATION_APPROVALS_TABLE}
+     (grant_id, execution_id, conversation_key, status, payload_json, approved_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      grant.grantId,
+      grant.executionId,
+      grant.conversationKey,
+      grant.status,
+      JSON.stringify(grant),
+      grant.approvedAt,
+    ],
+  );
+}
+
+export async function loadLatestResearchMutationApprovalGrant(
+  executionId: string,
+): Promise<ResearchMutationApprovalGrant | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson
+     FROM ${RESEARCH_MUTATION_APPROVALS_TABLE}
+     WHERE execution_id = ? ORDER BY approved_at DESC LIMIT 1`,
+    [executionId],
+  )) as JsonRow[] | undefined;
+  if (typeof rows?.[0]?.payloadJson !== "string") return null;
+  const value = decodeResearchMutationApprovalGrant(
+    JSON.parse(rows[0].payloadJson),
+  );
+  if (value.executionId !== executionId) {
+    throw new Error("Research mutation approval belongs to another execution");
+  }
+  return value;
+}
+
+export async function clearResearchConversationRowsInTransaction(
+  conversationKey: number,
+): Promise<void> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT research_job_id AS researchJobId FROM ${RESEARCH_JOBS_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  ).catch((error) => {
+    if (/no such table|no table/i.test(String(error))) return [];
+    throw error;
+  })) as Array<{ researchJobId?: unknown }>;
+  const jobIds = rows
+    .map((row) =>
+      typeof row.researchJobId === "string" ? row.researchJobId : "",
+    )
+    .filter(Boolean);
+  if (jobIds.length) {
+    const placeholders = jobIds.map(() => "?").join(", ");
+    for (const table of [
+      RESEARCH_THEME_FINDINGS_TABLE,
+      RESEARCH_PAPER_FINDINGS_TABLE,
+      RESEARCH_RECALL_PROBES_TABLE,
+      RESEARCH_EVIDENCE_TABLE,
+      RESEARCH_WORK_ITEMS_TABLE,
+      RESEARCH_CORPUS_ITEMS_TABLE,
+    ]) {
+      await Zotero.DB.queryAsync(
+        `DELETE FROM ${table} WHERE research_job_id IN (${placeholders})`,
+        jobIds,
+      );
+    }
+  }
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${RESEARCH_MUTATION_APPROVALS_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${RESEARCH_JOBS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  const snapshots = (await Zotero.DB.queryAsync(
+    `SELECT snapshot_id AS snapshotId FROM ${PLAN_SCOPE_SNAPSHOTS_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  ).catch((error) => {
+    if (/no such table|no table/i.test(String(error))) return [];
+    throw error;
+  })) as Array<{ snapshotId?: unknown }>;
+  const snapshotIds = snapshots
+    .map((row) => (typeof row.snapshotId === "string" ? row.snapshotId : ""))
+    .filter(Boolean);
+  if (snapshotIds.length) {
+    const placeholders = snapshotIds.map(() => "?").join(", ");
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE}
+       WHERE snapshot_id IN (${placeholders})`,
+      snapshotIds,
+    );
+  }
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${PLAN_SCOPE_SNAPSHOTS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+}

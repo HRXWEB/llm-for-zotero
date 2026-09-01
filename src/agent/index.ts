@@ -11,6 +11,8 @@ import { initAgentToolResultHandleStore } from "./store/toolResultHandles";
 import { initAgentEvidenceStore } from "./context/cacheManagement";
 import { initAgentCoverageStore } from "./context/coverageLedger";
 import { initAgentPlanStore } from "./plans/store";
+import { initResearchStore } from "./research/store";
+import { initPlanDocumentStore } from "./documents/store";
 import { createAgentModelAdapter } from "./model/factory";
 import { createBuiltInActionRegistry, type ActionRegistry } from "./actions";
 import { createLibraryBatchTool } from "./tools/write/libraryBatch";
@@ -89,6 +91,10 @@ async function createAgentSubsystemRuntime(
   await initAgentCoverageStore();
   assertAgentInitCurrent(generation);
   await initAgentPlanStore();
+  assertAgentInitCurrent(generation);
+  await initResearchStore();
+  assertAgentInitCurrent(generation);
+  await initPlanDocumentStore();
   assertAgentInitCurrent(generation);
 
   const zoteroGateway = new ZoteroGateway();

@@ -456,6 +456,8 @@ type ToolWorkflowOutcome = {
   delivery?: ToolWorkflowDelivery;
   stopRun?: boolean;
   finalText?: string;
+  planDocumentId?: string;
+  preserveToolOnlyTranscript?: boolean;
 };
 
 function stringifyToolDeliveryContent(content: unknown): string {
@@ -1315,12 +1317,9 @@ export class AgentRuntime {
           });
         }
       }
-      const actionContractInitialization =
-        await actionContractSession.initialize({
-          checkpoint: interruptedActionCheckpoint,
-        });
-      if (actionContractInitialization.kind === "failed") {
-        const text = actionContractInitialization.userMessage;
+      const planInitialization = await planSession.initialize();
+      if (planInitialization.kind === "failed") {
+        const text = planInitialization.userMessage;
         await emit({ type: "final", text });
         await persistIfLive(() => finishAgentRun(runId, "failed", text));
         return {
@@ -1330,9 +1329,12 @@ export class AgentRuntime {
           usedFallback: false,
         };
       }
-      const planInitialization = await planSession.initialize();
-      if (planInitialization.kind === "failed") {
-        const text = planInitialization.userMessage;
+      const actionContractInitialization =
+        await actionContractSession.initialize({
+          checkpoint: interruptedActionCheckpoint,
+        });
+      if (actionContractInitialization.kind === "failed") {
+        const text = actionContractInitialization.userMessage;
         await emit({ type: "final", text });
         await persistIfLive(() => finishAgentRun(runId, "failed", text));
         return {
@@ -1604,14 +1606,24 @@ export class AgentRuntime {
         options: {
           emitFinalEvent?: boolean;
           webAttribution?: WebAttributionAssessment;
+          planDocumentId?: string;
         } = {},
       ): Promise<AgentRuntimeOutcome> => {
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
+        if (status === "failed") {
+          await planSession.interrupt(
+            redactedFinalText ||
+              "The agent run ended before the plan completed",
+          );
+        }
         if (options.emitFinalEvent !== false) {
           await emit({
             type: "final",
             text: redactedFinalText,
+            ...(options.planDocumentId
+              ? { planDocumentId: options.planDocumentId }
+              : {}),
             ...(options.webAttribution?.status === "valid" &&
             options.webAttribution.anchors.length
               ? {
@@ -1661,6 +1673,9 @@ export class AgentRuntime {
           kind: "completed",
           runId,
           text: redactedFinalText,
+          ...(options.planDocumentId
+            ? { planDocumentId: options.planDocumentId }
+            : {}),
           usedFallback: false,
         } as const;
       };
@@ -1701,6 +1716,7 @@ export class AgentRuntime {
         );
         return completeRun(finalText, "completed", { webAttribution });
       };
+      const providerTerminalOutcomes: ToolWorkflowOutcome[] = [];
       const runModelStep = async (
         round: number,
         statusText: string,
@@ -1944,6 +1960,7 @@ export class AgentRuntime {
             const outcome = await executeToolWorkflow(call, round, {
               modelCallId: call.id,
             });
+            if (outcome.stopRun) providerTerminalOutcomes.push(outcome);
             newTranscriptMessages.push({
               role: "assistant",
               content: "",
@@ -1962,7 +1979,11 @@ export class AgentRuntime {
               });
               newTranscriptMessages.push(...outcome.delivery.followupMessages);
             }
-            if (outcome.stopRun && outcome.finalText) {
+            if (
+              outcome.stopRun &&
+              outcome.finalText &&
+              !outcome.preserveToolOnlyTranscript
+            ) {
               newTranscriptMessages.push({
                 role: "assistant",
                 content: outcome.finalText,
@@ -2252,6 +2273,31 @@ export class AgentRuntime {
         const { toolResult, toolDefinition, input } = executedCall;
         const deliveryCallId = options.modelCallId || call.id;
 
+        if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
+          const terminal = await toolDefinition.resolveTerminalResult(
+            input as never,
+            toolResult,
+            { ...context, currentAnswerText },
+          );
+          if (terminal) {
+            return {
+              toolResult,
+              delivery: options.suppressModelDelivery
+                ? undefined
+                : await buildToolDelivery(
+                    toolResult,
+                    deliveryCallId,
+                    toolDefinition,
+                  ),
+              stopRun: true,
+              finalText: terminal.finalText,
+              planDocumentId: terminal.planDocumentId,
+              preserveToolOnlyTranscript:
+                terminal.providerTranscript === "tool_only",
+            };
+          }
+        }
+
         if (
           toolResult.ok &&
           toolDefinition?.createResultReviewAction &&
@@ -2402,6 +2448,14 @@ export class AgentRuntime {
             throw err;
           }
           const { step, stepStreamedText } = stepResult;
+          const terminalOutcome = providerTerminalOutcomes.shift();
+          if (terminalOutcome) {
+            return completeRun(
+              terminalOutcome.finalText || currentAnswerText,
+              "completed",
+              { planDocumentId: terminalOutcome.planDocumentId },
+            );
+          }
           if (step.kind === "final") {
             const returnedText = step.text || "";
             const streamedTextOffset = stepStreamedText
@@ -2535,14 +2589,16 @@ export class AgentRuntime {
             if (outcome.stopRun) {
               appendRoundContinuation();
               const stopFinalText = outcome.finalText || currentAnswerText;
-              if (stopFinalText) {
+              if (stopFinalText && !outcome.preserveToolOnlyTranscript) {
                 newTranscriptMessages.push({
                   role: "assistant",
                   content: stopFinalText,
                 });
               }
               await persistTranscriptCheckpoint();
-              return completeRun(stopFinalText, "completed");
+              return completeRun(stopFinalText, "completed", {
+                planDocumentId: outcome.planDocumentId,
+              });
             }
             if (consecutiveToolErrors >= 3) {
               appendRoundContinuation();

@@ -65,6 +65,8 @@ export interface Message {
   timestamp: number;
   runMode?: "chat" | "agent";
   agentRunId?: string;
+  /** Session hint used to bind the exact durable document outbox row. */
+  planDocumentId?: string;
   selectedText?: string;
   selectedTextExpanded?: boolean;
   selectedTextContexts?: SelectedTextContext[];

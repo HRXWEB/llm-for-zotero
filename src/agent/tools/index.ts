@@ -60,6 +60,10 @@ import { ActionContractService } from "../contracts/actionContract";
 import { createUpdatePlanTool } from "./plan/updatePlan";
 import { createTaskUpdateTool } from "./plan/taskUpdate";
 import { createRequestUserInputTool } from "./plan/requestUserInput";
+import { createSubmitPlanDocumentTool } from "./plan/submitPlanDocument";
+import { createResearchUpdateTool } from "./plan/researchUpdate";
+import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
+import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
 
 type BuiltInAgentToolDeps = {
   zoteroGateway: ZoteroGateway;
@@ -669,9 +673,13 @@ export function createBuiltInToolRegistry(
   registry.register(markToolTier(runCommand, "advanced"));
   registry.register(markToolTier(zoteroScript, "advanced"));
   registry.register(createToolResultReadTool());
-  registry.register(createUpdatePlanTool());
+  registry.register(createUpdatePlanTool(deps.zoteroGateway));
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
+  registry.register(createSubmitPlanDocumentTool(deps.zoteroGateway));
+  registry.register(createResearchUpdateTool(deps.zoteroGateway));
+  registry.register(createApproveResearchExpansionTool());
+  registry.register(createApproveResearchMutationTool());
 
   const legacyTools: AgentToolDefinition<any, any>[] = [
     queryLibrary,

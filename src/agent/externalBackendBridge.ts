@@ -90,7 +90,9 @@ import {
   inferPlanStepEffect,
   planExecutionCoordinator,
 } from "./plans/coordinator";
-import { loadPlanExecutionLedger } from "./plans/store";
+import { loadPlanArtifact, loadPlanExecutionLedger } from "./plans/store";
+import { loadResearchJobForExecution } from "./research/store";
+import { loadLatestPlanDocumentForExecution } from "./documents/store";
 import {
   PlanExecutionRunSession,
   recordMcpPlanEvidence,
@@ -3062,6 +3064,22 @@ export function createExternalBackendBridgeRuntime(options: {
             const steps = parsedSteps.length ? parsedSteps : [planText];
             if (steps[0]) {
               const planning = params.request.planContext;
+              const structured = await loadPlanArtifact(
+                planning.planId,
+                planning.revision,
+              );
+              if (structured?.sourceRunId) {
+                const planEvent: AgentEvent = {
+                  type:
+                    structured.status === "awaiting_approval"
+                      ? "plan_ready"
+                      : "plan_updated",
+                  artifact: structured,
+                };
+                await appendPersistedEvent(planEvent);
+                await notifyIfLive(planEvent);
+                return;
+              }
               const artifact = await planExecutionCoordinator.updateDraft({
                 planId: planning.planId,
                 conversationKey: params.request.conversationKey,
@@ -3177,6 +3195,53 @@ export function createExternalBackendBridgeRuntime(options: {
                 if (!sameConversation || !sameProfile) return;
                 const pending = (async () => {
                   await emitTurnEvent(buildClaudeMcpToolActivityEvent(event));
+                  if (
+                    event.phase === "completed" &&
+                    event.ok &&
+                    event.toolName === "update_plan" &&
+                    params.request.planContext?.phase === "planning"
+                  ) {
+                    const artifact = await loadPlanArtifact(
+                      params.request.planContext.planId,
+                      params.request.planContext.revision,
+                    );
+                    if (artifact) {
+                      await emitTurnEvent({
+                        type:
+                          artifact.status === "awaiting_approval"
+                            ? "plan_ready"
+                            : "plan_updated",
+                        artifact,
+                      });
+                    }
+                  }
+                  if (
+                    event.phase === "completed" &&
+                    event.ok &&
+                    event.toolName === "research_update" &&
+                    params.request.planContext?.phase === "executing"
+                  ) {
+                    const job = await loadResearchJobForExecution(
+                      params.request.planContext.executionId,
+                    );
+                    if (job) {
+                      await emitTurnEvent({
+                        type: "plan_research_progress",
+                        progress: {
+                          researchJobId: job.researchJobId,
+                          executionId: job.executionId,
+                          parentTaskId: job.parentTaskId,
+                          stage: job.activeStage,
+                          totalItems: job.totalItems,
+                          screenedItems: job.screenedItems,
+                          candidateItems: job.candidateItems,
+                          deepReadCompleted: job.deepReadCompleted,
+                          deepReadPlanned: job.deepReadPlanned,
+                          coverageStatus: job.coverageStatus,
+                        },
+                      });
+                    }
+                  }
                   const ledger = await recordMcpPlanEvidence(
                     params.request.planContext,
                     event,
@@ -3284,6 +3349,21 @@ export function createExternalBackendBridgeRuntime(options: {
             },
           });
           await Promise.all(Array.from(pendingPlanEvidence));
+          if (
+            outcome.kind === "completed" &&
+            params.request.planContext?.phase === "executing"
+          ) {
+            const document = await loadLatestPlanDocumentForExecution(
+              params.request.planContext.executionId,
+            );
+            if (document) {
+              outcome = {
+                ...outcome,
+                text: document.visibleMarkdown,
+                planDocumentId: document.documentId,
+              };
+            }
+          }
           const planDecision = await planSession.evaluateFinal({
             canCorrect: false,
           });

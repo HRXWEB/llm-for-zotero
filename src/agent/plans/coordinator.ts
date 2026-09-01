@@ -17,6 +17,9 @@ import type {
   ExecutionTask,
   ExecutionTaskStatus,
   PlanArtifact,
+  PlanCompletionRequirement,
+  PlanCompletionRequirementKind,
+  PlanContract,
   PlanExecutionLedger,
   PlanProvider,
   PlanStep,
@@ -24,6 +27,14 @@ import type {
   TaskTransitionRequest,
 } from "./types";
 import type { PlanSkillRoutingReceipt } from "../skills/routingTypes";
+import { buildDefaultPlanContract, decodePlanContract } from "./contracts";
+import {
+  listScopeSnapshotItems,
+  saveResearchCorpusItem,
+  saveResearchJob,
+  saveResearchWorkItem,
+} from "../research/store";
+import { resolveResearchPolicy } from "../research/policy";
 
 function normalizedText(value: unknown, label: string): string {
   const text = typeof value === "string" ? value.trim() : "";
@@ -144,6 +155,93 @@ export function assertTaskCompletionEvidence(
   evidence: readonly TaskEvidence[],
 ): void {
   const verified = evidence.filter((entry) => entry.verified);
+  if (task.completionRequirements?.length) {
+    for (const requirement of task.completionRequirements) {
+      const matching = verified.filter(
+        (entry) =>
+          entry.requirementId === requirement.requirementId &&
+          entry.contractDigest === requirement.contractDigest,
+      );
+      const satisfied =
+        requirement.kind === "mutation_receipts"
+          ? (() => {
+              const valid = matching.filter(
+                (entry) =>
+                  entry.kind === "mutation_receipt" &&
+                  entry.payload?.type === "mutation_receipts" &&
+                  entry.payload.receiptIds.includes(entry.receipt?.id || "") &&
+                  entry.receipt?.verification === "verified" &&
+                  ["applied", "already_satisfied", "observed"].includes(
+                    entry.receipt.status,
+                  ),
+              );
+              return task.obligationIds.length
+                ? task.obligationIds.every((obligationId) =>
+                    valid.some(
+                      (entry) => entry.receipt?.obligationId === obligationId,
+                    ),
+                  )
+                : valid.length > 0;
+            })()
+          : matching.some((entry) => {
+              if (requirement.kind === "verified_read") {
+                return (
+                  entry.kind === "verified_read" &&
+                  entry.payload?.type === "verified_read"
+                );
+              }
+              if (requirement.kind === "bounded_reasoning") {
+                return (
+                  entry.kind === "reasoning_assertion" &&
+                  entry.payload?.type === "bounded_reasoning"
+                );
+              }
+              if (requirement.kind === "research_coverage") {
+                return (
+                  entry.kind === "research_coverage" &&
+                  entry.payload?.type === "research_coverage" &&
+                  entry.payload.coverageStatus !== "failed"
+                );
+              }
+              if (requirement.kind === "document_integrity") {
+                return (
+                  entry.kind === "document_integrity" &&
+                  entry.payload?.type === "document_integrity" &&
+                  entry.payload.integrityValidated
+                );
+              }
+              if (requirement.kind === "document_published") {
+                return (
+                  entry.kind === "document_published" &&
+                  entry.payload?.type === "document_published"
+                );
+              }
+              return false;
+            });
+      if (!satisfied) {
+        throw new Error(
+          `Task completion requirement ${requirement.kind} (${requirement.requirementId}) is not satisfied for contract ${requirement.contractDigest}`,
+        );
+      }
+    }
+    const integrity = verified.find(
+      (entry) => entry.payload?.type === "document_integrity",
+    )?.payload;
+    const published = verified.find(
+      (entry) => entry.payload?.type === "document_published",
+    )?.payload;
+    if (
+      integrity?.type === "document_integrity" &&
+      published?.type === "document_published" &&
+      (integrity.documentId !== published.documentId ||
+        integrity.contentHash !== published.contentHash)
+    ) {
+      throw new Error(
+        "Document integrity and publication evidence do not match",
+      );
+    }
+    return;
+  }
   if (task.expectedEffect === "reasoning") {
     if (!verified.some((entry) => entry.kind === "reasoning_assertion")) {
       throw new Error("Reasoning task requires a bounded completion assertion");
@@ -185,6 +283,26 @@ export function assertTaskCompletionEvidence(
   }
 }
 
+export async function computePlanContractDigest(
+  contract: PlanContract,
+): Promise<string> {
+  return `sha256:${await sha256Text(canonicalJson(contract))}`;
+}
+
+/**
+ * Resolve only the authority that may exist before research has selected its
+ * targets. A request-level classifier contract is deliberately ignored for an
+ * after-research effect; that authority can only come from the second gate.
+ */
+export function resolvePreResearchActionContract(
+  contract: PlanContract | undefined,
+  fallback?: AgentActionContract,
+): AgentActionContract | undefined {
+  const effect = contract?.effects?.libraryMutation;
+  if (effect?.approval === "after_research") return undefined;
+  return effect?.approval === "initial" ? effect.contract : fallback;
+}
+
 export async function computePlanDigest(params: {
   planId: string;
   conversationKey: number;
@@ -192,11 +310,257 @@ export async function computePlanDigest(params: {
   actionContractId?: string;
   steps: readonly PlanStep[];
   skillRoutingReceipt?: PlanSkillRoutingReceipt;
+  contract?: PlanContract;
+  contractDigest?: string;
 }): Promise<string> {
   return `sha256:${await sha256Text(canonicalJson(params))}`;
 }
 
+function defaultRequirementKind(params: {
+  effect: PlanStep["expectedEffect"];
+  contract: PlanContract;
+}): PlanCompletionRequirementKind {
+  if (params.effect === "mutation") return "mutation_receipts";
+  if (params.effect === "reasoning") return "bounded_reasoning";
+  if (
+    params.effect === "artifact" &&
+    params.contract.deliverable.kind === "document"
+  ) {
+    return "document_integrity";
+  }
+  return "verified_read";
+}
+
+function assignCompletionRequirements(params: {
+  steps: readonly (Omit<PlanStep, "completionRequirements"> & {
+    requestedRequirementKinds?: readonly PlanCompletionRequirementKind[];
+  })[];
+  contract: PlanContract;
+  contractDigest: string;
+}): PlanStep[] {
+  const kindsByStep = params.steps.map((step) => {
+    const requested = step.requestedRequirementKinds?.length
+      ? [...new Set(step.requestedRequirementKinds)]
+      : [
+          defaultRequirementKind({
+            effect: step.expectedEffect,
+            contract: params.contract,
+          }),
+        ];
+    return requested;
+  });
+  const firstMutation = params.steps.findIndex(
+    (step) => step.expectedEffect === "mutation",
+  );
+  const lastNonMutationBeforeWrite = (() => {
+    const end =
+      firstMutation >= 0 ? firstMutation - 1 : params.steps.length - 1;
+    for (let index = end; index >= 0; index -= 1) {
+      if (params.steps[index].expectedEffect !== "mutation") return index;
+    }
+    return -1;
+  })();
+  const lastNonMutation = (() => {
+    for (let index = params.steps.length - 1; index >= 0; index -= 1) {
+      if (params.steps[index].expectedEffect !== "mutation") return index;
+    }
+    return params.steps.length - 1;
+  })();
+  const lastArtifact = (() => {
+    for (let index = params.steps.length - 1; index >= 0; index -= 1) {
+      if (params.steps[index].expectedEffect === "artifact") return index;
+    }
+    return lastNonMutation;
+  })();
+  if (
+    params.contract.investigation &&
+    !kindsByStep.some((kinds) => kinds.includes("research_coverage"))
+  ) {
+    const owner =
+      firstMutation >= 0 ? lastNonMutationBeforeWrite : lastNonMutation;
+    if (owner < 0) {
+      throw new Error(
+        "Research-selected mutations require a non-mutation research step before the write",
+      );
+    }
+    kindsByStep[owner].push("research_coverage");
+  }
+  if (params.contract.deliverable.kind === "document") {
+    if (!kindsByStep.some((kinds) => kinds.includes("document_integrity"))) {
+      kindsByStep[lastArtifact].push("document_integrity");
+    }
+    if (!kindsByStep.some((kinds) => kinds.includes("document_published"))) {
+      kindsByStep[lastArtifact].push("document_published");
+    }
+  }
+  if (
+    params.contract.effects?.libraryMutation &&
+    !kindsByStep.some((kinds) => kinds.includes("mutation_receipts"))
+  ) {
+    const mutationIndex = params.steps.findIndex(
+      (step) => step.expectedEffect === "mutation",
+    );
+    if (mutationIndex >= 0)
+      kindsByStep[mutationIndex].push("mutation_receipts");
+  }
+  return params.steps.map((step, index) => {
+    const { requestedRequirementKinds: _requested, ...planStep } = step;
+    const completionRequirements: PlanCompletionRequirement[] = [
+      ...new Set(kindsByStep[index]),
+    ].map((kind) => ({
+      requirementId: `${step.planStepId}:requirement:${kind}`,
+      kind,
+      contractDigest: params.contractDigest,
+    }));
+    return { ...planStep, completionRequirements };
+  });
+}
+
+function validatePlanStepContract(params: {
+  contract: PlanContract;
+  steps: readonly PlanStep[];
+}): void {
+  const mutationIndexes = params.steps
+    .map((step, index) => (step.expectedEffect === "mutation" ? index : -1))
+    .filter((index) => index >= 0);
+  const effect = params.contract.effects?.libraryMutation;
+  if (Boolean(effect) !== Boolean(mutationIndexes.length)) {
+    throw new Error(
+      effect
+        ? "A library-mutation contract requires a mutation plan step"
+        : "A mutation plan step requires an approved library-mutation contract",
+    );
+  }
+  const requirementOwners = new Map<PlanCompletionRequirementKind, number[]>();
+  params.steps.forEach((step, index) => {
+    for (const requirement of step.completionRequirements || []) {
+      const owners = requirementOwners.get(requirement.kind) || [];
+      owners.push(index);
+      requirementOwners.set(requirement.kind, owners);
+      if (
+        requirement.kind === "mutation_receipts" &&
+        step.expectedEffect !== "mutation"
+      ) {
+        throw new Error("Mutation receipts may only complete a mutation step");
+      }
+      if (
+        (requirement.kind === "document_integrity" ||
+          requirement.kind === "document_published") &&
+        step.expectedEffect !== "artifact"
+      ) {
+        throw new Error(
+          "Document completion requirements require an artifact step",
+        );
+      }
+    }
+  });
+  const exactlyOne = (kind: PlanCompletionRequirementKind): number => {
+    const owners = requirementOwners.get(kind) || [];
+    if (owners.length !== 1) {
+      throw new Error(`A v3 plan requires exactly one ${kind} owner`);
+    }
+    return owners[0];
+  };
+  if (params.contract.investigation) {
+    const researchOwner = exactlyOne("research_coverage");
+    if (
+      effect?.approval === "after_research" &&
+      mutationIndexes.some((index) => index <= researchOwner)
+    ) {
+      throw new Error(
+        "Research coverage must complete before a research-selected mutation step",
+      );
+    }
+  } else if (requirementOwners.has("research_coverage")) {
+    throw new Error("Research coverage requires an investigation contract");
+  }
+  if (effect) {
+    const receiptOwners = requirementOwners.get("mutation_receipts") || [];
+    if (
+      receiptOwners.length !== mutationIndexes.length ||
+      receiptOwners.some((index) => !mutationIndexes.includes(index))
+    ) {
+      throw new Error(
+        "Every mutation step requires its own mutation-receipts requirement",
+      );
+    }
+  }
+  if (params.contract.deliverable.kind === "document") {
+    const integrityOwner = exactlyOne("document_integrity");
+    const publishedOwner = exactlyOne("document_published");
+    const finalIndex = params.steps.length - 1;
+    if (
+      integrityOwner !== finalIndex ||
+      publishedOwner !== finalIndex ||
+      params.steps[finalIndex].expectedEffect !== "artifact"
+    ) {
+      throw new Error(
+        "The formal document must be the final artifact step and own integrity and publication",
+      );
+    }
+  } else if (
+    requirementOwners.has("document_integrity") ||
+    requirementOwners.has("document_published")
+  ) {
+    throw new Error(
+      "Document completion requirements require a document deliverable",
+    );
+  }
+}
+
 export class PlanExecutionCoordinator {
+  async bindResearchDerivedActionContract(params: {
+    executionId: string;
+    contract: AgentActionContract;
+    now?: number;
+    alreadyInTransaction?: boolean;
+  }): Promise<PlanExecutionLedger> {
+    const ledger = await this.requireLedger(params.executionId);
+    const artifact = await loadPlanArtifact(ledger.planId, ledger.revision);
+    if (
+      !artifact ||
+      artifact.digest !== ledger.planDigest ||
+      artifact.contract?.effects?.libraryMutation.approval !== "after_research"
+    ) {
+      throw new Error("The plan does not authorize research-derived writes");
+    }
+    const now = params.now ?? Date.now();
+    const updated: PlanExecutionLedger = {
+      ...ledger,
+      actionContractId: params.contract.id,
+      tasks: ledger.tasks.map((task) =>
+        task.expectedEffect === "mutation"
+          ? {
+              ...task,
+              obligationIds: params.contract.obligations
+                .filter(
+                  (obligation) =>
+                    !task.expectedCapability ||
+                    obligation.capability === task.expectedCapability,
+                )
+                .map((obligation) => obligation.id),
+              updatedAt: now,
+            }
+          : task,
+      ),
+      updatedAt: now,
+    };
+    if (
+      updated.tasks.some(
+        (task) =>
+          task.expectedEffect === "mutation" && !task.obligationIds.length,
+      )
+    ) {
+      throw new Error(
+        "The exact mutation contract does not cover every approved mutation task",
+      );
+    }
+    await savePlanExecutionLedger(updated, undefined, {
+      alreadyInTransaction: params.alreadyInTransaction,
+    });
+    return updated;
+  }
+
   async admitSupportingTask(params: {
     executionId: string;
     taskId: string;
@@ -316,8 +680,10 @@ export class PlanExecutionCoordinator {
       acceptanceCriteria: readonly string[];
       expectedCapability?: string;
       expectedEffect: PlanStep["expectedEffect"];
+      completionRequirementKinds?: readonly PlanCompletionRequirementKind[];
       targetBoundary?: PlanStep["targetBoundary"];
     }>;
+    contract?: PlanContract;
     actionContractId?: string;
     actionContract?: AgentActionContract;
     sourceRunId?: string;
@@ -335,8 +701,47 @@ export class PlanExecutionCoordinator {
     }
     if (!params.steps.length)
       throw new Error("A plan requires at least one step");
+    const decodedContract = decodePlanContract(
+      params.contract ||
+        buildDefaultPlanContract({
+          actionContract: params.actionContract,
+          steps: params.steps,
+        }),
+      { requireSnapshot: params.ready === true },
+    );
+    const mutationEffect = decodedContract.effects?.libraryMutation;
+    const initialMutation =
+      mutationEffect?.approval === "initial"
+        ? mutationEffect.contract
+        : undefined;
+    if (
+      params.actionContract &&
+      initialMutation &&
+      params.actionContract.id !== initialMutation.id
+    ) {
+      throw new Error(
+        "The plan contract action authority does not match the request",
+      );
+    }
+    // An inferred request contract cannot authorize targets that research has
+    // not selected yet. The only authority for an after-research effect is the
+    // separately persisted exact-target grant created at the second gate.
+    const actionContract = resolvePreResearchActionContract(
+      decodedContract,
+      params.actionContract,
+    );
+    const actionContractId = actionContract?.id;
+    if (
+      params.actionContractId &&
+      params.actionContractId !== actionContractId
+    ) {
+      throw new Error(
+        "The supplied action contract ID does not match the plan contract",
+      );
+    }
+    const contractDigest = await computePlanContractDigest(decodedContract);
     const seen = new Set<string>();
-    const steps: PlanStep[] = params.steps.map((step, index) => {
+    const normalizedSteps = params.steps.map((step, index) => {
       const planStepId =
         step.planStepId?.trim() ||
         `${params.planId}:r${params.revision}:s${index + 1}`;
@@ -359,19 +764,28 @@ export class PlanExecutionCoordinator {
         acceptanceCriteria,
         expectedCapability: step.expectedCapability?.trim() || undefined,
         expectedEffect: step.expectedEffect,
+        requestedRequirementKinds: step.completionRequirementKinds,
         targetBoundary: step.targetBoundary,
       };
     });
+    const steps = assignCompletionRequirements({
+      steps: normalizedSteps,
+      contract: decodedContract,
+      contractDigest,
+    });
+    validatePlanStepContract({ contract: decodedContract, steps });
     const digest = await computePlanDigest({
       planId: params.planId,
       conversationKey: params.conversationKey,
       revision: params.revision,
-      actionContractId: params.actionContractId,
+      actionContractId,
       steps,
       skillRoutingReceipt: params.skillRoutingReceipt,
+      contract: decodedContract,
+      contractDigest,
     });
     const artifact: PlanArtifact = {
-      version: 2,
+      version: 3,
       planId: params.planId,
       conversationKey: params.conversationKey,
       provider: params.provider,
@@ -379,11 +793,13 @@ export class PlanExecutionCoordinator {
       digest,
       status: params.ready ? "awaiting_approval" : "drafting",
       explanation: params.explanation?.trim() || undefined,
-      actionContractId: params.actionContractId,
-      actionContract: params.actionContract,
+      actionContractId,
+      actionContract,
       sourceRunId: params.sourceRunId || existing?.sourceRunId,
       skillRoutingReceipt:
         params.skillRoutingReceipt || existing?.skillRoutingReceipt,
+      contract: decodedContract,
+      contractDigest,
       steps,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
@@ -419,7 +835,10 @@ export class PlanExecutionCoordinator {
     if (artifact.status !== "awaiting_approval") {
       throw new Error("Only a plan awaiting approval can be approved");
     }
-    const actionContract = artifact.actionContract || params.actionContract;
+    const actionContract = resolvePreResearchActionContract(
+      artifact.contract,
+      artifact.actionContract || params.actionContract,
+    );
     if (
       artifact.actionContractId &&
       actionContract?.id !== artifact.actionContractId
@@ -428,7 +847,8 @@ export class PlanExecutionCoordinator {
     }
     if (
       artifact.steps.some((step) => step.expectedEffect === "mutation") &&
-      !actionContract
+      !actionContract &&
+      artifact.contract?.effects?.libraryMutation.approval !== "after_research"
     ) {
       throw new Error(
         "This mutation plan has no frozen action contract and cannot be approved safely",
@@ -458,6 +878,7 @@ export class PlanExecutionCoordinator {
       activeForm: step.activeForm,
       acceptanceCriteria: step.acceptanceCriteria,
       expectedEffect: step.expectedEffect,
+      completionRequirements: step.completionRequirements,
       expectedCapability: step.expectedCapability,
       obligationIds:
         actionContract?.obligations
@@ -502,6 +923,89 @@ export class PlanExecutionCoordinator {
       await savePlanExecutionLedger(ledger, undefined, {
         alreadyInTransaction: true,
       });
+      const investigation = artifact.contract?.investigation;
+      const snapshotId = investigation?.scopeSnapshot?.snapshotId;
+      if (investigation && snapshotId) {
+        const parentTask = tasks.find((task) =>
+          task.completionRequirements?.some(
+            (requirement) => requirement.kind === "research_coverage",
+          ),
+        );
+        if (!parentTask) {
+          throw new Error(
+            "A research plan requires a visible task that owns research coverage",
+          );
+        }
+        const snapshotItems = await listScopeSnapshotItems(snapshotId);
+        if (snapshotItems.length !== investigation.scopeSnapshot?.itemCount) {
+          throw new Error("The approved research scope snapshot is incomplete");
+        }
+        const researchJobId = `${executionId}:research`;
+        const policy =
+          artifact.contract?.researchPolicy ||
+          resolveResearchPolicy("plan_research");
+        await saveResearchJob(
+          {
+            version: 1,
+            researchJobId,
+            executionId,
+            parentTaskId: parentTask.taskId,
+            contractDigest: artifact.contractDigest || artifact.digest,
+            snapshotId,
+            policy,
+            status: "pending",
+            activeStage: "inventory",
+            totalItems: snapshotItems.length,
+            screenedItems: 0,
+            candidateItems: 0,
+            deepReadCompleted: 0,
+            deepReadPlanned: investigation.estimatedDeepReadPapers,
+            createdAt: now,
+            updatedAt: now,
+          },
+          artifact.conversationKey,
+        );
+        for (const snapshotItem of snapshotItems) {
+          await saveResearchCorpusItem({
+            version: 1,
+            researchJobId,
+            executionId,
+            parentTaskId: parentTask.taskId,
+            libraryID: snapshotItem.libraryID,
+            itemKey: snapshotItem.itemKey,
+            localItemId: snapshotItem.localItemId,
+            ordinal: snapshotItem.ordinal,
+            screeningStatus: "pending",
+            criterionResults: {},
+            inventoryRecorded: false,
+            hasAbstract: false,
+            attachmentItemKeys: [],
+            duplicateAttachmentKeys: [],
+            readable: Boolean(snapshotItem.attachmentFingerprint),
+            indexed: false,
+            sourceFingerprint:
+              snapshotItem.attachmentFingerprint ||
+              snapshotItem.metadataFingerprint,
+            updatedAt: now,
+          });
+          await saveResearchWorkItem({
+            version: 1,
+            workItemId: `${researchJobId}:work:inventory:${snapshotItem.libraryID}:${snapshotItem.itemKey}`,
+            researchJobId,
+            executionId,
+            parentTaskId: parentTask.taskId,
+            libraryID: snapshotItem.libraryID,
+            itemKey: snapshotItem.itemKey,
+            stage: "inventory",
+            subquestionIds: [],
+            status: "pending",
+            attemptCount: 0,
+            evidenceRefs: [],
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
     });
     return ledger;
   }
@@ -539,19 +1043,27 @@ export class PlanExecutionCoordinator {
     if (!task) throw new Error("Execution task not found");
     const now = params.now ?? Date.now();
     const evidenceIds = [...task.evidenceIds];
+    const requirement = task.completionRequirements?.find(
+      (entry) => entry.kind === "mutation_receipts",
+    );
     for (const receipt of params.receipts) {
       const evidenceId = `${params.executionId}:${params.taskId}:receipt:${receipt.id}`;
       const verified =
         receipt.verification === "verified" &&
         ["applied", "already_satisfied", "observed"].includes(receipt.status);
       const evidence: TaskEvidence = {
-        version: 1,
+        version: requirement ? 2 : 1,
         evidenceId,
         executionId: params.executionId,
         taskId: params.taskId,
         kind: "mutation_receipt",
         verified,
+        requirementId: requirement?.requirementId,
+        contractDigest: requirement?.contractDigest,
         receipt,
+        payload: requirement
+          ? { type: "mutation_receipts", receiptIds: [receipt.id] }
+          : undefined,
         reference: receipt.evidenceRef,
         summary: receipt.verifiedFacts.join("; ") || receipt.reasons.join("; "),
         createdAt: now,

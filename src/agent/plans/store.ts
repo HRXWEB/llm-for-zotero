@@ -4,6 +4,12 @@ import type {
   PlanExecutionLedger,
   TaskEvidence,
 } from "./types";
+import {
+  decodeExecutionTask,
+  decodePlanArtifact,
+  decodePlanExecutionLedger,
+  decodeTaskEvidence,
+} from "./decoders";
 
 export const PLAN_ARTIFACTS_TABLE = "llm_for_zotero_plan_artifacts";
 export const PLAN_EXECUTIONS_TABLE = "llm_for_zotero_plan_executions";
@@ -14,13 +20,12 @@ export const PLAN_TASK_EVIDENCE_TABLE = "llm_for_zotero_plan_task_evidence";
 
 type JsonRow = { payloadJson?: unknown };
 
-function parsePayload<T>(row: JsonRow | undefined): T | null {
+function parsePayload<T>(
+  row: JsonRow | undefined,
+  decoder: (value: unknown) => T,
+): T | null {
   if (!row || typeof row.payloadJson !== "string") return null;
-  try {
-    return JSON.parse(row.payloadJson) as T;
-  } catch {
-    return null;
-  }
+  return decoder(JSON.parse(row.payloadJson));
 }
 
 export async function initAgentPlanStore(): Promise<void> {
@@ -114,7 +119,7 @@ export async function initAgentPlanStore(): Promise<void> {
        WHERE status IN ('running', 'waiting_for_user')`,
     )) as JsonRow[] | undefined;
     for (const row of rows || []) {
-      const ledger = parsePayload<PlanExecutionLedger>(row);
+      const ledger = parsePayload(row, decodePlanExecutionLedger);
       if (!ledger) continue;
       const tasks = ledger.tasks.map((task) =>
         task.status === "in_progress" || task.status === "waiting_for_user"
@@ -141,6 +146,7 @@ export async function initAgentPlanStore(): Promise<void> {
 }
 
 export async function savePlanArtifact(artifact: PlanArtifact): Promise<void> {
+  decodePlanArtifact(artifact);
   await Zotero.DB.queryAsync(
     `INSERT OR REPLACE INTO ${PLAN_ARTIFACTS_TABLE}
       (plan_id, revision, conversation_key, provider, status, digest,
@@ -169,7 +175,7 @@ export async function loadPlanArtifact(
      WHERE plan_id = ? AND revision = ? LIMIT 1`,
     [planId, revision],
   )) as JsonRow[] | undefined;
-  return parsePayload<PlanArtifact>(rows?.[0]);
+  return parsePayload(rows?.[0], decodePlanArtifact);
 }
 
 export async function loadLatestPlanArtifactForConversation(
@@ -180,7 +186,7 @@ export async function loadLatestPlanArtifactForConversation(
      WHERE conversation_key = ? ORDER BY updated_at DESC, revision DESC LIMIT 1`,
     [conversationKey],
   )) as JsonRow[] | undefined;
-  return parsePayload<PlanArtifact>(rows?.[0]);
+  return parsePayload(rows?.[0], decodePlanArtifact);
 }
 
 export async function savePlanExecutionLedger(
@@ -194,6 +200,7 @@ export async function savePlanExecutionLedger(
   },
   options: { alreadyInTransaction?: boolean } = {},
 ): Promise<void> {
+  decodePlanExecutionLedger(ledger);
   const write = async () => {
     await Zotero.DB.queryAsync(
       `INSERT OR REPLACE INTO ${PLAN_EXECUTIONS_TABLE}
@@ -264,7 +271,7 @@ export async function loadPlanExecutionLedger(
      WHERE execution_id = ? LIMIT 1`,
     [executionId],
   )) as JsonRow[] | undefined;
-  const ledger = parsePayload<PlanExecutionLedger>(rows?.[0]);
+  const ledger = parsePayload(rows?.[0], decodePlanExecutionLedger);
   if (!ledger) return null;
   const taskRows = (await Zotero.DB.queryAsync(
     `SELECT payload_json AS payloadJson FROM ${PLAN_EXECUTION_TASKS_TABLE}
@@ -272,7 +279,7 @@ export async function loadPlanExecutionLedger(
     [executionId],
   )) as JsonRow[] | undefined;
   const tasks = (taskRows || [])
-    .map((row) => parsePayload<ExecutionTask>(row))
+    .map((row) => parsePayload(row, decodeExecutionTask))
     .filter((task): task is ExecutionTask => Boolean(task));
   return { ...ledger, tasks: tasks.length ? tasks : ledger.tasks };
 }
@@ -294,6 +301,7 @@ export async function loadLatestPlanExecutionForPlan(
 }
 
 export async function saveTaskEvidence(evidence: TaskEvidence): Promise<void> {
+  decodeTaskEvidence(evidence);
   await Zotero.DB.queryAsync(
     `INSERT OR IGNORE INTO ${PLAN_TASK_EVIDENCE_TABLE}
       (evidence_id, execution_id, task_id, kind, verified, payload_json, created_at)
@@ -320,7 +328,7 @@ export async function listTaskEvidence(
     [executionId, taskId],
   )) as JsonRow[] | undefined;
   return (rows || [])
-    .map((row) => parsePayload<TaskEvidence>(row))
+    .map((row) => parsePayload(row, decodeTaskEvidence))
     .filter((evidence): evidence is TaskEvidence => Boolean(evidence));
 }
 

@@ -539,6 +539,27 @@ export async function appendAgentRunEvent(
   scheduleAgentRunTraceExport(runId);
 }
 
+export async function appendAgentRunEventAfterLatest(
+  runId: string,
+  event: AgentEvent,
+): Promise<AgentRunEventRecord> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT COALESCE(MAX(seq), 0) AS maxSeq
+     FROM ${AGENT_RUN_EVENTS_TABLE} WHERE run_id = ?`,
+    [runId],
+  )) as Array<{ maxSeq?: unknown }> | undefined;
+  const seq = Math.max(0, Number(rows?.[0]?.maxSeq || 0)) + 1;
+  const createdAt = Date.now();
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${AGENT_RUN_EVENTS_TABLE}
+      (run_id, seq, event_type, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [runId, seq, event.type, JSON.stringify(event), createdAt],
+  );
+  scheduleAgentRunTraceExport(runId);
+  return { runId, seq, eventType: event.type, payload: event, createdAt };
+}
+
 export async function listAgentRunEvents(
   runId: string,
 ): Promise<AgentRunEventRecord[]> {

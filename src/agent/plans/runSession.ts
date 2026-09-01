@@ -9,6 +9,22 @@ import { planExecutionCoordinator } from "./coordinator";
 import type { PlanExecutionLedger, PlanEvent, TaskEvidence } from "./types";
 import type { PlanRuntimeContext } from "./types";
 import type { ZoteroMcpToolActivityEvent } from "../mcp/server";
+import { loadLatestResearchMutationApprovalGrant } from "../research/store";
+import { validateResearchMutationGrant } from "../research/mutationApproval";
+import {
+  loadLatestPlanDocumentForExecution,
+  loadPlanDocumentOutbox,
+} from "../documents/store";
+import { extractVerifiedReadSources } from "./readEvidence";
+
+export function buildPlanFinalCorrection(
+  failure: string,
+  requiresDocument: boolean,
+): string {
+  return requiresDocument
+    ? `${failure}. This approved plan requires a published document. Do not stop with ordinary answer text and do not try to complete the document task with task_update. Call submit_plan_document now with the model-authored Markdown plus its citation and evidence mappings. If validation rejects the submission, correct the reported fields and call submit_plan_document again; the host finalizer owns References, publication evidence, and completion of the document task.`
+    : `${failure}. Continue the approved plan. Use task_update only after the current task has verified evidence; do not claim completion from model judgment alone.`;
+}
 
 export async function recordMcpPlanEvidence(
   plan: PlanRuntimeContext | undefined,
@@ -32,14 +48,34 @@ export async function recordMcpPlanEvidence(
     kind: TaskEvidence["kind"],
     reference: string,
     summary: string,
+    payload?: TaskEvidence["payload"],
   ) => {
+    const task = ledger?.tasks.find((entry) => entry.taskId === taskId);
+    const requirementKind =
+      kind === "reasoning_assertion" ? "bounded_reasoning" : kind;
+    const requirement = task?.completionRequirements?.find(
+      (entry) => entry.kind === requirementKind,
+    );
     ledger = await planExecutionCoordinator.attachEvidence({
-      version: 1,
+      version: requirement ? 2 : 1,
       evidenceId: `${plan.executionId}:${taskId}:${kind}:${event.requestId}`,
       executionId: plan.executionId,
       taskId,
       kind,
       verified: true,
+      requirementId: requirement?.requirementId,
+      contractDigest: requirement?.contractDigest,
+      payload:
+        payload ||
+        (requirement?.kind === "verified_read"
+          ? {
+              type: "verified_read",
+              reference,
+              sources: event.verifiedReadSources,
+            }
+          : requirement?.kind === "bounded_reasoning"
+            ? { type: "bounded_reasoning", assertion: summary }
+            : undefined),
       reference,
       summary,
       createdAt: event.timestamp,
@@ -57,6 +93,15 @@ export async function recordMcpPlanEvidence(
       "artifact",
       `mcp:${event.requestId}:artifacts`,
       `${event.artifacts.length} durable artifact${event.artifacts.length === 1 ? "" : "s"}`,
+      {
+        type: "tool_artifacts",
+        artifacts: event.artifacts.map((artifact) => ({
+          kind: artifact.kind,
+          mimeType: artifact.mimeType,
+          storedPath: artifact.storedPath,
+          contentHash: artifact.contentHash,
+        })),
+      },
     );
   }
   if (options.autoAdvance) {
@@ -125,6 +170,42 @@ export class PlanExecutionRunSession {
           "The approved plan identity no longer matches this conversation.",
       };
     }
+    const artifact = await loadPlanArtifact(plan.planId, plan.revision);
+    if (!artifact || artifact.digest !== plan.approvedDigest) {
+      return {
+        kind: "failed",
+        userMessage: "The approved plan artifact is unavailable or changed.",
+      };
+    }
+    if (artifact.actionContract) {
+      this.request.actionContract = artifact.actionContract;
+      if (
+        this.request.actionProgress?.contractId !== artifact.actionContract.id
+      ) {
+        this.request.actionProgress = undefined;
+      }
+    } else if (
+      artifact.contract?.effects?.libraryMutation.approval === "after_research"
+    ) {
+      // Never retain an action contract inferred from the synthetic execution
+      // prompt. Only the separately approved exact-target grant is authority.
+      this.request.actionContract = undefined;
+      this.request.actionProgress = undefined;
+      const grant = await loadLatestResearchMutationApprovalGrant(
+        plan.executionId,
+      );
+      if (grant?.status === "approved") {
+        try {
+          this.request.actionContract = await validateResearchMutationGrant({
+            grant,
+            artifact,
+          });
+        } catch {
+          // A stale grant is never authority. The model must show a refreshed
+          // exact-target preview before attempting another write.
+        }
+      }
+    }
     this.ledger = await planExecutionCoordinator.startNextTask(
       plan.executionId,
     );
@@ -157,13 +238,19 @@ export class PlanExecutionRunSession {
       });
     }
     if (params.result.ok && params.mutability === "read") {
+      const reference = `${params.runId}:${params.result.callId}`;
       ledger = await planExecutionCoordinator.attachEvidence(
         this.makeEvidence({
           executionId: plan.executionId,
           taskId,
           kind: "verified_read",
           verified: true,
-          reference: `${params.runId}:${params.result.callId}`,
+          payload: {
+            type: "verified_read",
+            reference,
+            sources: extractVerifiedReadSources(params.result.content),
+          },
+          reference,
           summary: `Verified result from ${params.toolName}`,
         }),
       );
@@ -175,12 +262,70 @@ export class PlanExecutionRunSession {
           taskId,
           kind: "artifact",
           verified: true,
+          payload: {
+            type: "tool_artifacts",
+            artifacts: params.artifacts.map((artifact) => ({
+              kind: artifact.kind,
+              mimeType: artifact.mimeType,
+              storedPath: artifact.storedPath,
+              contentHash: artifact.contentHash,
+            })),
+          },
           reference: `${params.runId}:${params.result.callId}:artifacts`,
           summary: `${params.artifacts.length} durable artifact${params.artifacts.length === 1 ? "" : "s"}`,
         }),
       );
     }
+    const deniedError =
+      params.result.content &&
+      typeof params.result.content === "object" &&
+      !Array.isArray(params.result.content) &&
+      typeof (params.result.content as { error?: unknown }).error === "string"
+        ? (params.result.content as { error: string }).error
+        : "";
+    if (
+      !params.result.ok &&
+      params.toolName === "approve_research_mutation" &&
+      deniedError.toLowerCase() === "user denied action"
+    ) {
+      ledger = await planExecutionCoordinator.attachEvidence({
+        version: 1,
+        evidenceId: `${plan.executionId}:${taskId}:research-mutation-declined:${params.result.callId}`,
+        executionId: plan.executionId,
+        taskId,
+        kind: "validation",
+        verified: true,
+        reference: `user-declined:${params.result.callId}`,
+        summary:
+          "The user declined the exact research-selected mutation preview",
+        createdAt: Date.now(),
+      });
+    }
     this.ledger = ledger;
+    await this.publish({ type: "plan_execution_updated", ledger });
+  }
+
+  async interrupt(reason: string): Promise<void> {
+    const plan = this.request.planContext;
+    if (!plan || plan.phase !== "executing") return;
+    let ledger =
+      this.ledger || (await loadPlanExecutionLedger(plan.executionId));
+    const task = ledger?.tasks.find(
+      (entry) => entry.taskId === ledger?.activeTaskId,
+    );
+    if (!ledger || !task || task.status !== "in_progress") return;
+    ledger = await planExecutionCoordinator.requestTransition({
+      executionId: plan.executionId,
+      taskId: task.taskId,
+      toStatus: "interrupted",
+      requestedBy: plan.provider,
+      reason,
+    });
+    this.ledger = ledger;
+    this.request.planContext = {
+      ...plan,
+      activeTaskId: undefined,
+    };
     await this.publish({ type: "plan_execution_updated", ledger });
   }
 
@@ -207,6 +352,17 @@ export class PlanExecutionRunSession {
       };
     }
     try {
+      const document = await loadLatestPlanDocumentForExecution(
+        plan.executionId,
+      );
+      if (document) {
+        const outbox = await loadPlanDocumentOutbox(document.documentId);
+        if (outbox?.status === "pending" || outbox?.status === "delivered") {
+          // Publication completion is committed only after the application
+          // persists this exact visible message.
+          return { kind: "accept" };
+        }
+      }
       this.ledger = await planExecutionCoordinator.assertCanFinalize(
         plan.executionId,
       );
@@ -219,9 +375,13 @@ export class PlanExecutionRunSession {
       const message = error instanceof Error ? error.message : String(error);
       if (params.canCorrect && !this.correctionUsed) {
         this.correctionUsed = true;
+        const artifact = await loadPlanArtifact(plan.planId, plan.revision);
+        const requiresDocument =
+          artifact?.version === 3 &&
+          artifact.contract?.deliverable.kind === "document";
         return {
           kind: "correct",
-          correction: `${message}. Continue the approved plan. Use task_update only after the current task has verified evidence; do not claim completion from model judgment alone.`,
+          correction: buildPlanFinalCorrection(message, requiresDocument),
         };
       }
       return { kind: "fail", failure: message };
@@ -232,10 +392,34 @@ export class PlanExecutionRunSession {
     params: Omit<TaskEvidence, "version" | "evidenceId" | "createdAt">,
   ): TaskEvidence {
     const createdAt = Date.now();
+    const task = this.ledger?.tasks.find(
+      (entry) => entry.taskId === params.taskId,
+    );
+    const requirementKind =
+      params.kind === "reasoning_assertion" ? "bounded_reasoning" : params.kind;
+    const requirement = task?.completionRequirements?.find(
+      (entry) => entry.kind === requirementKind,
+    );
     return {
-      version: 1,
+      version: requirement ? 2 : 1,
       evidenceId: `${params.executionId}:${params.taskId}:${params.kind}:${createdAt}:${Math.random().toString(36).slice(2, 7)}`,
       ...params,
+      requirementId: requirement?.requirementId,
+      contractDigest: requirement?.contractDigest,
+      payload:
+        params.payload ||
+        (requirement?.kind === "verified_read"
+          ? {
+              type: "verified_read",
+              reference: params.reference || params.summary || "verified read",
+            }
+          : requirement?.kind === "bounded_reasoning"
+            ? {
+                type: "bounded_reasoning",
+                assertion:
+                  params.summary || params.reference || "Reasoning completed",
+              }
+            : undefined),
       createdAt,
     };
   }

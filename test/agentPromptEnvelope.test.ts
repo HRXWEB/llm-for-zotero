@@ -66,6 +66,72 @@ describe("agent prompt envelope", function () {
     assert.include(prompt, "the host renders progress separately");
   });
 
+  it("exposes the exact approved document contract during execution", async function () {
+    const ledger: PlanExecutionLedger = {
+      version: 1,
+      executionId: "execution-document",
+      planId: "plan-document",
+      revision: 1,
+      planDigest: "sha256:document",
+      conversationKey: 704,
+      attempt: 1,
+      provider: "original",
+      grant: {
+        version: 1,
+        planId: "plan-document",
+        revision: 1,
+        planDigest: "sha256:document",
+        conversationKey: 704,
+        conversationGeneration: 1,
+        approvedAt: 1,
+      },
+      status: "running",
+      tasks: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const request = resolvedAgentRequest({
+      conversationKey: 704,
+      mode: "agent",
+      userText: "Execute the approved plan",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: ledger.planId,
+        revision: ledger.revision,
+        executionId: ledger.executionId,
+        approvedDigest: ledger.planDigest,
+        provider: "original",
+      },
+      metadata: {
+        planExecutionLedger: ledger,
+        approvedPlanContract: {
+          deliverable: {
+            kind: "document",
+            spec: {
+              kind: "literature_review",
+              title: "Exact approved review title",
+              requiredSections: ["Findings", "Scope and limitations"],
+              requiresReferences: true,
+              requiresCoverageSection: true,
+              allowFigures: false,
+              citationStyle: {
+                styleId: "apa",
+                styleTitle: "APA",
+                locale: "en-US",
+              },
+            },
+          },
+        },
+      },
+    });
+    const messages = await buildAgentInitialMessages(request, [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, "Exact title: Exact approved review title");
+    assert.include(prompt, "Required sections: Findings; Scope and limitations");
+    assert.include(prompt, "submit_plan_document.title must match");
+  });
+
   it("distinguishes omitted transcript history from an explicit empty override", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 701,

@@ -98,12 +98,11 @@ export class ActionContractRunSession {
     checkpoint: ActionContractCheckpoint | null;
   }): Promise<ActionContractInitialization> {
     try {
-      if (
-        this.request.planContext?.phase === "executing" &&
-        this.request.actionContract
-      ) {
-        // Approval authorizes the frozen planning contract. Never replace it
-        // with a contract inferred from the synthetic execution turn.
+      if (this.request.planContext?.phase === "executing") {
+        // PlanExecutionRunSession has restored either the initial frozen
+        // contract or a separately approved research-derived contract. An
+        // absent contract is intentional and must not be inferred from the
+        // synthetic execution prompt.
       } else if (
         params.checkpoint &&
         isExplicitResumeRequest(this.request.userText)

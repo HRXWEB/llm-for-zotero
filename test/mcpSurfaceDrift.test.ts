@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+  ZOTERO_MCP_PLAN_TOOL_NAMES,
   ZOTERO_MCP_WRITE_TOOL_NAMES,
   ZOTERO_MCP_EXCLUDED_TOOL_NAMES,
 } from "../src/agent/mcp/server";
@@ -20,6 +21,8 @@ describe("MCP tool surface has not drifted from the registry", function () {
     // quietly satisfying itself.
     const modelVisible = [
       "annotate_pdf",
+      "approve_research_expansion",
+      "approve_research_mutation",
       "attachment_update",
       "collection_update",
       "file_io",
@@ -33,15 +36,20 @@ describe("MCP tool surface has not drifted from the registry", function () {
       "literature_search",
       "note_write",
       "paper_read",
+      "research_update",
       "revert_changes",
       "run_command",
       "tool_result_read",
+      "task_update",
       "undo_last_action",
+      "update_plan",
+      "submit_plan_document",
       "zotero_script",
     ];
 
     const exposed = new Set<string>([
       ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+      ...ZOTERO_MCP_PLAN_TOOL_NAMES,
       ...ZOTERO_MCP_WRITE_TOOL_NAMES,
     ]);
 
@@ -70,6 +78,7 @@ describe("MCP tool surface has not drifted from the registry", function () {
   it("does not both expose and exclude the same tool", function () {
     const exposed = new Set<string>([
       ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+      ...ZOTERO_MCP_PLAN_TOOL_NAMES,
       ...ZOTERO_MCP_WRITE_TOOL_NAMES,
     ]);
     const contradictory = Object.keys(ZOTERO_MCP_EXCLUDED_TOOL_NAMES).filter(

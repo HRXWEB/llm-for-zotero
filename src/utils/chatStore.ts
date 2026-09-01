@@ -134,6 +134,8 @@ export type StoredChatMessage = {
   timestamp: number;
   runMode?: "chat" | "agent";
   agentRunId?: string;
+  /** Session-only outbox binding; durable recovery also verifies exact text. */
+  planDocumentId?: string;
   selectedText?: string;
   selectedTextContexts?: SelectedTextContext[];
   selectedTexts?: string[];

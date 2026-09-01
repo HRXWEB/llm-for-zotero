@@ -1,8 +1,12 @@
 import type {
   AgentActionContract,
+  AgentActionIntent,
   AgentActionReceipt,
 } from "../contracts/types";
 import type { PlanSkillRoutingReceipt } from "../skills/routingTypes";
+import type { DocumentSpec, PlanDocument } from "../documents/types";
+import type { ResearchContract, ResearchProgress } from "../research/types";
+import type { ResearchPolicySnapshot } from "../research/policy";
 
 export type PlanProvider = "original" | "codex" | "claude";
 
@@ -15,6 +19,20 @@ export type PlanArtifactStatus =
 
 export type PlanStepEffect = "read" | "artifact" | "mutation" | "reasoning";
 
+export type PlanCompletionRequirementKind =
+  | "verified_read"
+  | "bounded_reasoning"
+  | "research_coverage"
+  | "document_integrity"
+  | "document_published"
+  | "mutation_receipts";
+
+export type PlanCompletionRequirement = Readonly<{
+  requirementId: string;
+  kind: PlanCompletionRequirementKind;
+  contractDigest: string;
+}>;
+
 export type PlanStep = Readonly<{
   planStepId: string;
   content: string;
@@ -22,6 +40,8 @@ export type PlanStep = Readonly<{
   acceptanceCriteria: readonly string[];
   expectedCapability?: string;
   expectedEffect: PlanStepEffect;
+  /** Authoritative for v3 plans. Legacy plans derive one requirement by effect. */
+  completionRequirements?: readonly PlanCompletionRequirement[];
   targetBoundary?: Readonly<{
     kind: "collection" | "library" | "selection" | "conversation";
     targetIds?: readonly string[];
@@ -29,9 +49,35 @@ export type PlanStep = Readonly<{
   }>;
 }>;
 
+export type ResearchDerivedMutationIntent = Readonly<{
+  summary: string;
+  intents: readonly AgentActionIntent[];
+  targetSelectionDescription: string;
+}>;
+
+export type PlanContract = Readonly<{
+  investigation?: ResearchContract;
+  deliverable:
+    | Readonly<{ kind: "answer" }>
+    | Readonly<{ kind: "document"; spec: DocumentSpec }>
+    | Readonly<{ kind: "completion_report" }>;
+  effects?: Readonly<{
+    libraryMutation:
+      | Readonly<{
+          approval: "initial";
+          contract: AgentActionContract;
+        }>
+      | Readonly<{
+          approval: "after_research";
+          intent: ResearchDerivedMutationIntent;
+        }>;
+  }>;
+  researchPolicy?: ResearchPolicySnapshot;
+}>;
+
 /** A revision is editable only while drafting and is frozen by approval. */
 export type PlanArtifact = Readonly<{
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   planId: string;
   conversationKey: number;
   provider: PlanProvider;
@@ -45,6 +91,10 @@ export type PlanArtifact = Readonly<{
   sourceRunId?: string;
   /** Present on v2 artifacts; binds planning-time skill instructions. */
   skillRoutingReceipt?: PlanSkillRoutingReceipt;
+  /** Required and centrally validated on v3 artifacts. */
+  contract?: PlanContract;
+  /** Digest of the approved composable contract, excluding plan presentation. */
+  contractDigest?: string;
   steps: readonly PlanStep[];
   createdAt: number;
   updatedAt: number;
@@ -69,16 +119,79 @@ export type TaskEvidenceKind =
   | "verified_read"
   | "artifact"
   | "validation"
-  | "reasoning_assertion";
+  | "reasoning_assertion"
+  | "research_coverage"
+  | "document_integrity"
+  | "document_published";
+
+export type TaskEvidencePayload =
+  | Readonly<{
+      type: "verified_read";
+      reference: string;
+      sources?: readonly VerifiedReadSource[];
+    }>
+  | Readonly<{
+      type: "bounded_reasoning";
+      assertion: string;
+    }>
+  | Readonly<{
+      type: "tool_artifacts";
+      artifacts: readonly Readonly<{
+        kind: "image" | "file_ref";
+        mimeType: string;
+        storedPath: string;
+        contentHash?: string;
+      }>[];
+    }>
+  | Readonly<{
+      type: "research_coverage";
+      researchJobId: string;
+      coverageStatus:
+        | "complete"
+        | "complete_with_limitations"
+        | "partial"
+        | "failed";
+      totalItems: number;
+      screenedItems: number;
+      candidateItems: number;
+      deepReadCompleted: number;
+    }>
+  | Readonly<{
+      type: "document_integrity";
+      documentId: string;
+      contentHash: string;
+      integrityValidated: true;
+    }>
+  | Readonly<{
+      type: "document_published";
+      documentId: string;
+      contentHash: string;
+      messageTimestamp: number;
+    }>
+  | Readonly<{
+      type: "mutation_receipts";
+      receiptIds: readonly string[];
+    }>;
+
+export type VerifiedReadSource = Readonly<{
+  libraryID: number;
+  itemKey: string;
+  attachmentItemKey?: string;
+  pageIndex?: number;
+  sourceFingerprint?: string;
+}>;
 
 export type TaskEvidence = Readonly<{
-  version: 1;
+  version: 1 | 2;
   evidenceId: string;
   executionId: string;
   taskId: string;
   kind: TaskEvidenceKind;
   verified: boolean;
+  requirementId?: string;
+  contractDigest?: string;
   receipt?: AgentActionReceipt;
+  payload?: TaskEvidencePayload;
   reference?: string;
   summary?: string;
   createdAt: number;
@@ -95,6 +208,7 @@ export type ExecutionTask = Readonly<{
   activeForm: string;
   acceptanceCriteria: readonly string[];
   expectedEffect: PlanStepEffect;
+  completionRequirements?: readonly PlanCompletionRequirement[];
   expectedCapability?: string;
   obligationIds: readonly string[];
   status: ExecutionTaskStatus;
@@ -193,4 +307,15 @@ export type PlanEvent =
         toStatus: ExecutionTaskStatus;
         text: string;
       }>;
+    }
+  | {
+      type: "plan_research_progress";
+      progress: ResearchProgress;
+    }
+  | {
+      type: "plan_document_ready";
+      documentId: string;
+      executionId: string;
+      title: string;
+      contentHash: string;
     };
