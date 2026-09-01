@@ -12,6 +12,7 @@ import {
   assessWebAttribution,
   type WebAttributionAssessment,
 } from "../../webAccess/attribution";
+import type { PlanExecutionRunSession } from "../plans/runSession";
 
 export type AgentFinalAnswerToolRecord = {
   name: string;
@@ -64,6 +65,10 @@ export class AgentFinalAnswerController {
     private readonly request: AgentRuntimeRequest,
     private readonly actionContractSession: AgentFinalActionSession,
     private readonly transcriptMessages: readonly AgentModelMessage[],
+    private readonly planSession?: Pick<
+      PlanExecutionRunSession,
+      "evaluateFinal"
+    >,
   ) {}
 
   async evaluate(params: {
@@ -71,22 +76,33 @@ export class AgentFinalAnswerController {
     canCorrect: boolean;
     toolExecutionRecords: readonly AgentFinalAnswerToolRecord[];
   }): Promise<AgentFinalAnswerDecision> {
-    const actionDecision = await this.actionContractSession.evaluateFinal({
-      canCorrect: params.canCorrect,
-    });
-    if (actionDecision.kind !== "accept") {
-      if (actionDecision.kind === "correct") {
+    if (this.request.planContext?.phase !== "planning") {
+      const actionDecision = await this.actionContractSession.evaluateFinal({
+        canCorrect: params.canCorrect,
+      });
+      if (actionDecision.kind !== "accept") {
+        if (actionDecision.kind === "correct") {
+          return {
+            kind: "correct",
+            correction: actionDecision.correction,
+            actionContractRejection: actionDecision,
+          };
+        }
         return {
-          kind: "correct",
-          correction: actionDecision.correction,
+          kind: "fail",
+          userMessage: actionDecision.failure,
           actionContractRejection: actionDecision,
         };
       }
-      return {
-        kind: "fail",
-        userMessage: actionDecision.failure,
-        actionContractRejection: actionDecision,
-      };
+    }
+
+    const planDecision = await this.planSession?.evaluateFinal({
+      canCorrect: params.canCorrect,
+    });
+    if (planDecision && planDecision.kind !== "accept") {
+      return planDecision.kind === "correct"
+        ? { kind: "correct", correction: planDecision.correction }
+        : { kind: "fail", userMessage: planDecision.failure };
     }
 
     if (this.shouldCorrectShallowLibraryAnswer(params)) {

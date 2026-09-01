@@ -3033,6 +3033,7 @@ describe("semantic tool surface", function () {
             { itemId: 1, contextItemId: 2, title: "Paper" },
           ],
         }),
+        ["simple-paper-qa"],
       ),
       "simple-paper-qa",
     );
@@ -3066,6 +3067,7 @@ describe("semantic tool surface", function () {
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
           ],
         }),
+        ["compare-papers"],
       ),
       "compare-papers",
     );
@@ -3075,12 +3077,15 @@ describe("semantic tool surface", function () {
     const skill = parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]);
 
     assert.deepEqual(
-      getSkillContextEligibility(skill, {
-        userText: "",
-        selectedCollectionContexts: [
-          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
-        ],
-      }),
+      getSkillContextEligibility(
+        skill,
+        resolvedSkillRequest({
+          userText: "",
+          selectedCollectionContexts: [
+            { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+          ],
+        }),
+      ),
       { eligible: true },
     );
   });
@@ -3096,6 +3101,7 @@ describe("semantic tool surface", function () {
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
           ],
         }),
+        ["evidence-based-qa"],
       ),
       "evidence-based-qa",
     );
@@ -3105,29 +3111,38 @@ describe("semantic tool surface", function () {
     const skill = parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]);
 
     assert.deepEqual(
-      getSkillContextEligibility(skill, {
-        userText: "",
-        selectedCollectionContexts: [
-          { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
-        ],
-      }),
+      getSkillContextEligibility(
+        skill,
+        resolvedSkillRequest({
+          userText: "",
+          selectedCollectionContexts: [
+            { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
+          ],
+        }),
+      ),
       { eligible: true },
     );
   });
 
-  it("keeps multi-context skills selectable without attached context", function () {
+  it("keeps missing-context skills available only through explicit selection", function () {
     const evidenceSkill = parseSkill(
       BUILTIN_SKILL_FILES["evidence-based-qa.md"],
     );
     const compareSkill = parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]);
 
     assert.deepEqual(
-      getSkillContextEligibility(evidenceSkill, { userText: "" }),
-      { eligible: true },
+      getSkillContextEligibility(
+        evidenceSkill,
+        resolvedSkillRequest({ userText: "" }),
+      ).eligible,
+      false,
     );
     assert.deepEqual(
-      getSkillContextEligibility(compareSkill, { userText: "" }),
-      { eligible: true },
+      getSkillContextEligibility(
+        compareSkill,
+        resolvedSkillRequest({ userText: "" }),
+      ).eligible,
+      false,
     );
   });
 });

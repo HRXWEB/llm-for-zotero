@@ -37,6 +37,27 @@ import type {
   AgentActionReceipt,
   AgentToolActionDescriptor,
 } from "./contracts/types";
+import type { PlanEvent, PlanRuntimeContext } from "./plans/types";
+import type { SkillRoutingReceipt } from "./skills/routingTypes";
+
+export type {
+  ApprovedPlanGrant,
+  ExecutionTask,
+  ExecutionTaskKind,
+  ExecutionTaskStatus,
+  PlanArtifact,
+  PlanArtifactStatus,
+  PlanEvent,
+  PlanExecutionLedger,
+  PlanExecutionStatus,
+  PlanProvider,
+  PlanRuntimeContext,
+  PlanStep,
+  PlanStepEffect,
+  TaskEvidence,
+  TaskEvidenceKind,
+  TaskTransitionRequest,
+} from "./plans/types";
 
 export type {
   AgentActionCapability,
@@ -82,7 +103,7 @@ export type AgentRequest = {
   attachmentResourceSummaries?: AgentAttachmentResourceSummary[];
   attachments?: ChatAttachment[];
   screenshots?: string[];
-  /** Skill IDs to force-activate regardless of regex matching (from slash menu selection). */
+  /** Skill IDs explicitly selected by the user, independent of automatic routing. */
   forcedSkillIds?: string[];
   model?: string;
   apiBase?: string;
@@ -309,9 +330,12 @@ export type ToolSpec = {
    * MCP, and public tool catalogs must not expose it.
    */
   localAgentOnly?: boolean;
+  /** Host-owned interaction tools pause for input even though they are reads. */
+  interaction?: "user_input";
 };
 
 export type AgentEvent =
+  | PlanEvent
   | {
       type: "provider_event";
       providerType?: string;
@@ -329,7 +353,14 @@ export type AgentEvent =
       details?: string;
     }
   | ({ type: "usage"; round: number } & UsageStats)
-  | { type: "tool_call"; callId: string; name: string; args: unknown }
+  | {
+      type: "tool_call";
+      callId: string;
+      name: string;
+      args: unknown;
+      executionId?: string;
+      taskId?: string;
+    }
   | {
       type: "tool_result";
       callId: string;
@@ -339,6 +370,8 @@ export type AgentEvent =
       actionReceipts: AgentActionReceipt[];
       content: unknown;
       artifacts?: AgentToolArtifact[];
+      executionId?: string;
+      taskId?: string;
     }
   | {
       type: "tool_error";
@@ -575,6 +608,10 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   actionContract?: AgentActionContract;
   /** Mutable completion state kept separate from the immutable contract. */
   actionProgress?: AgentActionProgressLedger;
+  /** One-shot Plan collaboration state owned by the durable plan store. */
+  planContext?: PlanRuntimeContext;
+  /** Validated per-turn skill routing identity; never provider-authored authority. */
+  skillRoutingReceipt?: SkillRoutingReceipt;
   item?: Zotero.Item | null;
   history?: ChatMessage[];
   authMode?: ModelProviderAuthMode;
@@ -811,6 +848,8 @@ export type AgentToolContext = {
   journalActionScope?: AgentJournalActionScope;
   /** Persist the current contract ledger at a durable composite checkpoint. */
   checkpointActionProgress?: () => Promise<void>;
+  /** Publish a normalized, durable plan/task projection event. */
+  publishPlanEvent?: (event: PlanEvent) => Promise<void>;
 };
 
 export type AgentToolInputValidation<T> =

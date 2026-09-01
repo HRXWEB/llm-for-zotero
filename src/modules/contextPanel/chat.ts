@@ -328,6 +328,11 @@ import { getWorkflowTestFinalRequestInterceptor } from "./workflowTestHooks";
 import { resolveSelectedTextAnchors } from "./selectedTextAnchors";
 import { canEditUserPromptTurn } from "./editability";
 import { renderAgentTrace, renderPendingActionCard } from "./agentTrace/render";
+import type { AgentActionContract } from "../../agent/contracts/types";
+import {
+  inferPlanStepEffect,
+  planExecutionCoordinator,
+} from "../../agent/plans/coordinator";
 import {
   TOOL_ACTIVITY_VISIBLE_DEDUPE_WINDOW_MS,
   hasSameToolActivityVisibleIdentity,
@@ -3404,6 +3409,8 @@ type CodexNativeTurnCallbacks = Pick<
   | "onUsage"
   | "onItemStarted"
   | "onItemCompleted"
+  | "onPlanUpdated"
+  | "onPlanExecutionUpdated"
   | "onMcpToolActivity"
   | "onMcpSetupWarning"
   | "onDiagnostics"
@@ -3430,6 +3437,8 @@ function buildCodexNativeTurnCallbacks(ctx: {
   handleUsage: (usage: UsageStats) => void;
   conversationKey: number;
   conversationGeneration: number;
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
+  actionContract?: AgentActionContract;
 }): CodexNativeTurnCallbacks {
   const {
     body,
@@ -3488,6 +3497,43 @@ function buildCodexNativeTurnCallbacks(ctx: {
         setStatusSafely(`Codex: ${itemType} completed`, "sending");
       }
     },
+    onPlanUpdated: async (event) => {
+      const planning = ctx.planContext;
+      if (!isLive() || planning?.phase !== "planning") return;
+      flushResponseStream("event");
+      const artifact = await planExecutionCoordinator.updateDraft({
+        planId: planning.planId,
+        conversationKey: ctx.conversationKey,
+        provider: "codex",
+        revision: planning.revision,
+        explanation: event.explanation,
+        steps: event.steps.map((step, index) => ({
+          planStepId: `${planning.planId}:r${planning.revision}:s${index + 1}`,
+          content: step.content,
+          activeForm: step.content,
+          acceptanceCriteria: [`Verify: ${step.content}`],
+          expectedEffect: inferPlanStepEffect(step.content),
+        })),
+        actionContractId: ctx.actionContract?.id,
+        actionContract: ctx.actionContract,
+        ready: event.steps.every((step) => step.status === "completed"),
+      });
+      codexActivityTrace?.appendPlanEvent({
+        type:
+          artifact.status === "awaiting_approval"
+            ? "plan_ready"
+            : "plan_updated",
+        artifact,
+      });
+    },
+    onPlanExecutionUpdated: (ledger) => {
+      if (!isLive()) return;
+      flushResponseStream("event");
+      codexActivityTrace?.appendPlanEvent({
+        type: "plan_execution_updated",
+        ledger,
+      });
+    },
     onMcpToolActivity: (event) => {
       if (!isLive()) return;
       flushResponseStream("event");
@@ -3541,6 +3587,52 @@ function buildCodexNativeTurnCallbacks(ctx: {
       });
     },
   };
+}
+
+async function finalizeCodexPlanExecution(params: {
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
+  answer: string;
+  assistantMessage: Message;
+  trace: ReturnType<typeof createCodexNativeActivityTraceController> | null;
+}): Promise<void> {
+  if (params.planContext?.phase !== "executing") return;
+  const { loadPlanExecutionLedger } = await import("../../agent/plans/store");
+  let ledger = await loadPlanExecutionLedger(params.planContext.executionId);
+  const active = ledger?.tasks.find(
+    (task) => task.taskId === ledger?.activeTaskId,
+  );
+  const otherRequiredComplete = ledger?.tasks
+    .filter(
+      (task) => task.kind === "required_step" && task.taskId !== active?.taskId,
+    )
+    .every((task) => task.status === "completed" || task.status === "skipped");
+  if (active?.expectedEffect === "reasoning" && otherRequiredComplete) {
+    ledger = await planExecutionCoordinator.attachEvidence({
+      version: 1,
+      evidenceId: `${ledger!.executionId}:${active.taskId}:reasoning:codex-final`,
+      executionId: ledger!.executionId,
+      taskId: active.taskId,
+      kind: "reasoning_assertion",
+      verified: true,
+      summary: sanitizeText(params.answer).slice(0, 2000),
+      reference: `codex:${params.assistantMessage.agentRunId || params.assistantMessage.timestamp}:final`,
+      createdAt: Date.now(),
+    });
+    ledger = await planExecutionCoordinator.requestTransition({
+      executionId: ledger.executionId,
+      taskId: active.taskId,
+      toStatus: "completed",
+      requestedBy: "codex",
+      reason: "Bounded final reasoning assertion",
+    });
+    params.trace?.appendPlanEvent({
+      type: "plan_execution_updated",
+      ledger,
+    });
+  }
+  await planExecutionCoordinator.assertCanFinalize(
+    params.planContext.executionId,
+  );
 }
 
 function createPanelUpdateHelpers(
@@ -6664,8 +6756,35 @@ function createCodexNativeActivityTraceController(
     }
   };
 
+  const appendPlanEvent = (event: AgentEvent): void => {
+    if (
+      event.type !== "plan_updated" &&
+      event.type !== "plan_ready" &&
+      event.type !== "plan_execution_updated"
+    ) {
+      return;
+    }
+    const eventPlanId =
+      event.type === "plan_execution_updated"
+        ? event.ledger.planId
+        : event.artifact.planId;
+    const priorIndex = events.findIndex(
+      (entry) =>
+        ((entry.payload.type === "plan_updated" ||
+          entry.payload.type === "plan_ready") &&
+          entry.payload.artifact.planId === eventPlanId) ||
+        (entry.payload.type === "plan_execution_updated" &&
+          entry.payload.ledger.planId === eventPlanId),
+    );
+    const record = createEvent(event);
+    if (priorIndex >= 0) events[priorIndex] = record;
+    else events.push(record);
+    sync();
+  };
+
   return {
     appendAgentMessageDelta,
+    appendPlanEvent,
     appendItemStatus,
     finish,
     noteSkillActivated,
@@ -9311,6 +9430,7 @@ export type BuildAgentRuntimeRequestParams = {
   forcedSkillIds?: string[];
   effectiveRequestConfig: EffectiveRequestConfig;
   history: ChatMessage[];
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 function buildActiveNoteRuntimeContext(
@@ -9661,11 +9781,30 @@ async function buildAgentRuntimeRequest(
     // is temporarily unavailable.
   }
   const conversationInstanceID = registeredConversation?.instanceID;
+  const executingPlan =
+    params.planContext?.phase === "executing"
+      ? await import("../../agent/plans/store").then(async (store) => {
+          const ledger = await store.loadPlanExecutionLedger(
+            params.planContext?.phase === "executing"
+              ? params.planContext.executionId
+              : "",
+          );
+          const artifact = ledger
+            ? await store.loadPlanArtifact(ledger.planId, ledger.revision)
+            : null;
+          if (!ledger || !artifact || artifact.digest !== ledger.planDigest) {
+            throw new Error("The approved plan grant could not be verified");
+          }
+          return { ledger, artifact };
+        })
+      : null;
   return {
     conversationKey: params.conversationKey,
     conversationGeneration: params.conversationGeneration,
     mode: "agent",
     userText: params.userText,
+    planContext: params.planContext,
+    actionContract: executingPlan?.artifact.actionContract,
     conversationKind,
     activeItemId: activeNoteSession?.noteId || params.item.id,
     activePaperContext: activePaperContext
@@ -9740,6 +9879,7 @@ async function buildAgentRuntimeRequest(
       claudeHistoryLength: params.history.length,
       notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
       conversationInstanceID,
+      planExecutionLedger: executingPlan?.ledger,
     },
   };
 }
@@ -10056,6 +10196,7 @@ async function sendAgentQuestion(opts: {
   forcedSkillIds?: string[];
   pdfUploadSystemMessages?: string[];
   conversationSystem?: ConversationSystem;
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 }): Promise<void> {
   const conversationKey = getConversationKey(opts.item);
   if (
@@ -10266,6 +10407,7 @@ export async function sendQuestion(
         forcedSkillIds: opts.forcedSkillIds,
         pdfUploadSystemMessages: opts.pdfUploadSystemMessages,
         conversationSystem: effectiveConversationSystem,
+        planContext: opts.planContext,
         requestId: thisRequestId,
         onProviderDispatch: opts.onProviderDispatch,
       });
@@ -11168,6 +11310,37 @@ export async function sendQuestion(
           }),
         )
       : null;
+    const codexPlanActionContract =
+      isCodexNativeTurn && opts.planContext
+        ? await initAgentSubsystem().then(async (runtime) => {
+            const planRequest = await buildAgentRuntimeRequest({
+              conversationKey,
+              conversationGeneration,
+              item,
+              userText: shownQuestion,
+              selectedTextContexts: selectedTextContextsForMessage,
+              resolvedSelectedTextAnchors,
+              selectedTexts: selectedTextsForMessage,
+              selectedTextSources: selectedTextSourcesForMessage,
+              selectedTextPaperContexts: selectedTextPaperContextsForMessage,
+              selectedTextNoteContexts: selectedTextNoteContextsForMessage,
+              paperContexts: contextPlan.paperContexts,
+              pdfPaperContexts: normalizedPdfPaperContexts,
+              fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              citationPaperContexts: userMessage.citationPaperContexts,
+              selectedCollectionContexts: selectedCollectionContextsForMessage,
+              selectedTagContexts: selectedTagContextsForMessage,
+              attachments: modelAttachments || attachments,
+              localDocuments,
+              screenshots: allSendImages,
+              forcedSkillIds: opts.forcedSkillIds,
+              planContext: opts.planContext,
+              effectiveRequestConfig,
+              history: llmHistory,
+            });
+            return runtime.createActionContractForRequest(planRequest);
+          })
+        : undefined;
     if (await stopInactiveRequest()) return;
     notifyProviderDispatch(body, ui, opts.onProviderDispatch);
     const answer = isCodexNativeTurn
@@ -11178,6 +11351,10 @@ export async function sendQuestion(
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
+            collaborationMode:
+              opts.planContext?.phase === "planning" ? "plan" : "default",
+            planContext: opts.planContext,
+            actionContract: codexPlanActionContract,
             signal: getAbortController(conversationKey)?.signal,
             codexPath: getEffectiveCodexAppServerBinaryPath(
               effectiveRequestConfig.apiBase,
@@ -11211,6 +11388,8 @@ export async function sendQuestion(
               handleUsage,
               conversationKey,
               conversationGeneration,
+              planContext: opts.planContext,
+              actionContract: codexPlanActionContract,
             }),
           })
         ).text
@@ -11223,6 +11402,14 @@ export async function sendQuestion(
           handleReasoning,
           handleUsage,
         );
+    if (isCodexNativeTurn) {
+      await finalizeCodexPlanExecution({
+        planContext: opts.planContext,
+        answer,
+        assistantMessage,
+        trace: codexActivityTrace,
+      });
+    }
 
     if (
       getCancelledRequestId(conversationKey) >= thisRequestId ||

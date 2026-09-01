@@ -969,6 +969,7 @@ type BuildAgentRuntimeRequestParamsShape = {
   localDocuments?: readonly LocalDocumentResource[];
   screenshots: string[] | undefined;
   forcedSkillIds?: string[];
+  planContext?: import("../../../agent/plans/types").PlanRuntimeContext;
   effectiveRequestConfig: EffectiveRequestConfigShape;
   history: ChatMessage[];
 };
@@ -1299,6 +1300,7 @@ export async function sendAgentTurn(
     modelAttachments?: ChatAttachment[];
     localDocuments?: readonly LocalDocumentResource[];
     forcedSkillIds?: string[];
+    planContext?: import("../../../agent/plans/types").PlanRuntimeContext;
   },
   deps: AgentEngineDeps,
 ): Promise<void> {
@@ -1333,6 +1335,7 @@ export async function sendAgentTurn(
     modelAttachments,
     localDocuments,
     forcedSkillIds,
+    planContext,
   } = opts;
   const conversationKey = deps.getConversationKey(item);
   const ui = deps.getPanelRequestUI(body);
@@ -1641,6 +1644,7 @@ export async function sendAgentTurn(
     localDocuments,
     screenshots: images,
     forcedSkillIds,
+    planContext,
     effectiveRequestConfig,
     history: llmHistory,
   });

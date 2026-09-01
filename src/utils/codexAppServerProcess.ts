@@ -1095,6 +1095,10 @@ export function waitForCodexAppServerTurnCompletion(params: {
   ) => void | Promise<void>;
   onItemStarted?: (event: CodexAppServerItemEvent) => void | Promise<void>;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void | Promise<void>;
+  onPlanUpdated?: (event: {
+    explanation?: string;
+    steps: Array<{ content: string; status?: string }>;
+  }) => void | Promise<void>;
   onTurnCompleted?: (event: {
     turnId: string;
     status?: string;
@@ -1114,6 +1118,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
     onAgentMessageDelta,
     onItemStarted,
     onItemCompleted,
+    onPlanUpdated,
     onTurnCompleted,
     signal,
     cacheKey,
@@ -1318,6 +1323,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
       unsubUsage();
       unsubItemStarted();
       unsubItemCompleted();
+      unsubPlanUpdated();
       unsubCompleted();
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
@@ -1365,6 +1371,52 @@ export function waitForCodexAppServerTurnCompletion(params: {
         } catch {
           // Ignore downstream consumer errors so the transport can finish cleanly.
         }
+      },
+    );
+
+    const unsubPlanUpdated = proc.onNotification(
+      "turn/plan/updated",
+      (rawParams: unknown) => {
+        const eventTurnId = extractCodexAppServerNotificationTurnId(rawParams);
+        if (eventTurnId && eventTurnId !== turnId) return;
+        if (!rawParams || typeof rawParams !== "object") return;
+        const record = rawParams as Record<string, unknown>;
+        const rawSteps = Array.isArray(record.plan)
+          ? record.plan
+          : Array.isArray(record.steps)
+            ? record.steps
+            : [];
+        const steps = rawSteps
+          .map((value) => {
+            if (!value || typeof value !== "object") return null;
+            const step = value as Record<string, unknown>;
+            const content = normalizeCodexAppServerFieldText(
+              step.step ?? step.content ?? step.text,
+              4000,
+            );
+            if (!content) return null;
+            return {
+              content,
+              ...(normalizeCodexAppServerFieldText(step.status, 80)
+                ? {
+                    status: normalizeCodexAppServerFieldText(step.status, 80),
+                  }
+                : {}),
+            };
+          })
+          .filter((value): value is { content: string; status?: string } =>
+            Boolean(value),
+          );
+        if (!steps.length) return;
+        Promise.resolve(
+          onPlanUpdated?.({
+            explanation: normalizeCodexAppServerFieldText(
+              record.explanation,
+              8000,
+            ),
+            steps,
+          }),
+        ).catch(() => {});
       },
     );
 

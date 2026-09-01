@@ -149,6 +149,7 @@ type ActionCommandControllerDeps = {
   closeExportMenu: () => void;
   setStatusMessage?: (message: string, level: StatusLevel) => void;
   logError: (message: string, error?: unknown) => void;
+  activatePlanMode: () => void;
 };
 
 export function createActionCommandController(
@@ -1566,6 +1567,8 @@ export function createActionCommandController(
     insertCommandToken,
     executeAgentAction,
     buildActionRequestContext,
+    activatePlanMode: deps.activatePlanMode,
+    isPlanAvailable: () => deps.getCurrentRuntimeMode() === "agent",
   };
 
   const renderSkillsInSlashMenu = (query = ""): void =>

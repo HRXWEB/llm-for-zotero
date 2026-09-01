@@ -160,7 +160,7 @@ export type AgentActionProgressLedger = {
   authorizationGrants?: Array<{
     proposalDigest: string;
     toolName: string;
-    authority: "safe_confirmation" | "auto_policy" | "yolo";
+    authority: "safe_confirmation" | "auto_policy" | "yolo" | "plan_approval";
     status: "staged" | "executed" | "failed" | "uncertain";
     createdAt: number;
   }>;

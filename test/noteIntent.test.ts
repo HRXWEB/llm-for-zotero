@@ -126,11 +126,8 @@ describe("inferExplicitNoteIntent (strong text-only signal)", function () {
   });
 });
 
-describe("note-intent skill routing force", function () {
-  it("forces write-note for non-English note requests even without pattern matches", function () {
-    // English-only patterns simulate the pre-v8 shipped regexes (and any
-    // user-customized pattern set): the deterministic force must still
-    // activate the skill.
+describe("note-intent and skill routing separation", function () {
+  it("does not turn mutation-safety note detection into skill authority", function () {
     const writeNote = makeSkill("write-note", /\bnote\b.*\bpaper\b/i);
     const other = makeSkill("simple-paper-qa", /\bsummarize\b/i);
 
@@ -139,8 +136,8 @@ describe("note-intent skill routing force", function () {
       [writeNote, other],
     );
 
-    assert.include(resolution.matchedSkillIds, "write-note");
-    assert.include(resolution.contextForcedSkillIds, "write-note");
+    assert.notInclude(resolution.matchedSkillIds, "write-note");
+    assert.deepEqual(resolution.contextForcedSkillIds, []);
     assert.notInclude(resolution.matchedSkillIds, "simple-paper-qa");
   });
 

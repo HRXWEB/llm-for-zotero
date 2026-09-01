@@ -36,6 +36,11 @@ import {
   resolveNoteEditingScope,
 } from "../../noteEditing";
 import { readNoteSnapshot } from "../../noteSnapshot";
+import {
+  getPlanningRuntimeContext,
+  restorePendingPlanExecution,
+  takePendingPlanExecution,
+} from "../../planModeState";
 
 type StatusLevel = "ready" | "warning" | "error";
 
@@ -288,6 +293,12 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const requestIsActive = () =>
       deps.isRequestOwner(request.conversationKey, request.requestId) &&
       !request.signal.aborted;
+    const pendingPlanExecution = takePendingPlanExecution(
+      request.conversationKey,
+    );
+    const planContext =
+      pendingPlanExecution ||
+      getPlanningRuntimeContext(request.conversationKey);
     const shouldClearDraft = !options?.preserveInputDraft;
     let submittedInputRestored = false;
     let providerDispatchStarted = false;
@@ -589,13 +600,16 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         delete dataset.commandAction;
         delete dataset.commandParams;
       }
-      const displayQuestion = commandAction
-        ? commandParams
-          ? `/${commandAction} ${commandParams}`
-          : `/${commandAction}`
-        : primarySelectedText
-          ? resolvedPromptText
-          : rawSubmittedText || resolvedPromptText;
+      const displayQuestion =
+        planContext?.phase === "executing"
+          ? "Approved plan"
+          : commandAction
+            ? commandParams
+              ? `/${commandAction} ${commandParams}`
+              : `/${commandAction}`
+            : primarySelectedText
+              ? resolvedPromptText
+              : rawSubmittedText || resolvedPromptText;
 
       const titleSeed =
         deps.normalizeConversationTitleSeed(rawSubmittedText) ||
@@ -866,6 +880,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         onWebChatSendOutcome: (outcome) => {
           webchatSendOutcome = outcome;
         },
+        planContext,
       });
       if (hasPaperComposeState && !isWebChat) {
         deps.consumePaperModeState(item.id);
@@ -927,6 +942,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }
       if (finished && !providerDispatchStarted) {
         restoreSubmittedInput();
+        restorePendingPlanExecution(
+          request.conversationKey,
+          pendingPlanExecution,
+        );
       }
       deps.autoUnlockGlobalChat();
       deps.onSendSettled?.();

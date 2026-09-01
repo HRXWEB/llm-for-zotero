@@ -116,6 +116,8 @@ import {
   withConversationWriteLock,
 } from "../shared/conversationWriteFence";
 import { enqueueConversationCleanupJob } from "../core/conversations/conversationCleanupJobs";
+import { recordMcpPlanEvidence } from "../agent/plans/runSession";
+import type { PlanExecutionLedger } from "../agent/plans/types";
 
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
 export const NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE =
@@ -1314,6 +1316,8 @@ function buildCodexNativeScopedMcpScope(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
+  planContext?: import("../agent/plans/types").PlanRuntimeContext;
+  actionContract?: import("../agent/contracts/types").AgentActionContract;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
   const resolvedRequest = buildCodexNativeSkillRequest({
@@ -1344,6 +1348,8 @@ function buildCodexNativeScopedMcpScope(params: {
     model: params.model,
     codexPath: params.codexPath,
     reasoning: params.reasoning,
+    planContext: params.planContext,
+    actionContract: params.actionContract,
     exhaustiveReadBackend: "codex_responses",
     turnPaperScope: resolvedRequest.turnPaperScope,
     turnPaperScopeWarnings: resolvedRequest.turnPaperScopeWarnings,
@@ -1357,6 +1363,8 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
+  planContext?: import("../agent/plans/types").PlanRuntimeContext;
+  actionContract?: import("../agent/contracts/types").AgentActionContract;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
   return buildCodexNativeScopedMcpScope(params);
@@ -2531,6 +2539,16 @@ export async function runCodexAppServerNativeTurn(params: {
   onUsage?: (usage: UsageStats) => void;
   onItemStarted?: (event: CodexAppServerItemEvent) => void;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void;
+  collaborationMode?: "default" | "plan";
+  planContext?: import("../agent/plans/types").PlanRuntimeContext;
+  actionContract?: import("../agent/contracts/types").AgentActionContract;
+  onPlanUpdated?: (event: {
+    explanation?: string;
+    steps: Array<{ content: string; status?: string }>;
+  }) => void | Promise<void>;
+  onPlanExecutionUpdated?: (
+    ledger: PlanExecutionLedger,
+  ) => void | Promise<void>;
   onMcpToolActivity?: (event: ZoteroMcpToolActivityEvent) => void;
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
   onMcpSetupWarning?: (message: string) => void;
@@ -2639,6 +2657,8 @@ export async function runCodexAppServerNativeTurn(params: {
         model: params.model,
         codexPath,
         reasoning: params.reasoning,
+        planContext: params.planContext,
+        actionContract: params.actionContract,
         skillContext,
       });
       // Raw-PDF turns always run on a fresh ephemeral thread, so they keep a
@@ -2755,6 +2775,7 @@ export async function runCodexAppServerNativeTurn(params: {
               }),
             ),
           );
+          const pendingPlanEvidence = new Set<Promise<void>>();
           const unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
             (event) => {
               const sameConversation =
@@ -2773,6 +2794,15 @@ export async function runCodexAppServerNativeTurn(params: {
                 event: redactedEvent,
               });
               params.onMcpToolActivity?.(redactedEvent);
+              const pending = recordMcpPlanEvidence(
+                params.planContext,
+                redactedEvent,
+                { autoAdvance: true },
+              ).then(async (ledger) => {
+                if (ledger) await params.onPlanExecutionUpdated?.(ledger);
+              });
+              pendingPlanEvidence.add(pending);
+              void pending.finally(() => pendingPlanEvidence.delete(pending));
             },
           );
           let text = "";
@@ -2803,6 +2833,14 @@ export async function runCodexAppServerNativeTurn(params: {
               ...(codexNativeRuntimeCwd ? { cwd: codexNativeRuntimeCwd } : {}),
               ...permissionExecution.turn,
               ...reasoningParams,
+              ...(params.collaborationMode === "plan"
+                ? {
+                    collaborationMode: {
+                      mode: "plan",
+                      settings: { model: params.model },
+                    },
+                  }
+                : {}),
             });
             const turnId = extractCodexAppServerTurnId(turnResult);
             if (!turnId) {
@@ -2865,6 +2903,7 @@ export async function runCodexAppServerNativeTurn(params: {
                 ? (event) =>
                     params.onItemCompleted?.(redactTerminalValue(event))
                 : undefined,
+              onPlanUpdated: params.onPlanUpdated,
               onTurnCompleted: params.onTurnCompleted
                 ? (event) =>
                     params.onTurnCompleted?.(redactTerminalValue(event))
@@ -2878,6 +2917,7 @@ export async function runCodexAppServerNativeTurn(params: {
           } finally {
             unregisterMcpToolActivity();
           }
+          await Promise.all(Array.from(pendingPlanEvidence));
           const historyVerified = currentTurnHasLocalPdfs
             ? undefined
             : await verifyCodexAppServerThreadHistoryIfDue({

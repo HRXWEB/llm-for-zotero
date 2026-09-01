@@ -40,16 +40,6 @@ import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog
 
 export const FOOTER_PERMISSION_MENU_OPEN_CLASS = "llm-permission-menu-open";
 
-const ORIGINAL_PLAN_PLACEHOLDER: PermissionOption = {
-  provider: "original",
-  selectionKey: "original:plan",
-  fullLabel: "Plan",
-  compactLabel: "plan",
-  description: "Plan mode is not available for the Original Agent yet.",
-  available: false,
-  disabledReason: "Plan mode is not available for the Original Agent yet.",
-};
-
 type VisiblePermissionSurface = {
   kind: "original" | "claude" | "codex";
   selectedKey: string;
@@ -119,7 +109,7 @@ export function resolvePermissionSurface(params: {
   return {
     kind: "original",
     selectedKey: `original:${params.originalSelectedId}`,
-    options: [...getOriginalPermissionOptions(), ORIGINAL_PLAN_PLACEHOLDER],
+    options: getOriginalPermissionOptions(),
   };
 }
 

@@ -1177,6 +1177,115 @@ describe("agentTrace render", function () {
     );
   });
 
+  it("labels planning and approved execution in the activity disclosure", function () {
+    const baseMessage = {
+      role: "assistant" as const,
+      text: "",
+      timestamp: 2_000,
+      runMode: "agent" as const,
+      streaming: true,
+    };
+    const planning = renderAgentTrace({
+      doc: fakeDocument,
+      message: { ...baseMessage },
+      events: [
+        {
+          runId: "run-planning-label",
+          seq: 1,
+          eventType: "status",
+          payload: {
+            type: "status",
+            text: "Planning the request and reviewing context",
+          },
+          createdAt: 1_000,
+        },
+      ],
+    }) as unknown as FakeElement;
+    assert.equal(
+      planning.findByClass("llm-agent-activity-summary")?.textContent,
+      "Planning…",
+    );
+    const planningRow = planning.findByClass("llm-at-row-planning-active");
+    assert.isNotNull(planningRow);
+    assert.isTrue(
+      planningRow?.children[0]?.classList.contains("llm-at-planning-drive"),
+    );
+    assert.lengthOf(planning.findAllByClass("llm-at-planning-drive-pixel"), 9);
+
+    const executing = renderAgentTrace({
+      doc: fakeDocument,
+      message: { ...baseMessage },
+      events: [
+        {
+          runId: "run-execution-label",
+          seq: 1,
+          eventType: "status",
+          payload: { type: "status", text: "Executing the approved plan" },
+          createdAt: 1_000,
+        },
+      ],
+    }) as unknown as FakeElement;
+    assert.equal(
+      executing.findByClass("llm-agent-activity-summary")?.textContent,
+      "Executing plan…",
+    );
+    assert.isNull(executing.findByClass("llm-at-planning-drive"));
+  });
+
+  it("keeps host-owned plan bookkeeping out of the visible tool trace", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-plan-tools",
+        seq: 1,
+        eventType: "status",
+        payload: {
+          type: "status",
+          text: "Planning the request and reviewing context",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-plan-tools",
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-plan",
+          name: "update_plan",
+          args: { ready: true, steps: [] },
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-plan-tools",
+        seq: 3,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-plan",
+          name: "update_plan",
+          ok: true,
+          content: { artifact: {} },
+        },
+        createdAt: 3,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    const visible = items.map((item) =>
+      item.type === "action"
+        ? item.row.text
+        : item.type === "message"
+          ? item.text
+          : "",
+    );
+    assert.include(
+      visible,
+      "Planning the request against the available context.",
+    );
+    assert.notMatch(visible.join("\n"), /update plan|using update/i);
+  });
+
   it("rules off the activity trace once an answer follows it", function () {
     const baseEvents: AgentRunEventRecord[] = [
       {

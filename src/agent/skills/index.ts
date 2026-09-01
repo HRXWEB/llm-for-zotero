@@ -1,10 +1,8 @@
 /**
  * Agent Skills — file-driven guidance instructions.
  *
- * Each skill is a native Agent Skill `SKILL.md` file with frontmatter match
- * patterns and a body instruction. When a user's message matches a skill's patterns, the
- * instruction is injected into the agent's current-turn guidance alongside
- * tool context.
+ * Each skill is a native Agent Skill `SKILL.md` file with a semantic
+ * description, deterministic context requirements, and a body instruction.
  *
  * Built-in skills are bundled at compile time and copied to the user's
  * data directory on first run. The user folder is the sole source of
@@ -26,7 +24,7 @@ import literatureReviewRaw from "./literature-review.md";
 import importCitedReferenceRaw from "./import-cited-reference.md";
 import { resolveSkillRouting } from "./routing";
 
-export { matchesSkill, parseSkill } from "./skillLoader";
+export { getSkillRoutingDiagnostics, matchesSkill, parseSkill } from "./skillLoader";
 export {
   getSkillContextEligibility,
   isSkillContextEligible,
@@ -47,6 +45,13 @@ export {
   resolveSkillDirectiveText,
   prependNativeSkillMention,
 } from "./routing";
+export type {
+  PlanSkillRoutingReceipt,
+  SkillRequestedScope,
+  SkillRouterResponseV1,
+  SkillRoutingReceipt,
+  ValidatedSkillActivation,
+} from "./routingTypes";
 export type {
   SkillRoutingResolution,
   SkillDirectiveTextResolution,
@@ -115,10 +120,8 @@ export function getAllSkills(): AgentSkill[] {
  *
  * Sources of activation, unioned:
  *   1. `forcedSkillIds` — explicit user selection from the slash menu.
- *   2. Runtime-context rules — e.g. notes-directory nickname mentioned.
- *   3. Either (a) the LLM classifier output passed in via `classifiedIds`,
- *      or (b) regex `match:` patterns as the fallback when no classifier
- *      result is available.
+ *   2. Validated semantic router output passed in via `classifiedIds`.
+ * Missing router output intentionally activates no automatic skills.
  */
 export function getMatchedSkillIds(
   request: SkillRoutingRequest &

@@ -107,18 +107,17 @@ describe("workflow: provider-aware permission modes", function () {
           "original:safe",
           "original:auto",
           "original:yolo",
-          "original:plan",
         ]);
         const originalPanel = api.getPanelPermissionSurface(panel.panelId);
         assert.deepEqual(
           originalPanel.rows.map((row) => row.label),
-          ["Safe", "Auto", "Yolo", "Plan"],
+          ["Safe", "Auto", "Yolo"],
         );
         assert.deepEqual(
           originalPanel.rows.map((row) => row.level),
-          ["", "", "", ""],
+          ["", "", ""],
         );
-        assert.isTrue(originalPanel.rows.at(-1)?.disabled);
+        assert.isFalse(originalPanel.rows.at(-1)?.disabled);
         const openPanelMenu = await api.clickPanelPermissionToggle(
           panel.panelId,
         );
@@ -134,6 +133,15 @@ describe("workflow: provider-aware permission modes", function () {
           "claude:auto",
           "claude:bypassPermissions",
         ]);
+        const afterClaudePlan = await api.clickPanelPermissionOption(
+          panel.panelId,
+          "claude:plan",
+        );
+        assert.equal(afterClaudePlan.compactLabel, "plan");
+        assert.equal(
+          Zotero.Prefs.get(`${PREF_PREFIX}.claudeCodePermissionMode`, true),
+          "plan",
+        );
         const afterClaude = await api.clickPanelPermissionOption(
           panel.panelId,
           "claude:bypassPermissions",
@@ -228,9 +236,8 @@ describe("workflow: provider-aware permission modes", function () {
           "original:safe",
           "original:auto",
           "original:yolo",
-          "original:plan",
         ]);
-        assert.isTrue(
+        assert.isFalse(
           api.getStandalonePermissionSurface().rows.at(-1)?.disabled,
         );
         const openStandaloneMenu = await api.clickStandalonePermissionToggle();

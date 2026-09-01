@@ -16,24 +16,13 @@ import { resolveAgentRuntimeRequest } from "../agent/context/resolvedAgentReques
 import type { AgentSkill } from "../agent/skills";
 import { getAllSkills, getMatchedSkillIds } from "../agent/skills";
 import { getSkillCustomizationNotice } from "../agent/skills/managedBlock";
-import {
-  inferNoteIntent,
-  normalizeIntentText,
-  WRITE_NOTE_SKILL_ID,
-} from "../agent/skills/noteIntent";
 import { detectSkillIntent } from "../agent/model/skillClassifier";
 import { RAW_PDF_TRANSPORT_POLICY_BLOCK } from "../agent/context/rawPdfTransportPolicy";
-import {
-  getCodexNativeSkillRoutingModePref,
-  type CodexNativeSkillRoutingMode,
-} from "./prefs";
+import type { CodexNativeSkillRoutingMode } from "./prefs";
 
 const CLASSIFIER_CACHE_MAX_ENTRIES = 200;
 
 const classifierCache = new Map<string, string[]>();
-
-const SKILL_CANDIDATE_PATTERN =
-  /\bnote\b|\bnotes\b|\bcompare\b|\banaly[sz]e\b|\bfigure\b|\bliterature\b|\breview\b|\bcitation\b|\breference\b|\bimport\b|\bdraft\b|\bsummarize\b|\bsynthesi[sz]e\b|笔记|比较|分析|图|综述|文献|引用|参考|导入|总结|要約|比較|分析|図|レビュー|文献|引用|요약|비교|분석|그림|문헌|인용|nota|comparar|analizar|figura|revisión|literatura|cita|note|comparer|analyser|figure|revue|littérature|citation|notiz|vergleichen|analysieren|abbildung|literatur|zitat/iu;
 
 export type CodexNativeSkillScope = {
   profileSignature?: string;
@@ -100,14 +89,6 @@ export function resolveExplicitCodexNativeSkillIds(
   );
 }
 
-// One normalizer serves intent matching and the classifier cache signature —
-// the two must never diverge, so nativeSkills reuses the noteIntent helper.
-const normalizeTextForSignature = normalizeIntentText;
-
-function hasNonAsciiText(value: string): boolean {
-  return Array.from(value).some((char) => char.charCodeAt(0) > 0x7f);
-}
-
 function uniqueInSkillOrder(
   ids: ReadonlySet<string>,
   allSkills: ReadonlyArray<AgentSkill>,
@@ -117,51 +98,16 @@ function uniqueInSkillOrder(
     .map((skill) => skill.id);
 }
 
-function requestHasNoteSelection(request: AgentRuntimeRequest): boolean {
-  return Boolean(
-    request.selectedTextSources?.some(
-      (source) => source === "note" || source === "note-edit",
-    ),
-  );
-}
-
 export function resolveDeterministicCodexNativeSkillIds(params: {
   request: AgentRuntimeRequest;
   allSkills?: ReadonlyArray<AgentSkill>;
 }): string[] {
   const allSkills = params.allSkills || getAllSkills();
   if (!allSkills.length) return [];
-  const matched = new Set(getMatchedSkillIds(params.request));
-  // getMatchedSkillIds already forces write-note on the strong text-only
-  // signal (inferExplicitNoteIntent). This deliberately broader check adds
-  // inferNoteIntent's weak open-note branches for the codex deterministic
-  // route only: no classifier runs here, and with a note open a bare action
-  // verb usually is note intent.
-  if (
-    inferNoteIntent(params.request) &&
-    allSkills.some((skill) => skill.id === WRITE_NOTE_SKILL_ID)
-  ) {
-    matched.add(WRITE_NOTE_SKILL_ID);
-  }
-  return uniqueInSkillOrder(matched, allSkills);
-}
-
-function isAmbiguousSkillCandidate(request: AgentRuntimeRequest): boolean {
-  const text = normalizeTextForSignature(request.userText || "");
-  if (!text || text.length > 1200) return false;
-  const hasWorkflowContext = Boolean(
-    request.activeNoteContext ||
-    request.selectedTexts?.length ||
-    request.turnPaperScope.papers.length ||
-    request.turnPaperScope.collections.length ||
-    request.turnPaperScope.tags.length ||
-    request.screenshots?.length ||
-    request.attachments?.length,
+  const matched = new Set(
+    resolveExplicitCodexNativeSkillIds(params.request.forcedSkillIds || []),
   );
-  if (!hasWorkflowContext) return false;
-  if (SKILL_CANDIDATE_PATTERN.test(text)) return true;
-  if (hasNonAsciiText(text)) return true;
-  return requestHasNoteSelection(request);
+  return uniqueInSkillOrder(matched, allSkills);
 }
 
 export function shouldUseCodexNativeSkillClassifierFallback(params: {
@@ -173,11 +119,10 @@ export function shouldUseCodexNativeSkillClassifierFallback(params: {
   const allSkills = params.allSkills || getAllSkills();
   if (!allSkills.length) return false;
   if (params.deterministicSkillIds?.length) return false;
-  const mode = params.mode || getCodexNativeSkillRoutingModePref();
-  if (mode === "deterministic") return false;
-  if (mode === "classifier")
-    return Boolean((params.request.userText || "").trim());
-  return isAmbiguousSkillCandidate(params.request);
+  return (
+    params.mode === "classifier" &&
+    Boolean((params.request.userText || "").trim())
+  );
 }
 
 function buildSkillVersionSignature(
@@ -189,10 +134,10 @@ function buildSkillVersionSignature(
         skill.id,
         skill.version,
         skill.source,
-        normalizeTextForSignature(skill.description || ""),
-        skill.patterns
-          .map((pattern) => `${pattern.source}/${pattern.flags}`)
-          .join("|"),
+        skill.description,
+        [...skill.contexts].sort().join("|"),
+        [...(skill.supersedes || [])].sort().join("|"),
+        skill.instruction,
       ].join(":"),
     )
     .sort()
@@ -206,7 +151,7 @@ export function buildCodexNativeSkillClassifierCacheKey(params: {
   const request = params.request;
   const allSkills = params.allSkills || getAllSkills();
   return JSON.stringify({
-    prompt: normalizeTextForSignature(request.userText || ""),
+    prompt: request.userText || "",
     context: {
       activeNote: Boolean(request.activeNoteContext),
       selectedTextSources: Array.from(
@@ -386,7 +331,10 @@ export async function resolveCodexNativeSkills(
 
   if (
     !shouldUseCodexNativeSkillClassifierFallback({
-      mode: getCodexNativeSkillRoutingModePref(),
+      // Codex currently cannot prove a truly no-tools classifier thread.
+      // Automatic routing therefore remains unavailable unless a caller
+      // supplies an isolated classifier adapter explicitly.
+      mode: params.detectSkillIntentImpl ? "classifier" : "deterministic",
       request,
       allSkills,
       deterministicSkillIds,

@@ -4,6 +4,8 @@ import {
   detectTurnIntent as detectTurnIntentResolved,
   parseClassifiedTurnIntent,
   parseClassifierResponse,
+  parseSkillRouterResponse,
+  resolvePlanSkillRoutingReceipt,
 } from "../src/agent/model/skillClassifier";
 import { resolveSkillRouting as resolveSkillRoutingResolved } from "../src/agent/skills/routing";
 import type { AgentSkill } from "../src/agent/skills/skillLoader";
@@ -270,7 +272,7 @@ describe("parseClassifiedTurnIntent", function () {
 });
 
 describe("detectTurnIntent", function () {
-  it("falls back to regex skills with a null intent when no model config is available", async function () {
+  it("activates no automatic skills when no model config is available", async function () {
     const result = await detectTurnIntent(
       {
         userText: "compare these papers",
@@ -286,6 +288,20 @@ describe("detectTurnIntent", function () {
       degraded: false,
       failureReason: "not_configured",
     });
+  });
+
+  it("still binds explicitly selected skills into a receipt without a router model", async function () {
+    const result = await detectTurnIntent(
+      {
+        userText: "Use my selected workflow",
+        forcedSkillIds: ["write-note"],
+        model: "some-model",
+        apiBase: "",
+      } as any,
+      SKILLS,
+    );
+    assert.deepEqual(result.skillIds, ["write-note"]);
+    assert.equal(result.routingReceipt?.skills[0]?.source, "explicit");
   });
 
   it("passes the profile to a provider-safe utility classifier call", async function () {
@@ -311,7 +327,7 @@ describe("detectTurnIntent", function () {
       {
         llmCall: async (params) => {
           captured = params as unknown as Record<string, unknown>;
-          return '{"skillIds":["unmatched"],"retrievalIntent":"none","externalSearchIntent":"none","wantedSections":[],"queryLanguage":"en"}';
+          return '{"schemaVersion":1,"taskKind":"read","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","externalSearchIntent":"none","wantedSections":[],"queryLanguage":"en"}';
         },
       },
     );
@@ -324,16 +340,18 @@ describe("detectTurnIntent", function () {
     assert.deepEqual(captured.profileOverride, profileOverride);
     assert.include(
       String(captured.prompt || ""),
-      '"externalSearchIntent": "none|web|literature|both"',
+      '"externalSearchIntent":"none|web|literature|both"',
     );
     assert.include(
       String(captured.prompt || ""),
-      "The tools are complementary, not mutually exclusive",
+      "requestedScopes describe what the user asks",
     );
     assert.include(
       String(captured.prompt || ""),
-      '"use library_batch auto_tag" is apply_tags, not command_execute',
+      "copy a short exact substring",
     );
+    assert.include(String(captured.prompt || ""), "Available skills:");
+    assert.include(String(captured.prompt || ""), "Runtime context:");
   });
 
   it("records unparseable classifier output as a distinct degradation reason", async function () {
@@ -353,7 +371,8 @@ describe("detectTurnIntent", function () {
     assert.equal(result.failureReason, "unparseable");
   });
 
-  it("degrades to deterministic action parsing for required writes with no obligations", async function () {
+  it("uses deterministic action parsing when the conditional action classifier is invalid", async function () {
+    let calls = 0;
     const result = await detectTurnIntent(
       {
         userText: "create a Zotero note and export a markdown file",
@@ -364,14 +383,21 @@ describe("detectTurnIntent", function () {
       } as any,
       SKILLS,
       {
-        llmCall: async () =>
-          '{"skillIds":["unmatched"],"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[]}',
+        llmCall: async () => {
+          calls += 1;
+          return calls === 1
+            ? '{"schemaVersion":1,"taskKind":"write","requestedScopes":["note"],"selections":[],"retrievalIntent":"none","wantedSections":[]}'
+            : '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[]}';
+        },
       },
     );
 
-    assert.isTrue(result.degraded);
-    assert.equal(result.failureReason, "unparseable");
-    assert.isNull(result.classifiedIntent);
+    assert.isFalse(result.degraded);
+    assert.equal(
+      result.classifiedIntent?.actionInterpretationSource,
+      "deterministic_fallback",
+    );
+    assert.isNotEmpty(result.classifiedIntent?.actionIntents || []);
   });
 
   it("rejects a classifier verb that contradicts an explicit tag removal", async function () {
@@ -385,18 +411,113 @@ describe("detectTurnIntent", function () {
       } as any,
       SKILLS,
       {
-        llmCall: async () =>
-          '{"skillIds":["unmatched"],"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[{"operation":"set_item_tags","coverage":"one","targetKind":"papers","parameters":{"tags":["reviewed"]}}]}',
+        llmCall: async (params) =>
+          String(params.prompt).includes("Classify only the exact mutation")
+            ? '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[{"operation":"set_item_tags","coverage":"one","targetKind":"papers","parameters":{"tags":["reviewed"]}}]}'
+            : '{"schemaVersion":1,"taskKind":"write","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
       },
     );
 
-    assert.isTrue(result.degraded);
-    assert.equal(result.failureReason, "unparseable");
-    assert.isNull(result.classifiedIntent);
+    assert.isFalse(result.degraded);
+    assert.equal(
+      result.classifiedIntent?.actionInterpretationSource,
+      "deterministic_fallback",
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[0]?.operation,
+      "remove_tags",
+    );
+  });
+
+  it("rejects a contextually impossible comparison even when the model selects it", async function () {
+    const compareSkill: AgentSkill = {
+      ...SKILLS[1],
+      contexts: ["paper-set"],
+      supersedes: [],
+    };
+    const result = await detectTurnIntent(
+      {
+        userText: "compare the local and long-range mechanisms",
+        selectedPaperContexts: [{ itemId: 10, contextItemId: 100 }],
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+      } as any,
+      [compareSkill],
+      {
+        llmCall: async () =>
+          '{"schemaVersion":1,"taskKind":"read","requestedScopes":["single-paper"],"selections":[{"skillId":"compare-papers","requestedScope":"single-paper","evidenceText":"compare"}],"retrievalIntent":"none","wantedSections":[]}',
+      },
+    );
+    assert.deepEqual(result.skillIds, []);
+  });
+
+  it("resolves multilingual evidence locally and reuses unchanged plan skills", async function () {
+    const result = await detectTurnIntent(
+      {
+        userText: "请比较这两篇论文的方法",
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+      } as any,
+      SKILLS,
+      {
+        llmCall: async () =>
+          '{"schemaVersion":1,"taskKind":"read","requestedScopes":["paper-set"],"selections":[{"skillId":"compare-papers","requestedScope":"paper-set","evidenceText":"比较这两篇论文"}],"retrievalIntent":"summarize","wantedSections":[]}',
+      },
+    );
+    const activation = result.routingReceipt?.skills[0];
+    assert.deepInclude(activation?.evidence, {
+      text: "比较这两篇论文",
+      start: 1,
+      end: 8,
+    });
+    const reused = await resolvePlanSkillRoutingReceipt(
+      result.routingReceipt
+        ? {
+            routerSchemaVersion: result.routingReceipt.routerSchemaVersion,
+            skillManifestHash: result.routingReceipt.skillManifestHash,
+            skills: result.routingReceipt.skills.map(
+              ({ id, version, instructionHash, source }) => ({
+                id,
+                version,
+                instructionHash,
+                source,
+              }),
+            ),
+          }
+        : undefined,
+      SKILLS,
+    );
+    assert.deepEqual(reused.skillIds, ["compare-papers"]);
   });
 });
 
-describe("resolveSkillRouting classified summarize force", function () {
+describe("parseSkillRouterResponse", function () {
+  it("accepts exact evidence text without model-generated offsets", function () {
+    const parsed = parseSkillRouterResponse(
+      '{"schemaVersion":1,"taskKind":"read","requestedScopes":["paper-set"],"selections":[{"skillId":"compare-papers","requestedScope":"paper-set","evidenceText":"比较这两篇论文"}],"retrievalIntent":"summarize","wantedSections":[]}',
+    );
+    assert.equal(parsed?.selections[0]?.evidenceText, "比较这两篇论文");
+  });
+
+  it("rejects unknown schema versions and malformed occurrences", function () {
+    assert.isNull(
+      parseSkillRouterResponse(
+        '{"schemaVersion":2,"taskKind":"read","requestedScopes":[],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+      ),
+    );
+    assert.isNull(
+      parseSkillRouterResponse(
+        '{"schemaVersion":1,"taskKind":"read","requestedScopes":["single-paper"],"selections":[{"skillId":"x","requestedScope":"single-paper","evidenceText":"x","occurrence":-1}],"retrievalIntent":"none","wantedSections":[]}',
+      ),
+    );
+  });
+});
+
+describe("resolveSkillRouting classified context gate", function () {
   const LIBRARY_ANALYSIS_SKILL: AgentSkill = {
     id: "library-analysis",
     description: "Analyze your whole library or collection with statistics",
@@ -408,7 +529,7 @@ describe("resolveSkillRouting classified summarize force", function () {
     source: "system",
   };
 
-  it("forces library-analysis for a classified summarize over a selected collection", function () {
+  it("accepts a classified library skill over a selected collection", function () {
     const resolution = resolveSkillRouting(
       {
         userText: "总结这个文件夹的研究主题",
@@ -422,7 +543,7 @@ describe("resolveSkillRouting classified summarize force", function () {
         forcedSkillIds: [],
       } as any,
       [LIBRARY_ANALYSIS_SKILL],
-      [],
+      ["library-analysis"],
     );
 
     assert.include(resolution.matchedSkillIds, "library-analysis");

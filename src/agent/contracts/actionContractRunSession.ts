@@ -98,7 +98,16 @@ export class ActionContractRunSession {
     checkpoint: ActionContractCheckpoint | null;
   }): Promise<ActionContractInitialization> {
     try {
-      if (params.checkpoint && isExplicitResumeRequest(this.request.userText)) {
+      if (
+        this.request.planContext?.phase === "executing" &&
+        this.request.actionContract
+      ) {
+        // Approval authorizes the frozen planning contract. Never replace it
+        // with a contract inferred from the synthetic execution turn.
+      } else if (
+        params.checkpoint &&
+        isExplicitResumeRequest(this.request.userText)
+      ) {
         this.request.actionContract = params.checkpoint.contract;
         this.request.actionProgress = params.checkpoint.progress;
       } else {

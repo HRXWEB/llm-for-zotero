@@ -581,6 +581,26 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   );
   runtimeModeBtn.append(runtimeModeIndicator, runtimeModeLabel);
   contextPreviews.appendChild(runtimeModeBtn);
+  const planModeChip = createElement(
+    doc,
+    "button",
+    "llm-selected-context llm-paper-context-chip llm-plan-mode-chip",
+    {
+      id: "llm-plan-mode-chip",
+      type: "button",
+      title: t("Cancel Plan mode"),
+    },
+  );
+  planModeChip.style.display = "none";
+  planModeChip.setAttribute("aria-label", t("Cancel Plan mode"));
+  const planModeChipLabel = createElement(
+    doc,
+    "span",
+    "llm-plan-mode-chip-label",
+    { textContent: `${t("Plan")}  ×` },
+  );
+  planModeChip.appendChild(planModeChipLabel);
+  contextPreviews.appendChild(planModeChip);
   const selectedContextList = createElement(
     doc,
     "div",

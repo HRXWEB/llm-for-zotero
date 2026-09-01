@@ -445,6 +445,17 @@ import { attachComposeCaptureController } from "./setupHandlers/controllers/comp
 import { attachFloatingMenuInteractionController } from "./setupHandlers/controllers/floatingMenuInteractionController";
 import { createPaperPickerController } from "./setupHandlers/controllers/paperPickerController";
 import { createActionCommandController } from "./setupHandlers/controllers/actionCommandController";
+import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
+import {
+  PLAN_APPROVED_EVENT,
+  PLAN_CANCEL_EVENT,
+  PLAN_REVISE_EVENT,
+  beginPlanRevision,
+  disableComposePlanMode,
+  enableComposePlanMode,
+  getComposePlanState,
+  toggleComposePlanMode,
+} from "./planModeState";
 import { parseInlineActionCommand } from "./setupHandlers/controllers/actionCommandParams";
 import { addZoteroItemsAsDefaultContext } from "./contextSelectionActions";
 import { registerContextSurfaceActionTarget } from "./zoteroItemContextMenu";
@@ -664,6 +675,7 @@ export function setupHandlers(
     modelMenu,
     reasoningBtn,
     runtimeModeBtn,
+    planModeChip,
     reasoningSlot,
     reasoningMenu,
     actionsRow,
@@ -2078,6 +2090,38 @@ export function setupHandlers(
       uploadBtn.setAttribute("aria-expanded", "false");
     }
   };
+  const getCurrentPlanProvider = (): "original" | "codex" | "claude" =>
+    isClaudeConversationSystem()
+      ? "claude"
+      : isCodexConversationSystem()
+        ? "codex"
+        : "original";
+  const syncPlanModeChip = () => {
+    if (!planModeChip || !item) return;
+    const state = getComposePlanState(getConversationKey(item));
+    const eligible =
+      !isWebChatModeActive() &&
+      (isRuntimeConversationSystem() || getCurrentRuntimeMode() === "agent");
+    planModeChip.style.display =
+      eligible && state?.enabled ? "inline-flex" : "none";
+    planModeChip.dataset.planId = state?.planId || "";
+    planModeChip.dataset.planRevision = state ? `${state.revision}` : "";
+  };
+  const activatePlanMode = () => {
+    if (!item || isWebChatModeActive()) return;
+    if (getCurrentRuntimeMode() !== "agent") {
+      if (status) {
+        setStatus(status, "Plan mode is available in Agent mode", "warning");
+      }
+      return;
+    }
+    enableComposePlanMode({
+      conversationKey: getConversationKey(item),
+      provider: getCurrentPlanProvider(),
+    });
+    syncPlanModeChip();
+    if (status) setStatus(status, "Plan mode enabled", "ready");
+  };
   let openModelMenu = () => {};
   let closeModelMenu = () => {
     setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
@@ -2098,6 +2142,7 @@ export function setupHandlers(
     disposeFooterPermissionControl = controller.dispose;
     void syncFooterPermissionControl();
   }
+  syncPlanModeChip();
   let openReasoningMenu = () => {};
   let closeReasoningMenu = () => {
     setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
@@ -6655,6 +6700,7 @@ export function setupHandlers(
     logError: (message, error) => {
       ztoolkit.log(message, error);
     },
+    activatePlanMode,
   });
   const {
     isActionPickerOpen,
@@ -7060,6 +7106,39 @@ export function setupHandlers(
     consumeForcedSkillIds,
   });
   doSend = sendFlowController.doSend;
+  body.addEventListener(PLAN_APPROVED_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent<{ planId?: string }>).detail;
+    syncPlanModeChip();
+    void doSend({
+      overrideText: `Execute the approved plan${detail?.planId ? ` ${detail.planId}` : ""}. Follow the durable task ledger and verify every required step.`,
+    });
+  });
+  body.addEventListener(PLAN_REVISE_EVENT, (event: Event) => {
+    if (!item) return;
+    const detail = (
+      event as CustomEvent<{
+        planId: string;
+        revision: number;
+        provider: "original" | "codex" | "claude";
+        comment: string;
+      }>
+    ).detail;
+    if (!detail?.planId || !detail.comment?.trim()) return;
+    beginPlanRevision({
+      conversationKey: getConversationKey(item),
+      planId: detail.planId,
+      revision: detail.revision + 1,
+      provider: detail.provider,
+    });
+    syncPlanModeChip();
+    void doSend({
+      overrideText: `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
+    });
+  });
+  body.addEventListener(PLAN_CANCEL_EVENT, () => {
+    if (item) disableComposePlanMode(getConversationKey(item));
+    syncPlanModeChip();
+  });
   // The header trash action uses the same durable, undoable deletion
   // lifecycle as Delete in conversation history.
   const executeSend = async () => {
@@ -7426,6 +7505,7 @@ export function setupHandlers(
       // Only an explicit toggle updates the sticky default, so implicit
       // switches (/compact, skill selection) stay scoped to this conversation.
       setLastUsedRuntimeMode(nextMode);
+      syncPlanModeChip();
       if (status) {
         setStatus(
           status,
@@ -7435,6 +7515,51 @@ export function setupHandlers(
           "ready",
         );
       }
+    });
+  }
+
+  if (planModeChip) {
+    planModeChip.addEventListener("click", (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!item) return;
+      void (async () => {
+        const key = getConversationKey(item!);
+        const state = getComposePlanState(key);
+        if (!state) return;
+        if (state.submitted) {
+          const confirmed = await showStandaloneConfirmationDialog(
+            body.ownerDocument,
+            {
+              title: "Cancel this plan?",
+              message:
+                "Planning will stop. The cancelled plan remains visible in the conversation history.",
+              confirmLabel: "Cancel plan",
+              cancelLabel: "Keep planning",
+              destructive: true,
+            },
+          );
+          if (!confirmed) return;
+          getAbortController(key)?.abort();
+          await import("../../agent/plans/coordinator").then(
+            ({ planExecutionCoordinator }) =>
+              planExecutionCoordinator.cancelArtifact({
+                planId: state.planId,
+                revision: state.revision,
+              }),
+          );
+        }
+        disableComposePlanMode(key);
+        syncPlanModeChip();
+        const CustomEventCtor = body.ownerDocument.defaultView?.CustomEvent;
+        if (CustomEventCtor)
+          body.dispatchEvent(
+            new CustomEventCtor(PLAN_CANCEL_EVENT, {
+              bubbles: true,
+              detail: { planId: state.planId, revision: state.revision },
+            }),
+          );
+      })();
     });
   }
 
@@ -7530,6 +7655,40 @@ export function setupHandlers(
         selectActivePaperPickerRow();
         return;
       }
+    }
+    if (
+      ke.key === "Tab" &&
+      ke.shiftKey &&
+      !ke.altKey &&
+      !ke.ctrlKey &&
+      !ke.metaKey
+    ) {
+      const anotherSurfaceOwnsShortcut =
+        isFloatingMenuOpen(modelMenu) ||
+        isFloatingMenuOpen(reasoningMenu) ||
+        isFloatingMenuOpen(retryModelMenu) ||
+        isHistoryMenuOpen() ||
+        isHistoryNewMenuOpen() ||
+        Boolean(actionHitlPanel && actionHitlPanel.style.display !== "none") ||
+        Boolean(body.ownerDocument.querySelector("[role='dialog']"));
+      if (anotherSurfaceOwnsShortcut) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!item || isWebChatModeActive()) return;
+      if (getCurrentRuntimeMode() !== "agent") return;
+      const enabled = toggleComposePlanMode({
+        conversationKey: getConversationKey(item),
+        provider: getCurrentPlanProvider(),
+      });
+      syncPlanModeChip();
+      if (status) {
+        setStatus(
+          status,
+          enabled ? "Plan mode enabled" : "Plan mode disabled",
+          "ready",
+        );
+      }
+      return;
     }
     // Backspace at position 0 with active badge: remove it
     if (

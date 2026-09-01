@@ -495,6 +495,8 @@ export type SendQuestionOptions = {
   /** [webchat] When true, send the prompt into a fresh ChatGPT conversation. */
   webchatForceNewChat?: boolean;
   skipAutoCompact?: boolean;
+  /** One-shot planning or approved-plan execution context. */
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 export type EditRetryOptions = {

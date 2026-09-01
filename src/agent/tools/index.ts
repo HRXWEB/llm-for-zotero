@@ -57,6 +57,9 @@ import type { AgentToolDefinition } from "../types";
 import { inferNoteIntent, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { ActionContractService } from "../contracts/actionContract";
+import { createUpdatePlanTool } from "./plan/updatePlan";
+import { createTaskUpdateTool } from "./plan/taskUpdate";
+import { createRequestUserInputTool } from "./plan/requestUserInput";
 
 type BuiltInAgentToolDeps = {
   zoteroGateway: ZoteroGateway;
@@ -666,6 +669,9 @@ export function createBuiltInToolRegistry(
   registry.register(markToolTier(runCommand, "advanced"));
   registry.register(markToolTier(zoteroScript, "advanced"));
   registry.register(createToolResultReadTool());
+  registry.register(createUpdatePlanTool());
+  registry.register(createRequestUserInputTool());
+  registry.register(createTaskUpdateTool());
 
   const legacyTools: AgentToolDefinition<any, any>[] = [
     queryLibrary,

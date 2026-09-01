@@ -222,7 +222,7 @@ describe("provider permission modes", function () {
       original.kind === "original"
         ? original.options.map((entry) => entry.selectionKey)
         : [],
-      ["original:safe", "original:auto", "original:yolo", "original:plan"],
+      ["original:safe", "original:auto", "original:yolo"],
     );
 
     const claudeOptions = [

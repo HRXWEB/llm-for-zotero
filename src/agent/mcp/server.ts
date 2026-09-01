@@ -18,6 +18,7 @@ import type { ReasoningConfig } from "../../shared/llm";
 import { readNoteSnapshot } from "../../modules/contextPanel/noteSnapshot";
 import { extractQuoteCitationsFromToolContent } from "../../modules/contextPanel/quoteCitations";
 import type { AgentToolRegistry } from "../tools/registry";
+import type { AgentActionReceipt } from "../contracts/types";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import {
   areConversationWritesFrozen,
@@ -184,6 +185,8 @@ type ZoteroMcpScopeMetadata = {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
+  planContext?: AgentRuntimeRequest["planContext"];
+  actionContract?: AgentRuntimeRequest["actionContract"];
   exhaustiveReadBackend?: Extract<
     ExhaustiveReadBackend,
     "codex_responses" | "unavailable"
@@ -282,6 +285,8 @@ export type ZoteroMcpToolActivityEvent = {
   ok?: boolean;
   error?: string;
   artifacts?: AgentToolArtifact[];
+  actionReceipts?: AgentActionReceipt[];
+  mutability?: "read" | "write";
   profileSignature?: string;
   conversationKey?: number;
   libraryID?: number;
@@ -1458,6 +1463,8 @@ function buildMcpToolActivityEvent(params: {
   error?: string;
   quoteCitations?: QuoteCitation[];
   artifacts?: AgentToolArtifact[];
+  actionReceipts?: AgentActionReceipt[];
+  mutability?: "read" | "write";
   headers?: Record<string, string>;
 }): ZoteroMcpToolActivityEvent {
   const scope = resolveMcpToolActivityScope(params.headers);
@@ -1471,6 +1478,8 @@ function buildMcpToolActivityEvent(params: {
     ok: params.ok,
     error: params.error,
     artifacts: params.artifacts,
+    actionReceipts: params.actionReceipts,
+    mutability: params.mutability,
     quoteCitations: params.quoteCitations,
     profileSignature: scope?.profileSignature,
     conversationKey: scope?.conversationKey,
@@ -1551,6 +1560,8 @@ function createToolContext(
         ? ("codex_responses" as const)
         : undefined,
     reasoning: scope?.reasoning,
+    planContext: scope?.planContext,
+    actionContract: scope?.actionContract,
     exhaustiveReadBackend,
     activeNoteContext,
   };
@@ -1689,6 +1700,7 @@ async function handleToolsCall(
     error?: string;
     quoteCitations?: QuoteCitation[];
     artifacts?: AgentToolArtifact[];
+    actionReceipts?: AgentActionReceipt[];
   }) => {
     emitZoteroMcpToolActivity(
       buildMcpToolActivityEvent({
@@ -1700,6 +1712,8 @@ async function handleToolsCall(
         ok: result.ok,
         error: result.error,
         artifacts: result.artifacts,
+        actionReceipts: result.actionReceipts,
+        mutability: tool?.spec.mutability,
         quoteCitations: result.quoteCitations,
         headers,
       }),
@@ -1849,6 +1863,7 @@ async function handleToolsCall(
         prepared.execution.result.content,
       ),
       artifacts: prepared.execution.result.artifacts,
+      actionReceipts: prepared.execution.result.actionReceipts,
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
     rememberMcpReadResult(readDedupeKey, result);

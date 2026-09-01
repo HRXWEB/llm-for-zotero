@@ -491,7 +491,7 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("emits explicitly forced slash skills alongside auto-detected skills", async function () {
+  it("emits explicitly forced slash skills when automatic routing is unavailable", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
@@ -547,7 +547,6 @@ describe("AgentRuntime", function () {
         )
         .map((event) => event.text);
       assert.includeMembers(statusTexts, [
-        "Skill activated: simple-paper-qa",
         "Skill activated: evidence-based-qa",
       ]);
       const inventoryEvent = events.find(
@@ -558,7 +557,6 @@ describe("AgentRuntime", function () {
       assert.isDefined(inventoryEvent);
       if (inventoryEvent?.type === "provider_event") {
         assert.deepEqual(inventoryEvent.payload?.matchedSkillIds, [
-          "simple-paper-qa",
           "evidence-based-qa",
         ]);
         assert.isAbove(Number(inventoryEvent.payload?.fixedTokens || 0), 0);

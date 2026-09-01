@@ -9,9 +9,8 @@
  *
  * The classifier uses the user's configured primary model (via
  * `request.model` / `request.apiBase` / `request.apiKey`) and a small
- * structured prompt listing each skill's `id` + `description`. On any error
- * — network failure, malformed JSON, unconfigured model — it falls back to
- * the per-skill regex `match:` patterns so the agent still works.
+ * structured prompt listing only context-eligible skill manifests. On any
+ * error, automatic skill activation fails closed.
  */
 import {
   callUtilityLLM,
@@ -19,9 +18,24 @@ import {
   type UtilityLLMFailureReason,
   type UtilityLLMParams,
 } from "../../utils/utilityLLM";
-import { resolveSkillRequestContext } from "../skills/contextEligibility";
-import { matchesSkill } from "../skills/skillLoader";
+import {
+  isSkillContextEligible,
+  resolveSkillRequestContext,
+} from "../skills/contextEligibility";
 import type { AgentSkill } from "../skills/skillLoader";
+import { sha256Text } from "../store/journalRecoveryBlobStore";
+import { canonicalJson } from "../services/libraryMutation/canonicalJson";
+import {
+  SKILL_ROUTER_PROMPT_VERSION,
+  SKILL_ROUTER_ADAPTER_PROTOCOL_VERSION,
+  SKILL_ROUTER_SCHEMA_VERSION,
+  type SkillRequestedScope,
+  type SkillRouterResponseV1,
+  type SkillRouterSelection,
+  type SkillRoutingReceipt,
+  type PlanSkillRoutingReceipt,
+  type ValidatedSkillActivation,
+} from "../skills/routingTypes";
 import type { AgentRuntimeRequest, ClassifiedTurnIntent } from "../types";
 import {
   inferActionIntentsFromRequest,
@@ -37,6 +51,11 @@ export { inferActionIntentsFromRequest } from "./actionIntent";
  * Translated back to `[]` by `parseClassifierResponse`.
  */
 const UNMATCHED_ID = "unmatched";
+const ROUTER_CACHE_MAX_ENTRIES = 200;
+const routerCache = new Map<
+  string,
+  { response: SkillRouterResponseV1; activations: ValidatedSkillActivation[] }
+>();
 
 // Generous enough for reasoning providers whose hidden thinking regularly
 // exceeds 10s to completion; the runtime abort signal still cancels early.
@@ -44,7 +63,7 @@ export const TURN_INTENT_TIMEOUT_MS = 20_000;
 
 export type DetectTurnIntentResult = {
   skillIds: string[];
-  /** Null whenever classification degraded — callers keep regex behavior. */
+  /** Null whenever classification degraded; callers retain deterministic safety. */
   classifiedIntent: ClassifiedTurnIntent | null;
   /**
    * True when a usable model config was present but the LLM call failed or
@@ -53,12 +72,13 @@ export type DetectTurnIntentResult = {
   degraded: boolean;
   /** Detailed reason for a degraded or skipped classifier attempt. */
   failureReason?: UtilityLLMFailureReason | "unparseable";
+  routingReceipt?: SkillRoutingReceipt;
 };
 
 /**
- * Classify skills AND language-independent turn intent in one bounded LLM
- * call. Never throws — any failure falls back to regex skill matching with a
- * null intent, which downstream consumers treat as exactly today's behavior.
+ * Classify skills and language-independent read intent in one bounded LLM
+ * call, with a second exact action call only for possible mutations. Never
+ * throws — any router failure activates no automatic skills.
  */
 export async function detectTurnIntent(
   request: AgentRuntimeRequest,
@@ -74,115 +94,167 @@ export async function detectTurnIntent(
   }
   const userText = (request.userText || "").trim();
   if (!userText) {
+    const explicit = await buildExplicitActivations(request, skills);
     return {
-      skillIds: regexFallback(skills, request),
+      skillIds: explicit.map((activation) => activation.id),
       classifiedIntent: null,
       degraded: false,
+      ...(explicit.length
+        ? {
+            routingReceipt: {
+              routerSchemaVersion: SKILL_ROUTER_SCHEMA_VERSION,
+              routerIdentityHash: await buildRouterCacheIdentity(request, []),
+              skillManifestHash: await hashSkillManifest(skills),
+              skills: explicit,
+            },
+          }
+        : {}),
     };
   }
   if (!canUseSkillClassifierModel(request)) {
+    const explicit = await buildExplicitActivations(request, skills);
     return {
-      skillIds: regexFallback(skills, request),
+      skillIds: explicit.map((activation) => activation.id),
       classifiedIntent: null,
       degraded: false,
       failureReason: "not_configured",
+      ...(explicit.length
+        ? {
+            routingReceipt: {
+              routerSchemaVersion: SKILL_ROUTER_SCHEMA_VERSION,
+              routerIdentityHash: await buildRouterCacheIdentity(request, []),
+              skillManifestHash: await hashSkillManifest(skills),
+              skills: explicit,
+            },
+          }
+        : {}),
     };
   }
 
-  const prompt = buildClassifierPrompt(skills, request);
-
-  const result = await callUtilityLLM({
-    prompt,
-    model: request.model,
-    apiBase: request.apiBase,
-    apiKey: request.apiKey,
-    authMode: request.authMode,
-    providerProtocol: request.providerProtocol,
-    profileOverride: request.advanced?.profileOverride,
-    jsonBudget: 300,
-    temperature: 0,
-    signal: options.signal,
-    timeoutMs: options.timeoutMs || TURN_INTENT_TIMEOUT_MS,
-    llmCall: options.llmCall,
-  });
-  if (!result.ok) {
-    logUtilityLLMFailure(
-      "Skill classifier LLM call failed, falling back to regex",
-      result,
-    );
-    return {
-      skillIds: regexFallback(skills, request),
-      classifiedIntent: null,
-      degraded: true,
-      failureReason: result.reason,
-    };
-  }
-  const raw = result.text;
-
-  const parsedIntent = parseClassifiedTurnIntent(raw);
-  const deterministicActions = inferActionIntentsFromRequest(request);
-  const classifierContradictsExplicitAction = Boolean(
-    parsedIntent &&
-    deterministicActions.length &&
-    JSON.stringify(
-      deterministicActions
-        .map((intent) => intent.operation)
-        .sort((left, right) => left.localeCompare(right)),
-    ) !==
-      JSON.stringify(
-        parsedIntent.actionIntents
-          .map((intent) => intent.operation)
-          .sort((left, right) => left.localeCompare(right)),
-      ),
+  const eligibleSkills = skills.filter(
+    (skill) =>
+      skill.activation !== "manual" && isSkillContextEligible(skill, request),
   );
-  const validParsedIntent = classifierContradictsExplicitAction
-    ? null
-    : parsedIntent;
-  const classifiedIntent = validParsedIntent
-    ? {
-        ...validParsedIntent,
-        actionInterpretationSource: "classifier" as const,
+  const cacheIdentity = await buildRouterCacheIdentity(request, eligibleSkills);
+  const cached = routerCache.get(cacheIdentity);
+  let routerResponse: SkillRouterResponseV1;
+  let automaticActivations: ValidatedSkillActivation[];
+  if (cached) {
+    routerResponse = cached.response;
+    automaticActivations = cached.activations;
+  } else {
+    const prompt = buildClassifierPrompt(eligibleSkills, request);
+
+    const result = await callUtilityLLM({
+      prompt,
+      model: request.model,
+      apiBase: request.apiBase,
+      apiKey: request.apiKey,
+      authMode: request.authMode,
+      providerProtocol: request.providerProtocol,
+      profileOverride: request.advanced?.profileOverride,
+      jsonBudget: 500,
+      temperature: 0,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs || TURN_INTENT_TIMEOUT_MS,
+      llmCall: options.llmCall,
+    });
+    if (!result.ok) {
+      logUtilityLLMFailure(
+        "Skill router LLM call failed; activating no automatic skills",
+        result,
+      );
+      return {
+        skillIds: [],
+        classifiedIntent: null,
+        degraded: true,
+        failureReason: result.reason,
+      };
+    }
+    const parsedRouter = parseSkillRouterResponse(result.text);
+    if (!parsedRouter) {
+      return {
+        skillIds: [],
+        classifiedIntent: null,
+        degraded: true,
+        failureReason: "unparseable",
+      };
+    }
+    routerResponse = parsedRouter;
+    automaticActivations = await validateSkillRouterSelections({
+      response: parsedRouter,
+      request,
+      skills: eligibleSkills,
+    });
+    if (automaticActivations.length === parsedRouter.selections.length) {
+      routerCache.set(cacheIdentity, {
+        response: parsedRouter,
+        activations: automaticActivations,
+      });
+      while (routerCache.size > ROUTER_CACHE_MAX_ENTRIES) {
+        const oldest = routerCache.keys().next().value;
+        if (typeof oldest !== "string") break;
+        routerCache.delete(oldest);
       }
-    : null;
-  const parsed = parseClassifierResponse(raw, skills);
-  if (parsed === null) {
-    (
-      globalThis as typeof globalThis & {
-        Zotero?: { debug?: (message: string) => void };
-      }
-    ).Zotero?.debug?.(
-      `[llm-for-zotero] Skill classifier returned malformed JSON, falling back to regex. Raw: ${raw.slice(0, 200)}`,
-    );
-    return {
-      skillIds: regexFallback(skills, request),
-      classifiedIntent,
-      degraded: true,
-      failureReason: "unparseable",
-    };
+    }
   }
-  if (!validParsedIntent) {
-    (
-      globalThis as typeof globalThis & {
-        Zotero?: { debug?: (message: string) => void };
-      }
-    ).Zotero?.debug?.(
-      `[llm-for-zotero] Skill classifier returned an invalid or contradictory action intent, falling back to deterministic action parsing. Raw: ${raw.slice(0, 200)}`,
+
+  const deterministicActions = inferActionIntentsFromRequest(request);
+  let actionIntents = deterministicActions;
+  let actionInterpretationSource: ClassifiedTurnIntent["actionInterpretationSource"] =
+    deterministicActions.length ? "deterministic_fallback" : "classifier";
+  if (
+    routerResponse.taskKind !== "read" ||
+    deterministicActions.some((action) => action.operation !== "read_full")
+  ) {
+    const actionResult = await classifyActionIntent(
+      request,
+      routerResponse,
+      options,
     );
-    return {
-      skillIds: parsed,
-      classifiedIntent: null,
-      degraded: true,
-      failureReason: "unparseable",
-    };
+    if (actionResult) {
+      actionIntents = actionResult;
+      actionInterpretationSource = "classifier";
+    }
   }
-  return { skillIds: parsed, classifiedIntent, degraded: false };
+  const classifiedIntent: ClassifiedTurnIntent = {
+    retrievalIntent: routerResponse.retrievalIntent,
+    paperTargetIntent: routerResponse.paperTargetIntent,
+    externalSearchIntent: routerResponse.externalSearchIntent,
+    wantedSections: [...routerResponse.wantedSections],
+    queryLanguage: routerResponse.queryLanguage,
+    writeDisposition: actionIntents.some(
+      (action) => action.operation !== "read_full",
+    )
+      ? "required"
+      : "none",
+    actionInterpretationSource,
+    actionIntents,
+  };
+  const explicitActivations = await buildExplicitActivations(request, skills);
+  const activations = reduceValidatedActivations(
+    [...explicitActivations, ...automaticActivations],
+    skills,
+  );
+  const skillManifestHash = await hashSkillManifest(skills);
+  return {
+    skillIds: activations.map((activation) => activation.id),
+    classifiedIntent,
+    degraded: false,
+    routingReceipt: {
+      routerSchemaVersion: SKILL_ROUTER_SCHEMA_VERSION,
+      routerIdentityHash: cacheIdentity,
+      skillManifestHash,
+      skills: activations,
+    },
+  };
 }
 
 /**
  * Classify which skills apply to the given request.
  *
- * Returns a list of skill IDs drawn from `skills`. Never throws — any
- * failure falls back to regex matching. Thin wrapper kept for consumers that
+ * Returns a list of validated skill IDs drawn from `skills`. Never throws.
+ * Thin wrapper kept for consumers that
  * only need skill routing (e.g. the Codex native-skills path).
  */
 export async function detectSkillIntent(
@@ -202,26 +274,16 @@ export function canUseSkillClassifierModel(
   return false;
 }
 
-function regexFallback(
-  skills: AgentSkill[],
-  request: Pick<AgentRuntimeRequest, "userText">,
-): string[] {
-  return skills
-    .filter((skill) => matchesSkill(skill, request))
-    .map((skill) => skill.id);
-}
-
 function buildClassifierPrompt(
   skills: AgentSkill[],
   request: AgentRuntimeRequest,
 ): string {
-  const skillList = [
-    `- ${UNMATCHED_ID}: Select this when the user's task is a direct Zotero operation (running a script, editing metadata, tagging, moving items) or otherwise does not clearly require any skill's specific playbook. Prefer this over a speculative match.`,
-    ...skills.map(
+  const skillList = skills
+    .map(
       (skill) =>
-        `- ${skill.id}: ${skill.description || "(no description)"} [contexts: ${(skill.contexts || ["any"]).join(",")}]`,
-    ),
-  ].join("\n");
+        `- ${skill.id}: ${skill.description || "(no description)"} [contexts: ${skill.contexts.join(",")}]`,
+    )
+    .join("\n");
 
   const context: string[] = [];
   const resolvedContext = resolveSkillRequestContext(request);
@@ -252,23 +314,18 @@ function buildClassifierPrompt(
   }
 
   return [
-    "You are a skill router for a Zotero research-assistant agent. Return a JSON array of skill IDs drawn from the list below.",
+    `You are version ${SKILL_ROUTER_PROMPT_VERSION} of a multilingual skill and scope router for a Zotero research assistant.`,
     "",
-    `• Use ["${UNMATCHED_ID}"] when the user's task is a direct Zotero operation or does not clearly require any skill's playbook. This is the correct answer for most turns.`,
-    "• Only include a specific skill ID when the user's message unambiguously aligns with that skill's primary purpose. Do not include a skill just because its description shares a word with the user's message.",
-    '• When the user\'s message genuinely combines multiple distinct subtasks (e.g. "read this paper, analyze figure 1, and write a note"), return every skill ID that maps to a distinct subtask. Do NOT pad the list with tangentially related skills.',
-    '• The user\'s message may be in any language (Chinese, Japanese, Korean, Spanish, French, German, Russian, Arabic, …). Match intent language-independently: a note request like "为这篇论文写阅读笔记" maps to the note-writing skill exactly as its English equivalent would.',
+    "Classify meaning in the user's language. Most requests need no skill.",
+    "Select only skills that clearly provide a specialized playbook for a distinct requested task.",
+    "For every selection, copy a short exact substring from the user message into evidenceText. Never calculate offsets and never translate or normalize the evidence.",
+    "requestedScopes describe what the user asks to operate on, not every context that happens to be available.",
+    'taskKind is "write" only for an actual requested mutation, "mixed" for read plus mutation, otherwise "read".',
     '• retrievalIntent: how the question should read the library, in any language — "enumerate" for which/all/list/find-evidence questions, "verify" for exact presence/absence checks, "summarize" for themes/commonalities/comparisons/overviews across papers, "none" for pure operations (tagging, moving, editing) or single-paper reads.',
     '• paperTargetIntent: which visible paper set the user references, in any language — "active" for this/current paper, "added" for selected/attached/added papers other than the active paper, "all_visible" for both/these/all papers visible in the turn, and "unspecified" only when no paper-set reference was found.',
     '• externalSearchIntent: whether the answer needs live external evidence, in any language — "web" for general public web information, "literature" for scholarly discovery or external scholarly metadata, "both" when distinct parts need each source, and "none" when the available context or stable knowledge is sufficient. The tools are complementary, not mutually exclusive.',
     "• wantedSections: only the sections the user explicitly asks about (methods, results, limitations); otherwise an empty array.",
     '• queryLanguage: short language code of the user message, e.g. "en", "zh", "ja".',
-    '• writeDisposition: "required" only for a concrete requested mutation, "none" for questions, advice, negation, hypotheticals, or pure reads, and "uncertain" only when whether to write cannot be resolved.',
-    "• actionIntents: exact semantic obligations. Each entry must include operation, coverage, targetKind, optional parameters, exact collection scope, scopeRole, and constraints. Use the LibraryMutationOperationType verb whenever one exists: apply_tags and remove_tags are different; create_collection, update_collection, and delete_collection are different. External verbs are note_create, note_edit, note_append, annotation_write, settings_update, undo, revert, file_write, command_execute, zotero_script_execute, and read_full.",
-    '• Tag verbs are literal: "add/apply/assign" means apply_tags, "remove/delete the tag" means remove_tags, and only "replace/set the tags" means set_item_tags. The word "exactly" describes precision and never changes remove_tags into set_item_tags.',
-    '• Tool or workflow names never replace the requested semantic operation. For example, "use library_batch auto_tag" is apply_tags, not command_execute. Use command_execute only when the user requests an actual operating-system or shell command, and use zotero_script_execute only for an actual Zotero script invocation.',
-    "• Do not create a mutation action for questions, advice, hypothetical wording, negation, or ordinary reads. A successful command or script is execution only and never substitutes for a Zotero or file operation.",
-    "• Exact collection scope means direct members only. Set includeDescendants:true only when the user explicitly asks for subcollections or descendants.",
     "",
     "Available skills:",
     skillList,
@@ -281,8 +338,396 @@ function buildClassifierPrompt(
     request.userText,
     `"""`,
     "",
-    'Reply with ONLY a JSON object in this exact shape, no prose, no code fences: {"skillIds": ["id1", "id2"], "retrievalIntent": "enumerate|verify|summarize|none", "paperTargetIntent":"active|added|all_visible|unspecified", "externalSearchIntent": "none|web|literature|both", "wantedSections": [], "queryLanguage": "en", "writeDisposition":"none|required|uncertain", "actionIntents": [{"operation":"apply_tags","coverage":"all","targetKind":"papers","parameters":{"tags":["topic:drift"]},"scopeRole":"source","scope":{"kind":"collection","path":"Parent/Leaf","includeDescendants":false},"constraints":{"tagPrefix":"topic:"}}]}',
+    `Reply with ONLY JSON: {"schemaVersion":${SKILL_ROUTER_SCHEMA_VERSION},"taskKind":"read|write|mixed","queryLanguage":"en","requestedScopes":["none|single-paper|paper-set|library-corpus|note|visual-input"],"selections":[{"skillId":"id","requestedScope":"single-paper","evidenceText":"exact copied text","occurrence":0}],"retrievalIntent":"enumerate|verify|summarize|none","paperTargetIntent":"active|added|all_visible|unspecified","externalSearchIntent":"none|web|literature|both","wantedSections":[]}`,
   ].join("\n");
+}
+
+const VALID_REQUESTED_SCOPES = new Set<SkillRequestedScope>([
+  "none",
+  "single-paper",
+  "paper-set",
+  "library-corpus",
+  "note",
+  "visual-input",
+]);
+const VALID_TASK_KINDS = new Set(["read", "write", "mixed"]);
+
+function extractJsonObject(raw: string): Record<string, unknown> | null {
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseSkillRouterResponse(
+  raw: string,
+): SkillRouterResponseV1 | null {
+  const record = extractJsonObject(raw);
+  if (!record || record.schemaVersion !== SKILL_ROUTER_SCHEMA_VERSION)
+    return null;
+  if (
+    typeof record.taskKind !== "string" ||
+    !VALID_TASK_KINDS.has(record.taskKind)
+  )
+    return null;
+  if (
+    !Array.isArray(record.requestedScopes) ||
+    !Array.isArray(record.selections)
+  )
+    return null;
+  const requestedScopes = record.requestedScopes.filter(
+    (value): value is SkillRequestedScope =>
+      typeof value === "string" &&
+      VALID_REQUESTED_SCOPES.has(value as SkillRequestedScope),
+  );
+  if (requestedScopes.length !== record.requestedScopes.length) return null;
+  const selections: SkillRouterSelection[] = [];
+  for (const value of record.selections) {
+    if (!value || typeof value !== "object") return null;
+    const selection = value as Record<string, unknown>;
+    if (
+      typeof selection.skillId !== "string" ||
+      typeof selection.requestedScope !== "string" ||
+      !VALID_REQUESTED_SCOPES.has(
+        selection.requestedScope as SkillRequestedScope,
+      ) ||
+      typeof selection.evidenceText !== "string" ||
+      !selection.evidenceText
+    )
+      return null;
+    if (
+      selection.occurrence !== undefined &&
+      (!Number.isInteger(selection.occurrence) ||
+        Number(selection.occurrence) < 0)
+    )
+      return null;
+    selections.push({
+      skillId: selection.skillId,
+      requestedScope: selection.requestedScope as SkillRequestedScope,
+      evidenceText: selection.evidenceText,
+      ...(selection.occurrence === undefined
+        ? {}
+        : { occurrence: Number(selection.occurrence) }),
+    });
+  }
+  const retrievalIntent =
+    typeof record.retrievalIntent === "string" &&
+    VALID_RETRIEVAL_INTENTS.has(record.retrievalIntent)
+      ? (record.retrievalIntent as SkillRouterResponseV1["retrievalIntent"])
+      : null;
+  if (!retrievalIntent) return null;
+  const paperTargetIntent =
+    typeof record.paperTargetIntent === "string" &&
+    VALID_PAPER_TARGET_INTENTS.has(record.paperTargetIntent)
+      ? (record.paperTargetIntent as NonNullable<
+          SkillRouterResponseV1["paperTargetIntent"]
+        >)
+      : undefined;
+  const externalSearchIntent =
+    typeof record.externalSearchIntent === "string" &&
+    VALID_EXTERNAL_SEARCH_INTENTS.has(record.externalSearchIntent)
+      ? (record.externalSearchIntent as NonNullable<
+          SkillRouterResponseV1["externalSearchIntent"]
+        >)
+      : undefined;
+  const wantedSections = Array.isArray(record.wantedSections)
+    ? record.wantedSections.filter(
+        (value): value is "methods" | "results" | "limitations" =>
+          typeof value === "string" && VALID_WANTED_SECTIONS.has(value),
+      )
+    : [];
+  return {
+    schemaVersion: 1,
+    taskKind: record.taskKind as SkillRouterResponseV1["taskKind"],
+    queryLanguage:
+      typeof record.queryLanguage === "string"
+        ? record.queryLanguage.trim().toLowerCase().slice(0, 12) || undefined
+        : undefined,
+    requestedScopes,
+    selections,
+    retrievalIntent,
+    paperTargetIntent,
+    externalSearchIntent,
+    wantedSections,
+  };
+}
+
+function resolveEvidenceSpan(
+  message: string,
+  evidenceText: string,
+  occurrence = 0,
+): { text: string; start: number; end: number } | null {
+  let start = -1;
+  let from = 0;
+  for (let index = 0; index <= occurrence; index++) {
+    start = message.indexOf(evidenceText, from);
+    if (start < 0) return null;
+    from = start + evidenceText.length;
+  }
+  return { text: evidenceText, start, end: start + evidenceText.length };
+}
+
+function isScopeCompatible(
+  skill: AgentSkill,
+  scope: SkillRequestedScope,
+): boolean {
+  if (skill.contexts.includes("any")) return true;
+  return scope !== "none" && skill.contexts.includes(scope);
+}
+
+async function hashInstruction(skill: AgentSkill): Promise<string> {
+  return `sha256:${await sha256Text(skill.instruction)}`;
+}
+
+async function hashSkillManifest(
+  skills: ReadonlyArray<AgentSkill>,
+): Promise<string> {
+  const canonical = skills
+    .map((skill) => ({
+      id: skill.id,
+      version: skill.version,
+      description: skill.description,
+      contexts: [...skill.contexts].sort(),
+      activation: skill.activation,
+      supersedes: [...(skill.supersedes || [])].sort(),
+      instruction: skill.instruction,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return `sha256:${await sha256Text(canonicalJson(canonical))}`;
+}
+
+async function validateSkillRouterSelections(params: {
+  response: SkillRouterResponseV1;
+  request: AgentRuntimeRequest;
+  skills: ReadonlyArray<AgentSkill>;
+}): Promise<ValidatedSkillActivation[]> {
+  const byId = new Map(params.skills.map((skill) => [skill.id, skill]));
+  const available = new Set(
+    resolveSkillRequestContext(params.request).availableContexts,
+  );
+  const requested = new Set(params.response.requestedScopes);
+  const validated: ValidatedSkillActivation[] = [];
+  for (const selection of params.response.selections) {
+    const skill = byId.get(selection.skillId);
+    if (!skill || !requested.has(selection.requestedScope)) continue;
+    if (!isScopeCompatible(skill, selection.requestedScope)) continue;
+    if (
+      !skill.contexts.includes("any") &&
+      !available.has(selection.requestedScope as never)
+    )
+      continue;
+    const evidence = resolveEvidenceSpan(
+      params.request.userText || "",
+      selection.evidenceText,
+      selection.occurrence || 0,
+    );
+    if (!evidence) continue;
+    validated.push({
+      id: skill.id,
+      source: "automatic",
+      requestedScope: selection.requestedScope,
+      evidence,
+      version: skill.version,
+      instructionHash: await hashInstruction(skill),
+    });
+  }
+  return validated;
+}
+
+async function buildExplicitActivations(
+  request: AgentRuntimeRequest,
+  skills: ReadonlyArray<AgentSkill>,
+): Promise<ValidatedSkillActivation[]> {
+  const forced = new Set(request.forcedSkillIds || []);
+  const available = resolveSkillRequestContext(request).availableContexts;
+  const fallbackScope: SkillRequestedScope =
+    available.find((context) => context !== "any") || "none";
+  return Promise.all(
+    skills
+      .filter((skill) => forced.has(skill.id))
+      .map(async (skill) => ({
+        id: skill.id,
+        source: "explicit" as const,
+        requestedScope: fallbackScope,
+        version: skill.version,
+        instructionHash: await hashInstruction(skill),
+      })),
+  );
+}
+
+function reduceValidatedActivations(
+  activations: ValidatedSkillActivation[],
+  skills: ReadonlyArray<AgentSkill>,
+): ValidatedSkillActivation[] {
+  const explicit = activations.filter((entry) => entry.source === "explicit");
+  const explicitIds = new Set(explicit.map((entry) => entry.id));
+  const automatic = activations.filter((entry) => entry.source === "automatic");
+  const superseded = new Set<string>();
+  const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
+  for (const activation of automatic) {
+    for (const id of skillsById.get(activation.id)?.supersedes || []) {
+      if (!explicitIds.has(id)) superseded.add(id);
+    }
+  }
+  const seen = new Set<string>();
+  const reducedAutomatic = automatic
+    .filter((entry) => !superseded.has(entry.id))
+    .sort(
+      (left, right) =>
+        (left.evidence?.start ?? Number.MAX_SAFE_INTEGER) -
+          (right.evidence?.start ?? Number.MAX_SAFE_INTEGER) ||
+        left.id.localeCompare(right.id),
+    )
+    .filter((entry) => {
+      const key = `${entry.id}\u0000${entry.requestedScope}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 3);
+  return [...explicit, ...reducedAutomatic];
+}
+
+async function buildRouterCacheIdentity(
+  request: AgentRuntimeRequest,
+  skills: ReadonlyArray<AgentSkill>,
+): Promise<string> {
+  const context = resolveSkillRequestContext(request);
+  const identity = {
+    schemaVersion: SKILL_ROUTER_SCHEMA_VERSION,
+    promptVersion: SKILL_ROUTER_PROMPT_VERSION,
+    adapterProtocolVersion: SKILL_ROUTER_ADAPTER_PROTOCOL_VERSION,
+    providerProtocol: request.providerProtocol,
+    authMode: request.authMode,
+    model: request.model,
+    apiBase: request.apiBase || "",
+    profileOverride: request.advanced?.profileOverride || "",
+    userMessage: request.userText || "",
+    structuredContext: {
+      availableContexts: [...context.availableContexts].sort(),
+      papers: request.turnPaperScope.papers.map((entry) => ({
+        itemId: entry.paper.itemId,
+        contextItemId: entry.paper.contextItemId,
+        roles: [...entry.roles].sort(),
+      })),
+      collections: request.turnPaperScope.collections.map((entry) => ({
+        libraryID: entry.libraryID,
+        collectionId: entry.collectionId,
+      })),
+      tags: request.turnPaperScope.tags.map((entry) => ({
+        libraryID: entry.libraryID,
+        name: entry.normalizedName || entry.name,
+      })),
+      activeNoteId: request.activeNoteContext?.noteId,
+      selectedTextSources: [...(request.selectedTextSources || [])],
+      selectedTextCount: request.selectedTexts?.length || 0,
+      screenshotCount: request.screenshots?.length || 0,
+      attachments: (request.attachments || []).map((attachment) => ({
+        id: attachment.id,
+        category: attachment.category,
+      })),
+    },
+    explicitSkillIds: [...(request.forcedSkillIds || [])].sort(),
+    candidateManifestHash: await hashSkillManifest(skills),
+  };
+  return `sha256:${await sha256Text(canonicalJson(identity))}`;
+}
+
+async function classifyActionIntent(
+  request: AgentRuntimeRequest,
+  router: SkillRouterResponseV1,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    llmCall?: UtilityLLMParams["llmCall"];
+  },
+): Promise<ClassifiedTurnIntent["actionIntents"] | null> {
+  const result = await callUtilityLLM({
+    prompt: [
+      "Classify only the exact mutation obligations in this Zotero request.",
+      "Questions, advice, negation, hypotheticals, and reads have no mutation actions.",
+      "Tag verbs are literal: add is apply_tags, remove is remove_tags, replace is set_item_tags.",
+      "Available external operations include note_create, note_edit, note_append, annotation_write, settings_update, undo, revert, file_write, command_execute, zotero_script_execute, and read_full.",
+      `Router task kind: ${router.taskKind}`,
+      "User message:",
+      request.userText || "",
+      'Reply only with JSON: {"retrievalIntent":"none","wantedSections":[],"writeDisposition":"none|required|uncertain","actionIntents":[]}',
+    ].join("\n"),
+    model: request.model,
+    apiBase: request.apiBase,
+    apiKey: request.apiKey,
+    authMode: request.authMode,
+    providerProtocol: request.providerProtocol,
+    profileOverride: request.advanced?.profileOverride,
+    jsonBudget: 350,
+    temperature: 0,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs || TURN_INTENT_TIMEOUT_MS,
+    llmCall: options.llmCall,
+  });
+  if (!result.ok) return null;
+  const classified = parseClassifiedTurnIntent(result.text)?.actionIntents;
+  if (!classified) return null;
+  const deterministic = inferActionIntentsFromRequest(request);
+  if (deterministic.length) {
+    const expected = deterministic
+      .map((intent) => intent.operation)
+      .sort()
+      .join("|");
+    const actual = classified
+      .map((intent) => intent.operation)
+      .sort()
+      .join("|");
+    if (expected !== actual) return null;
+  }
+  return classified;
+}
+
+export function clearSkillRouterCache(): void {
+  routerCache.clear();
+}
+
+export async function resolvePlanSkillRoutingReceipt(
+  receipt: PlanSkillRoutingReceipt | undefined,
+  skills: ReadonlyArray<AgentSkill>,
+): Promise<{
+  skillIds: string[];
+  changedAutomaticSkillIds: string[];
+  changedExplicitSkillIds: string[];
+}> {
+  if (!receipt) {
+    return {
+      skillIds: [],
+      changedAutomaticSkillIds: [],
+      changedExplicitSkillIds: [],
+    };
+  }
+  const byId = new Map(skills.map((skill) => [skill.id, skill]));
+  const skillIds: string[] = [];
+  const changedAutomaticSkillIds: string[] = [];
+  const changedExplicitSkillIds: string[] = [];
+  for (const routed of receipt.skills) {
+    const current = byId.get(routed.id);
+    const unchanged = Boolean(
+      current &&
+      current.version === routed.version &&
+      (await hashInstruction(current)) === routed.instructionHash,
+    );
+    if (unchanged) {
+      skillIds.push(routed.id);
+    } else if (routed.source === "explicit") {
+      changedExplicitSkillIds.push(routed.id);
+    } else {
+      changedAutomaticSkillIds.push(routed.id);
+    }
+  }
+  return { skillIds, changedAutomaticSkillIds, changedExplicitSkillIds };
 }
 
 const VALID_RETRIEVAL_INTENTS = new Set([
@@ -387,9 +832,8 @@ export function parseClassifiedTurnIntent(
 
 /**
  * Parse the classifier's response into a list of valid skill IDs.
- * Returns null if the response cannot be interpreted (caller falls back to
- * regex). An empty array return is a positive "no skill applies" answer —
- * the caller should NOT fall back in that case.
+ * Legacy response parser retained for compatibility tests and old persisted
+ * diagnostics. It is not used by automatic routing.
  */
 export function parseClassifierResponse(
   raw: string,

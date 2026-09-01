@@ -1,24 +1,9 @@
-import {
-  isNotesDirectoryConfigured,
-  getNotesDirectoryNickname,
-} from "../../utils/notesDirectoryConfig";
 import type { AgentRuntimeRequest } from "../types";
 import {
-  resolveSkillRequestContext,
+  isSkillContextEligible,
   type SkillRoutingRequest,
 } from "./contextEligibility";
-import { inferExplicitNoteIntent, WRITE_NOTE_SKILL_ID } from "./noteIntent";
-import { matchesSkill, type AgentSkill } from "./skillLoader";
-
-const SIMPLE_PAPER_QA_SKILL_ID = "simple-paper-qa";
-const EVIDENCE_BASED_QA_SKILL_ID = "evidence-based-qa";
-const LIBRARY_ANALYSIS_SKILL_ID = "library-analysis";
-const SIMPLE_PAPER_QA_INTENT_PATTERN =
-  /\b(understand|explain|walk me through|help me understand)\b.*\b(paper|ppaer|article|study)\b/i;
-const COLLECTION_ANALYSIS_INTENT_PATTERN =
-  /\b(summarize|summarise|summary|overview|statistics|stats|analy[sz]e|breakdown|survey|audit)\b/i;
-const LIBRARY_SCOPE_TARGET_PATTERN =
-  /\b(?:my|the|whole|entire|current|selected)\s+(?:library|collection|tag)\b|\b(?:this|the|current|selected)\s+(?:collection|tag)\b|\ball\s+(?:papers?|items?)\b|\b(?:library|collection|tag)\s+(?:summary|overview|statistics|stats|analysis|breakdown)\b/i;
+import type { AgentSkill } from "./skillLoader";
 
 export type SkillRoutingResolution = {
   matchedSkillIds: string[];
@@ -249,127 +234,40 @@ function hasSkill(skills: ReadonlyArray<AgentSkill>, skillId: string): boolean {
   return skills.some((skill) => skill.id === skillId);
 }
 
-function hasPaperTarget(request: SkillRoutingRequest): boolean {
-  const context = resolveSkillRequestContext(request);
-  return Boolean(
-    context.hasSinglePaper ||
-    context.hasPaperSet ||
-    context.singlePaperTargetedByText,
-  );
-}
-
-function hasLibraryScopeTarget(request: SkillRoutingRequest): boolean {
-  return Boolean(
-    request.turnPaperScope.collections.length ||
-    request.turnPaperScope.tags.length ||
-    LIBRARY_SCOPE_TARGET_PATTERN.test(request.userText || ""),
-  );
-}
-
-function computeContextForcedSkillIds(
-  request: SkillRoutingRequest,
-): Set<string> {
-  const forced = new Set<string>();
-  const nickname = getNotesDirectoryNickname().trim();
-  if (nickname && isNotesDirectoryConfigured() && request.userText) {
-    const escaped = nickname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const isAscii = /^[\x20-\x7E]+$/.test(nickname);
-    const pattern = isAscii
-      ? new RegExp(`\\b${escaped}\\b`, "i")
-      : new RegExp(escaped, "i");
-    if (pattern.test(request.userText)) {
-      forced.add(WRITE_NOTE_SKILL_ID);
-    }
-  }
-  // Deterministic multilingual note-intent force: note-taking requests must
-  // activate write-note (where user customizations live) in every language,
-  // even when the LLM intent classifier errors or misses. Only the strong
-  // text-only signal forces here — this path also runs on turns where the
-  // classifier said "no skill", so inferNoteIntent's weak open-note branches
-  // (a bare "add"/"update" with a note open) would over-trigger.
-  if (inferExplicitNoteIntent(request.userText)) {
-    forced.add(WRITE_NOTE_SKILL_ID);
-  }
-  if (
-    SIMPLE_PAPER_QA_INTENT_PATTERN.test(request.userText || "") &&
-    hasPaperTarget(request) &&
-    !hasLibraryScopeTarget(request)
-  ) {
-    forced.add(SIMPLE_PAPER_QA_SKILL_ID);
-  }
-  if (
-    (request.turnPaperScope.collections.length ||
-      request.turnPaperScope.tags.length) &&
-    (COLLECTION_ANALYSIS_INTENT_PATTERN.test(request.userText || "") ||
-      request.classifiedIntent?.retrievalIntent === "summarize")
-  ) {
-    forced.add(LIBRARY_ANALYSIS_SKILL_ID);
-  }
-  return forced;
-}
-
-function shouldSuppressAutomaticSkill(params: {
-  skillId: string;
-  request: SkillRoutingRequest;
-  forcedIds: ReadonlySet<string>;
-}): boolean {
-  const { skillId, request, forcedIds } = params;
-  if (forcedIds.has(skillId)) return false;
-  if (skillId !== SIMPLE_PAPER_QA_SKILL_ID) return false;
-  if (!hasPaperTarget(request)) return true;
-  return (
-    hasLibraryScopeTarget(request) &&
-    !resolveSkillRequestContext(request).singlePaperTargetedByText
-  );
-}
-
 export function resolveSkillRouting(
   request: SkillRoutingRequest & Pick<AgentRuntimeRequest, "forcedSkillIds">,
   skills: ReadonlyArray<AgentSkill>,
   classifiedIds?: ReadonlyArray<string>,
 ): SkillRoutingResolution {
   const forcedIds = new Set(request.forcedSkillIds || []);
-  const contextForced = computeContextForcedSkillIds(request);
-  const baseMatched =
-    classifiedIds !== undefined
-      ? new Set(classifiedIds)
-      : new Set(
-          skills
-            .filter((skill) => matchesSkill(skill, request))
-            .map((skill) => skill.id),
-        );
-  const matchedSkillIds = skills
-    .filter((skill) => {
-      if (forcedIds.has(skill.id)) {
-        return true;
-      }
-      const isAutoMatched =
-        contextForced.has(skill.id) || baseMatched.has(skill.id);
-      if (!isAutoMatched || skill.activation === "manual") return false;
-      return !shouldSuppressAutomaticSkill({
-        skillId: skill.id,
-        request,
-        forcedIds,
-      });
-    })
-    .map((skill) => skill.id);
-
-  const withoutRedundantSimplePaperQa =
-    matchedSkillIds.includes(EVIDENCE_BASED_QA_SKILL_ID) &&
-    matchedSkillIds.includes(SIMPLE_PAPER_QA_SKILL_ID) &&
-    !forcedIds.has(SIMPLE_PAPER_QA_SKILL_ID) &&
-    !forcedIds.has(EVIDENCE_BASED_QA_SKILL_ID)
-      ? matchedSkillIds.filter((id) => id !== SIMPLE_PAPER_QA_SKILL_ID)
-      : matchedSkillIds;
+  const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
+  const explicitSkillIds = Array.from(
+    new Set(
+      (request.forcedSkillIds || []).filter((id) => skillsById.has(id)),
+    ),
+  );
+  const automatic = Array.from(new Set(classifiedIds || [])).filter((id) => {
+    const skill = skillsById.get(id);
+    if (!skill || forcedIds.has(id) || skill.activation === "manual")
+      return false;
+    return isSkillContextEligible(skill, request);
+  });
+  const automaticSet = new Set(automatic);
+  for (const skill of skills) {
+    if (!automaticSet.has(skill.id)) continue;
+    for (const supersededId of skill.supersedes || []) {
+      if (!forcedIds.has(supersededId)) automaticSet.delete(supersededId);
+    }
+  }
+  const automaticSkillIds = automatic
+    .filter((id) => automaticSet.has(id))
+    .slice(0, 3)
+    .map((id) => id);
 
   return {
-    matchedSkillIds: withoutRedundantSimplePaperQa,
-    explicitSkillIds: Array.from(forcedIds).filter((skillId) =>
-      hasSkill(skills, skillId),
-    ),
-    contextForcedSkillIds: Array.from(contextForced).filter((skillId) =>
-      hasSkill(skills, skillId),
-    ),
+    matchedSkillIds: [...explicitSkillIds, ...automaticSkillIds],
+    explicitSkillIds,
+    contextForcedSkillIds: [],
   };
 }
 

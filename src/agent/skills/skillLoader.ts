@@ -2,15 +2,15 @@ import type { AgentRuntimeRequest } from "../types";
 
 /**
  * A skill is a file-driven guidance instruction that gets injected into the
- * agent current-turn guidance when the user's message matches one of its patterns.
+ * agent current-turn guidance after contextual eligibility and semantic routing.
  *
  * Skills are defined as `.md` files with frontmatter:
  *
  * ```markdown
  * ---
  * id: my-skill
- * match: /regex pattern/i
- * match: /another pattern/i
+ * contexts: single-paper
+ * activation: auto
  * ---
  *
  * Instruction body (markdown) injected into current-turn guidance.
@@ -20,9 +20,11 @@ export type AgentSkill = {
   id: string;
   description: string;
   version: number;
+  /** Deprecated routing metadata. Preserved for round-tripping/diagnostics only. */
   patterns: RegExp[];
   contexts: SkillContextKind[];
   activation: SkillActivationMode;
+  supersedes: string[];
   instruction: string;
   /** Set at load time by userSkills.ts based on filename + content comparison. */
   source: "system" | "customized" | "personal";
@@ -33,7 +35,8 @@ export type SkillContextKind =
   | "single-paper"
   | "paper-set"
   | "library-corpus"
-  | "note";
+  | "note"
+  | "visual-input";
 
 export type SkillActivationMode = "auto" | "manual" | "both";
 
@@ -43,6 +46,7 @@ const VALID_CONTEXTS = new Set<SkillContextKind>([
   "paper-set",
   "library-corpus",
   "note",
+  "visual-input",
 ]);
 
 const VALID_ACTIVATIONS = new Set<SkillActivationMode>([
@@ -72,9 +76,10 @@ function parseSkillActivation(raw: string): SkillActivationMode {
  * Parse a raw `.md` skill file into an AgentSkill.
  * Frontmatter is delimited by `---` lines. Supported keys:
  * - `id: <string>`          — unique skill identifier
- * - `match: /<regex>/<flags>` — pattern to match against userText (repeatable, OR semantics)
+ * - `match: /<regex>/<flags>` — deprecated metadata, preserved but ignored by routing
  * - `contexts: <context>[,<context>]` — request contexts where the skill is valid
  * - `activation: auto|manual|both` — whether the skill can activate automatically
+ * - `supersedes: <id>[,<id>]` — automatic skills this workflow replaces
  */
 export function parseSkill(raw: string): AgentSkill {
   const lines = raw.split("\n");
@@ -103,6 +108,7 @@ export function parseSkill(raw: string): AgentSkill {
   let version = 0;
   let contexts: SkillContextKind[] = ["any"];
   let activation: SkillActivationMode = "auto";
+  let supersedes: string[] = [];
   const patterns: RegExp[] = [];
 
   for (const line of fmLines) {
@@ -136,6 +142,18 @@ export function parseSkill(raw: string): AgentSkill {
       activation = parseSkillActivation(activationMatch[1]);
       continue;
     }
+    const supersedesMatch = line.match(/^supersedes:\s*(.+)$/);
+    if (supersedesMatch) {
+      supersedes = Array.from(
+        new Set(
+          supersedesMatch[1]
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      );
+      continue;
+    }
     // Skip name: lines (legacy, no longer used)
     if (/^name:\s/.test(line)) continue;
     const matchMatch = line.match(/^match:\s*\/(.+)\/([gimsuy]*)$/);
@@ -160,14 +178,14 @@ export function parseSkill(raw: string): AgentSkill {
     patterns,
     contexts,
     activation,
+    supersedes,
     instruction,
     source: "personal",
   };
 }
 
 /**
- * Test whether a skill's patterns match the user's request text.
- * Returns true if any pattern matches (OR semantics).
+ * Legacy diagnostic helper. Automatic routing must not call this function.
  */
 export function matchesSkill(
   skill: AgentSkill,
@@ -176,4 +194,30 @@ export function matchesSkill(
   const text = (request.userText || "").trim();
   if (!text || !skill.patterns.length) return false;
   return skill.patterns.some((pattern) => pattern.test(text));
+}
+
+export function getSkillRoutingDiagnostics(skill: AgentSkill): string[] {
+  const diagnostics: string[] = [];
+  if (skill.patterns.length) {
+    diagnostics.push(
+      "Legacy match: patterns are preserved but no longer activate this skill automatically.",
+    );
+  }
+  const description = skill.description.trim();
+  const normalizedDescription = description
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+  const normalizedId = skill.id.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (
+    skill.activation !== "manual" &&
+    (!description ||
+      description.replace(/\s+/g, "").length < 20 ||
+      normalizedDescription === normalizedId ||
+      /describe what this skill does/i.test(description))
+  ) {
+    diagnostics.push(
+      "Automatic activation needs a precise description of the workflow and its intended requests.",
+    );
+  }
+  return diagnostics;
 }

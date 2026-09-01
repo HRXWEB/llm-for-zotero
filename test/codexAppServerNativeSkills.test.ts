@@ -25,6 +25,7 @@ function makeSkill(
     patterns: [pattern],
     contexts: ["any"],
     activation: "auto",
+    supersedes: [],
     instruction,
     source: "system",
   };
@@ -82,7 +83,7 @@ describe("Codex native skills", function () {
     );
   });
 
-  it("uses deterministic regex matching without a classifier call", async function () {
+  it("ignores regex metadata and uses only an explicitly supplied isolated classifier", async function () {
     setUserSkills([
       makeSkill("write-note", /note/i, "Write-note instructions."),
       makeSkill("compare-papers", /compare/i, "Compare instructions."),
@@ -104,10 +105,10 @@ describe("Codex native skills", function () {
       },
     });
 
-    assert.deepEqual(resolved.matchedSkillIds, ["compare-papers"]);
-    assert.equal(classifierCalls, 0);
-    assert.include(resolved.instructionBlock, "Skill: compare-papers");
-    assert.notInclude(resolved.instructionBlock, "Skill: write-note");
+    assert.deepEqual(resolved.matchedSkillIds, ["write-note"]);
+    assert.equal(classifierCalls, 1);
+    assert.include(resolved.instructionBlock, "Skill: write-note");
+    assert.notInclude(resolved.instructionBlock, "Skill: compare-papers");
   });
 
   it("uses cached classifier fallback for ambiguous multilingual skill turns", async function () {
@@ -139,6 +140,20 @@ describe("Codex native skills", function () {
     assert.deepEqual(second.matchedSkillIds, ["write-note"]);
     assert.equal(classifierCalls, 1);
     assert.equal(second.resolutionSource, "cache");
+  });
+
+  it("fails closed when Codex has no proven isolated classifier adapter", async function () {
+    setUserSkills([
+      makeSkill("compare-papers", /compare/i, "Compare instructions."),
+    ]);
+    const resolved = await resolveCodexNativeSkills({
+      scope: { conversationKey: 1, libraryID: 7, kind: "global" },
+      userText: "compare these papers",
+      model: "gpt-5.4",
+      apiBase: "",
+    });
+    assert.deepEqual(resolved.matchedSkillIds, []);
+    assert.equal(resolved.resolutionSource, "none");
   });
 
   it("returns no instruction block when no skills are loaded", async function () {
@@ -177,6 +192,7 @@ describe("Codex native skills", function () {
       userText: "summarize this paper",
       model: "",
       apiBase: "",
+      detectSkillIntentImpl: async () => ["simple-paper-qa"],
     });
     assert.deepEqual(paperTurn.matchedSkillIds, ["simple-paper-qa"]);
 
@@ -189,6 +205,7 @@ describe("Codex native skills", function () {
       userText: "summarize my library",
       model: "",
       apiBase: "",
+      detectSkillIntentImpl: async () => ["library-analysis"],
     });
     assert.deepEqual(libraryTurn.matchedSkillIds, ["library-analysis"]);
   });
@@ -214,6 +231,7 @@ describe("Codex native skills", function () {
           },
         ],
       },
+      detectSkillIntentImpl: async () => ["compare-papers"],
     });
 
     assert.deepEqual(resolved.matchedSkillIds, ["compare-papers"]);
@@ -244,6 +262,7 @@ describe("Codex native skills", function () {
           },
         ],
       },
+      detectSkillIntentImpl: async () => ["evidence-based-qa"],
     });
 
     assert.deepEqual(resolved.matchedSkillIds, ["evidence-based-qa"]);

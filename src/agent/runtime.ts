@@ -64,6 +64,7 @@ import { WRITE_NOTE_SKILL_ID } from "./skills/noteIntent";
 import {
   detectTurnIntent,
   inferActionIntentsFromRequest,
+  resolvePlanSkillRoutingReceipt,
 } from "./model/skillClassifier";
 import { reconcileNoteDestinationActionIntents } from "./model/actionIntent";
 import { createUnverifiedReceipt } from "./contracts/actionEvaluation";
@@ -75,6 +76,7 @@ import {
 import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import { getAllSkills, getMatchedSkillIds } from "./skills";
+import { loadPlanArtifact } from "./plans/store";
 import {
   buildAgentResourceContextPlan,
   commitAgentReadActivities,
@@ -135,6 +137,7 @@ import {
 } from "../shared/conversationWriteFence";
 import type { WebAttributionAssessment } from "../webAccess/attribution";
 import { clearWebSourcesForRun } from "../webAccess/runSources";
+import { PlanExecutionRunSession } from "./plans/runSession";
 
 const TOOL_RESULT_READ_TOOL_NAME = "tool_result_read";
 
@@ -760,6 +763,33 @@ export class AgentRuntime {
     return this.registry.unregister(name);
   }
 
+  async createActionContractForRequest(
+    requestInput: AgentRuntimeRequestInput | AgentRuntimeRequest,
+  ): Promise<AgentRuntimeRequest["actionContract"]> {
+    const request =
+      "turnPaperScope" in requestInput
+        ? requestInput
+        : resolveAgentRuntimeRequest(requestInput, {
+            resolvePaperContext: this.paperContextResolver,
+          });
+    if (request.actionContract) return request.actionContract;
+    if (!request.classifiedIntent) {
+      const actions = inferActionIntentsFromRequest(request);
+      request.classifiedIntent = {
+        retrievalIntent: "none",
+        wantedSections: [],
+        writeDisposition: actions.some(
+          (intent) => intent.operation !== "read_full",
+        )
+          ? "required"
+          : "none",
+        actionInterpretationSource: "deterministic_fallback",
+        actionIntents: actions,
+      };
+    }
+    return (await this.registry.createActionContract(request)) || undefined;
+  }
+
   getCapabilities(request: AgentRuntimeRequestInput) {
     const resolved = resolveAgentRuntimeRequest(request, {
       resolvePaperContext: this.paperContextResolver,
@@ -918,6 +948,7 @@ export class AgentRuntime {
         contracts: this.registry,
         emit,
       });
+      const planSession = new PlanExecutionRunSession(request, emit);
 
       if (!adapter.supportsTools(request)) {
         const reason =
@@ -944,6 +975,7 @@ export class AgentRuntime {
         modelProviderLabel: request.modelProviderLabel,
         signal: params.signal,
         checkpointActionProgress: () => actionContractSession.checkpoint(),
+        publishPlanEvent: emit,
       };
       const toolsUsedThisTurn: string[] = [];
       const toolExecutionRecords: Array<{
@@ -1146,20 +1178,51 @@ export class AgentRuntime {
       //   1. detectTurnIntent — one bounded LLM call against the primary
       //      model, returns which skills apply plus the language-independent
       //      retrieval intent (stored on request.classifiedIntent as a
-      //      default for retrieval/routing). Falls back to regex `match:`
-      //      patterns with a null intent on any error.
-      //   2. getMatchedSkillIds — unions classifier output with explicit
-      //      forcedSkillIds (slash menu) and runtime-context forces
-      //      (e.g. notes-directory nickname mention).
+      //      default for retrieval/routing). Context and evidence validation
+      //      fail closed to no automatic skills on any error.
+      //   2. getMatchedSkillIds — unions validated semantic output with
+      //      explicit forcedSkillIds (slash menu).
       //   3. matchedSkills is threaded into renderAgentPromptEnvelope so
       //      only those skills' instructions ship in current-turn guidance,
       //      and emitted as trace events for UI visibility.
       // The resulting prompt package is reused across every model inference
       // inside the agent loop — no per-step classification cost.
       const preclassifiedIntent = request.classifiedIntent;
-      const turnIntent = await detectTurnIntent(request, getAllSkills(), {
-        signal: params.signal,
-      });
+      let turnIntent: Awaited<ReturnType<typeof detectTurnIntent>>;
+      if (request.planContext?.phase === "executing") {
+        const artifact = await loadPlanArtifact(
+          request.planContext.planId,
+          request.planContext.revision,
+        );
+        const reused = await resolvePlanSkillRoutingReceipt(
+          artifact?.skillRoutingReceipt,
+          getAllSkills(),
+        );
+        if (reused.changedExplicitSkillIds.length) {
+          throw new Error(
+            `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
+          );
+        }
+        if (reused.changedAutomaticSkillIds.length) {
+          await emit({
+            type: "provider_event",
+            providerType: "plan_skill_routing",
+            payload: {
+              status: "changed_automatic_skills_omitted",
+              skillIds: reused.changedAutomaticSkillIds,
+            },
+          });
+        }
+        turnIntent = {
+          skillIds: reused.skillIds,
+          classifiedIntent: null,
+          degraded: false,
+        };
+      } else {
+        turnIntent = await detectTurnIntent(request, getAllSkills(), {
+          signal: params.signal,
+        });
+      }
       if (!preclassifiedIntent && turnIntent.classifiedIntent) {
         request.classifiedIntent = turnIntent.classifiedIntent;
       } else if (!preclassifiedIntent && !turnIntent.classifiedIntent) {
@@ -1178,15 +1241,16 @@ export class AgentRuntime {
           };
         }
       }
+      request.skillRoutingReceipt = turnIntent.routingReceipt;
       if (turnIntent.degraded) {
         // Surface the silent-regression case: a usable model config was
-        // present but classification fell back to regex matching, reverting
-        // every classifier-driven default for this turn.
+        // present but classification failed. Automatic skill guidance is
+        // intentionally omitted for this turn.
         await emit({
           type: "provider_event",
           providerType: "turn_intent_classifier",
           payload: {
-            status: "degraded_to_regex",
+            status: "degraded_no_automatic_skills",
             reason: turnIntent.failureReason,
           },
         });
@@ -1265,6 +1329,29 @@ export class AgentRuntime {
           text,
           usedFallback: false,
         };
+      }
+      const planInitialization = await planSession.initialize();
+      if (planInitialization.kind === "failed") {
+        const text = planInitialization.userMessage;
+        await emit({ type: "final", text });
+        await persistIfLive(() => finishAgentRun(runId, "failed", text));
+        return {
+          kind: "completed",
+          runId,
+          text,
+          usedFallback: false,
+        };
+      }
+      if (request.planContext?.phase === "planning") {
+        await emit({
+          type: "status",
+          text: "Planning the request and reviewing context",
+        });
+      } else if (request.planContext?.phase === "executing") {
+        await emit({
+          type: "status",
+          text: "Executing the approved plan",
+        });
       }
       const noteWritePolicy = requiresFileNoteWrite
         ? getNotesDirectoryConfig()
@@ -1503,6 +1590,7 @@ export class AgentRuntime {
         request,
         actionContractSession,
         transcriptMessagesForPrompt,
+        planSession,
       );
       let toolCallOverflowCorrectionUsed = false;
       const shouldFlushStreamBuffer = (value: string): boolean => {
@@ -1952,6 +2040,14 @@ export class AgentRuntime {
           callId: call.id,
           name: call.name,
           args: call.arguments,
+          executionId:
+            request.planContext?.phase === "executing"
+              ? request.planContext.executionId
+              : undefined,
+          taskId:
+            request.planContext?.phase === "executing"
+              ? request.planContext.activeTaskId
+              : undefined,
         });
         toolsUsedThisTurn.push(call.name);
         const execution = await this.registry.prepareExecution(
@@ -2048,10 +2144,25 @@ export class AgentRuntime {
           actionReceipts: toolResult.actionReceipts,
           content: toolResult.content,
           artifacts: toolResult.artifacts,
+          executionId:
+            request.planContext?.phase === "executing"
+              ? request.planContext.executionId
+              : undefined,
+          taskId:
+            request.planContext?.phase === "executing"
+              ? request.planContext.activeTaskId
+              : undefined,
         });
         await actionContractSession.recordToolReceipts(
           toolResult.actionReceipts,
         );
+        await planSession.recordToolResult({
+          toolName: toolResult.name,
+          mutability: executedCall.toolDefinition?.spec.mutability,
+          result: toolResult,
+          artifacts: toolResult.artifacts,
+          runId,
+        });
         return executedCall;
       };
       const buildToolDelivery = async (

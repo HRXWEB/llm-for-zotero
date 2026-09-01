@@ -49,7 +49,8 @@ export function normalizeIntentText(value: string): string {
  * Text-only note intent: an explicit save-as-note phrasing, or a note noun
  * combined with a note action verb. This is the signal strong enough to
  * FORCE the write-note skill with no supporting context — mirroring the
- * shipped English `match:` fallbacks, in every language.
+ * the semantic skill router. This detector is mutation-safety support only;
+ * it does not activate skills.
  */
 export function inferExplicitNoteIntent(userText: string | undefined): boolean {
   const text = normalizeIntentText(userText || "");

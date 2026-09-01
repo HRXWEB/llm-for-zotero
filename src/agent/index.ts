@@ -10,6 +10,7 @@ import { initAgentTranscriptStore } from "./store/transcriptStore";
 import { initAgentToolResultHandleStore } from "./store/toolResultHandles";
 import { initAgentEvidenceStore } from "./context/cacheManagement";
 import { initAgentCoverageStore } from "./context/coverageLedger";
+import { initAgentPlanStore } from "./plans/store";
 import { createAgentModelAdapter } from "./model/factory";
 import { createBuiltInActionRegistry, type ActionRegistry } from "./actions";
 import { createLibraryBatchTool } from "./tools/write/libraryBatch";
@@ -86,6 +87,8 @@ async function createAgentSubsystemRuntime(
   await initAgentEvidenceStore();
   assertAgentInitCurrent(generation);
   await initAgentCoverageStore();
+  assertAgentInitCurrent(generation);
+  await initAgentPlanStore();
   assertAgentInitCurrent(generation);
 
   const zoteroGateway = new ZoteroGateway();

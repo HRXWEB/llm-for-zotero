@@ -17,6 +17,7 @@ import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import {
   ActionContractService,
   type PreparedActionExecution,
+  type ScopeValidationFailure,
 } from "../contracts/actionContract";
 import {
   createFallbackToolReceipts,
@@ -281,6 +282,36 @@ export class AgentToolRegistry {
         `${call.name} is not available for this request`,
       );
     }
+    if (
+      context.request.planContext?.phase === "planning" &&
+      tool.spec.mutability === "write"
+    ) {
+      return createSyntheticErrorResult(
+        call,
+        `Plan mode blocked ${call.name}: no mutations, commands, scripts, imports, uploads, settings changes, or file writes may run before plan approval.`,
+      );
+    }
+    if (
+      context.request.planContext?.phase === "executing" &&
+      tool.spec.mutability === "write" &&
+      !context.request.actionContract
+    ) {
+      return createSyntheticErrorResult(
+        call,
+        `Approved Plan execution blocked ${call.name}: the frozen action contract is unavailable. Revise and approve a new plan instead of inferring a new mutation scope.`,
+      );
+    }
+    if (
+      tool.spec.mutability === "write" &&
+      (options.callerKind || "model") === "model" &&
+      Boolean(this.actionContracts) &&
+      !context.request.actionContract
+    ) {
+      return createSyntheticErrorResult(
+        call,
+        `Mutation blocked for ${call.name}: no validated action contract exists for this request. Reclassify the requested action and obtain normal confirmation before retrying.`,
+      );
+    }
     // The Original Agent permission policy is enforced after validation from
     // the exact proposal. Tool exposure is not an authorization boundary.
     if (isMalformedToolArgumentsDiagnostic(call.arguments)) {
@@ -314,6 +345,8 @@ export class AgentToolRegistry {
       enforceActionContract && this.actionContracts
         ? await this.actionContracts.prepare(tool, validation.value, context)
         : undefined;
+    let planScopeFailure: ScopeValidationFailure | null = null;
+    let planScopeOverrideApproved = false;
     if (preparedAction && context.request.actionContract) {
       const scopeFailure = await this.actionContracts!.validateScope(
         context.request.actionContract,
@@ -326,31 +359,42 @@ export class AgentToolRegistry {
         },
       );
       if (scopeFailure) {
-        return {
-          kind: "result",
-          execution: {
-            tool,
-            input: validation.value,
-            result: {
-              callId: call.id,
-              name: call.name,
-              ok: false,
-              actionReceipts: this.actionContracts!.rejectionReceipts(
-                context.request.actionContract,
-                preparedAction,
-                scopeFailure,
-              ),
-              content: {
-                error: scopeFailure.message,
-                retryable: true,
-                expectedCount: scopeFailure.expectedCount,
-                proposedCount: scopeFailure.proposedCount,
-                rejectedTargets: scopeFailure.rejectedTargets,
-                missingTargets: scopeFailure.missingTargets,
+        const canRequestOneOffPlanApproval =
+          context.request.planContext?.phase === "executing" &&
+          !context.request.actionContract.hardConstraints?.some(
+            (constraint) => constraint.kind === "no_write",
+          ) &&
+          !/did not produce a typed action proposal/i.test(
+            scopeFailure.message,
+          );
+        if (canRequestOneOffPlanApproval) {
+          planScopeFailure = scopeFailure;
+        } else
+          return {
+            kind: "result",
+            execution: {
+              tool,
+              input: validation.value,
+              result: {
+                callId: call.id,
+                name: call.name,
+                ok: false,
+                actionReceipts: this.actionContracts!.rejectionReceipts(
+                  context.request.actionContract,
+                  preparedAction,
+                  scopeFailure,
+                ),
+                content: {
+                  error: scopeFailure.message,
+                  retryable: true,
+                  expectedCount: scopeFailure.expectedCount,
+                  proposedCount: scopeFailure.proposedCount,
+                  rejectedTargets: scopeFailure.rejectedTargets,
+                  missingTargets: scopeFailure.missingTargets,
+                },
               },
             },
-          },
-        };
+          };
       }
     }
 
@@ -474,12 +518,15 @@ export class AgentToolRegistry {
           proposalDigest: executionProposal.payloadDigest,
           toolName: call.name,
           authority:
-            authorization.kind === "confirm"
-              ? "safe_confirmation"
-              : authorization.kind === "execute" &&
-                  authorization.authority === "yolo"
-                ? "yolo"
-                : "auto_policy",
+            context.request.planContext?.phase === "executing" &&
+            !planScopeFailure
+              ? "plan_approval"
+              : authorization.kind === "confirm"
+                ? "safe_confirmation"
+                : authorization.kind === "execute" &&
+                    authorization.authority === "yolo"
+                  ? "yolo"
+                  : "auto_policy",
           status: "staged",
           createdAt: Date.now(),
         };
@@ -532,7 +579,7 @@ export class AgentToolRegistry {
               progress: context.request.actionProgress,
             },
           );
-          if (scopeFailure) {
+          if (scopeFailure && !planScopeOverrideApproved) {
             return {
               tool,
               input: resolvedInput,
@@ -653,6 +700,7 @@ export class AgentToolRegistry {
     };
 
     const runConfirmedExecution = async (resolutionData?: unknown) => {
+      if (planScopeFailure) planScopeOverrideApproved = true;
       if (resolutionData !== undefined && tool.applyConfirmation) {
         const resolved = tool.applyConfirmation(
           validation.value,
@@ -739,16 +787,23 @@ export class AgentToolRegistry {
       },
     });
     const authorization =
-      callerKind === "model"
-        ? authorizeOriginalAction(proposal, {
-            mode: writeMode,
-            userText: context.request.userText || "",
-            hasExplicitNoWrite:
-              context.request.actionContract?.hardConstraints?.some(
-                (constraint) => constraint.kind === "no_write",
-              ) || hasExplicitNoWriteConstraint(context.request.userText || ""),
-          })
-        : { kind: "execute" as const, authority: "auto_policy" as const };
+      callerKind === "model" &&
+      context.request.planContext?.phase === "executing" &&
+      !context.request.actionContract?.hardConstraints?.some(
+        (constraint) => constraint.kind === "no_write",
+      )
+        ? ({ kind: "execute", authority: "plan_approval" } as const)
+        : callerKind === "model"
+          ? authorizeOriginalAction(proposal, {
+              mode: writeMode,
+              userText: context.request.userText || "",
+              hasExplicitNoWrite:
+                context.request.actionContract?.hardConstraints?.some(
+                  (constraint) => constraint.kind === "no_write",
+                ) ||
+                hasExplicitNoWriteConstraint(context.request.userText || ""),
+            })
+          : { kind: "execute" as const, authority: "auto_policy" as const };
     if (authorization.kind === "block") {
       return createSyntheticErrorResult(call, authorization.reason);
     }
@@ -759,7 +814,9 @@ export class AgentToolRegistry {
       tool.createPendingAction
         ? true
         : callerKind === "model"
-          ? planRequiresConfirmation
+          ? Boolean(planScopeFailure) ||
+            planRequiresConfirmation ||
+            (tool.spec.interaction === "user_input" && toolWantsConfirmation)
           : callerKind === "mcp"
             ? false
             : toolWantsConfirmation;
@@ -787,9 +844,14 @@ export class AgentToolRegistry {
     }
     if (shouldRequireConfirmation) {
       const requestId = createRequestId();
-      const pendingAction = tool.createPendingAction
-        ? await tool.createPendingAction(validation.value, context)
-        : createProposalConfirmationAction(proposal);
+      const pendingAction = planScopeFailure
+        ? createProposalConfirmationAction({
+            ...proposal,
+            summary: `${proposal.summary}\n\nThis operation is outside the approved plan scope: ${planScopeFailure.message}`,
+          })
+        : tool.createPendingAction
+          ? await tool.createPendingAction(validation.value, context)
+          : createProposalConfirmationAction(proposal);
       return {
         kind: "confirmation",
         requestId,

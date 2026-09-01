@@ -47,7 +47,10 @@ export type ActionProposal = {
 };
 
 export type AuthorizationDecision =
-  | { kind: "execute"; authority: "safe_read" | "auto_policy" | "yolo" }
+  | {
+      kind: "execute";
+      authority: "safe_read" | "auto_policy" | "yolo" | "plan_approval";
+    }
   | { kind: "confirm"; reason: string }
   | { kind: "block"; reason: string };
 

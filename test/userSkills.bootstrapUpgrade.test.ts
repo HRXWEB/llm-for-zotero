@@ -382,4 +382,17 @@ describe("user skill bootstrap upgrades", function () {
     // "folder means filesystem" guidance was corrected for issue #374.
     assert.equal(parseSkill(canonicalWriteNote).version, 9);
   });
+
+  it("migrates declarative supersession without replacing legacy match metadata", function () {
+    const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"]
+      .replace("version: 6", "version: 5")
+      .replace("supersedes: simple-paper-qa\n", "");
+    const patched = patchSkillFrontmatter(
+      old,
+      BUILTIN_SKILL_FILES["evidence-based-qa.md"],
+    );
+    assert.isString(patched);
+    assert.include(patched as string, "supersedes: simple-paper-qa");
+    assert.include(patched as string, "match:");
+  });
 });

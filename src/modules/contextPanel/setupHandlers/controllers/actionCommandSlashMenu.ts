@@ -37,6 +37,8 @@ export type ActionCommandSlashMenuContext = {
     userQuery?: string,
   ) => void | Promise<void>;
   buildActionRequestContext: () => { mode: ActionChatMode };
+  activatePlanMode: () => void;
+  isPlanAvailable: () => boolean;
 };
 
 type ClaudeSlashMenuItem = {
@@ -242,6 +244,33 @@ export function renderAgentActionsInSlashMenu(
         : "Compact the current agent context.",
     inputSchema: { type: "object", properties: {} },
   };
+  const planMatches =
+    !query ||
+    "plan".includes(query) ||
+    "draft and review a plan before execution".includes(query);
+  if (planMatches && context.isPlanAvailable()) {
+    const button = mkAgentEl(
+      "button",
+      "llm-action-picker-item",
+    ) as HTMLButtonElement;
+    button.type = "button";
+    button.title = "Draft and review a plan before execution.";
+    const titleEl = ownerDoc.createElement("span");
+    titleEl.className = "llm-action-picker-title";
+    titleEl.textContent = "/plan";
+    const descEl = ownerDoc.createElement("span");
+    descEl.className = "llm-action-picker-description";
+    descEl.textContent = "Draft and review a plan before execution.";
+    button.append(titleEl, descEl);
+    button.addEventListener("click", (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      context.consumeActiveActionToken();
+      context.closeSlashMenu();
+      context.activatePlanMode();
+    });
+    list.insertBefore(button, baseAnchor);
+  }
   if (
     !query ||
     compactAction.name.includes(query) ||

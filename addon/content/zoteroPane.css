@@ -5170,6 +5170,98 @@ label.llm-search-results-item:hover {
   color: var(--fill-secondary);
 }
 
+.llm-at-planning-drive {
+  display: grid;
+  flex: 0 0 13px;
+  grid-template-columns: repeat(3, 3.5px);
+  gap: 1.25px;
+  width: 13px;
+  margin-block-start: 3px;
+  color: var(--color-accent);
+}
+
+.llm-at-planning-drive-pixel {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.13;
+  animation: llm-planning-drive-pixel 650ms ease-in-out infinite;
+}
+
+.llm-at-planning-drive-pixel:nth-child(4) {
+  animation-delay: 0ms;
+}
+
+.llm-at-planning-drive-pixel:nth-child(1),
+.llm-at-planning-drive-pixel:nth-child(5),
+.llm-at-planning-drive-pixel:nth-child(7) {
+  animation-delay: 90ms;
+}
+
+.llm-at-planning-drive-pixel:nth-child(2),
+.llm-at-planning-drive-pixel:nth-child(6),
+.llm-at-planning-drive-pixel:nth-child(8) {
+  animation-delay: 180ms;
+}
+
+.llm-at-planning-drive-pixel:nth-child(3),
+.llm-at-planning-drive-pixel:nth-child(9) {
+  animation-delay: 270ms;
+}
+
+.llm-at-row-planning-active .llm-at-plan-text {
+  background: linear-gradient(
+    90deg,
+    var(--fill-tertiary) 35%,
+    var(--fill-primary) 50%,
+    var(--fill-tertiary) 65%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  background-size: 200% 100%;
+  color: transparent;
+  animation: llm-planning-text-shimmer 1.4s linear infinite;
+}
+
+@keyframes llm-planning-drive-pixel {
+  0%,
+  100% {
+    opacity: 0.13;
+    transform: scale(0.92);
+  }
+  45% {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+}
+
+@keyframes llm-planning-text-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-at-planning-drive-pixel,
+  .llm-at-row-planning-active .llm-at-plan-text {
+    animation: none;
+  }
+
+  .llm-at-planning-drive-pixel {
+    opacity: 0.45;
+    transform: none;
+  }
+
+  .llm-at-row-planning-active .llm-at-plan-text {
+    background: none;
+    color: var(--fill-secondary);
+  }
+}
+
 .llm-at-row-tool .llm-at-icon {
   color: var(--color-accent);
 }
@@ -5669,7 +5761,7 @@ label.llm-search-results-item:hover {
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
-  font-size: var(--llm-fs-9);
+  font-size: var(--llm-fs-10);
   line-height: 1.35;
 }
 
@@ -7742,6 +7834,472 @@ label.llm-search-results-item:hover {
   width: fit-content;
 }
 
+.llm-plan-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  order: -90;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 5px 3px 8px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 4px;
+  background: var(--material-background);
+  color: var(--fill-secondary);
+  cursor: pointer;
+  font-size: var(--llm-fs-12);
+  line-height: 1.25;
+}
+
+.llm-plan-mode-chip:hover {
+  border-color: var(--stroke-primary);
+  color: var(--fill-primary);
+}
+
+.llm-plan-mode-chip:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.llm-plan-mode-chip-label {
+  min-width: 0;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.llm-plan-container {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 2px 0 4px;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 14px;
+  background: color-mix(
+    in srgb,
+    var(--material-background) 94%,
+    var(--fill-quinary)
+  );
+  color: var(--fill-primary);
+}
+
+.llm-plan-header,
+.llm-plan-task-line,
+.llm-plan-actions {
+  display: flex;
+  align-items: center;
+}
+
+.llm-plan-header {
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 22px;
+}
+
+.llm-plan-history-collapsed > :not(.llm-plan-header) {
+  display: none;
+}
+
+.llm-plan-history-collapsed .llm-plan-header {
+  cursor: pointer;
+}
+
+.llm-plan-heading {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 7px;
+}
+
+.llm-plan-title {
+  font-size: var(--llm-fs-13);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.llm-plan-version {
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+}
+
+.llm-plan-status {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--fill-quinary);
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  font-weight: 500;
+}
+
+.llm-plan-status[data-status="awaiting_approval"],
+.llm-plan-status[data-status="running"] {
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  color: var(--color-accent);
+}
+
+.llm-plan-status[data-status="approved"],
+.llm-plan-status[data-status="completed"] {
+  background: color-mix(in srgb, #2e9b55 14%, transparent);
+  color: #2e9b55;
+}
+
+.llm-plan-status[data-status="failed"],
+.llm-plan-status[data-status="blocked"] {
+  background: color-mix(in srgb, #c84b4b 14%, transparent);
+  color: #c84b4b;
+}
+
+.llm-plan-markdown {
+  margin-top: 9px;
+  color: var(--fill-primary);
+  font-size: var(--llm-fs-12);
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+}
+
+.llm-plan-markdown > :first-child {
+  margin-top: 0;
+}
+
+.llm-plan-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.llm-plan-markdown p {
+  margin: 7px 0;
+}
+
+.llm-plan-markdown ol {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 9px 0 0;
+  padding-left: 22px;
+}
+
+.llm-plan-markdown li {
+  padding-left: 2px;
+}
+
+.llm-plan-markdown li::marker {
+  color: var(--fill-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-plan-markdown em {
+  color: var(--fill-secondary);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.llm-plan-progress-summary {
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-plan-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.llm-plan-progress-track {
+  display: block;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--fill-quinary);
+}
+
+.llm-plan-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  transition: width 240ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.llm-plan-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 9px;
+  overflow: hidden;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 10px;
+  background: var(--material-background);
+}
+
+.llm-plan-task {
+  min-width: 0;
+  margin: 0;
+  border-bottom: 1px solid var(--stroke-secondary);
+}
+
+.llm-plan-task:last-child {
+  border-bottom: 0;
+}
+
+.llm-plan-task[open] {
+  background: color-mix(
+    in srgb,
+    var(--material-background) 88%,
+    var(--fill-quinary)
+  );
+}
+
+.llm-plan-task summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-plan-task summary::marker {
+  content: "";
+}
+
+.llm-plan-task-line {
+  box-sizing: border-box;
+  gap: 9px;
+  min-height: 42px;
+  padding: 7px 9px;
+  list-style: none;
+  cursor: default;
+}
+
+.llm-plan-task summary.llm-plan-task-line {
+  cursor: pointer;
+}
+
+.llm-plan-task-badge {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--stroke-primary);
+  border-radius: 999px;
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+}
+
+.llm-plan-task-badge-in_progress {
+  border-color: color-mix(in srgb, var(--color-accent) 25%, transparent);
+  color: var(--color-accent);
+}
+
+.llm-plan-task-badge-in_progress::after {
+  content: "";
+  position: absolute;
+  inset: -1.5px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--color-accent);
+  border-right-color: var(--color-accent);
+  border-radius: 999px;
+  animation: llm-plan-spin 900ms linear infinite;
+}
+
+@keyframes llm-plan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.llm-plan-task-badge-completed {
+  border-color: #2e9b55;
+  background: #2e9b55;
+  color: white;
+}
+
+.llm-plan-task-badge-failed,
+.llm-plan-task-badge-blocked,
+.llm-plan-task-badge-cancelled {
+  border-color: #c84b4b;
+  background: #c84b4b;
+  color: white;
+}
+
+.llm-plan-task-badge-waiting_for_user,
+.llm-plan-task-badge-interrupted {
+  border-color: #d58a22;
+  color: #d58a22;
+}
+
+.llm-plan-task-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.llm-plan-task-label {
+  color: var(--fill-primary);
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.llm-plan-task-original {
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  line-height: 1.3;
+}
+
+.llm-plan-task-pill {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--fill-quinary);
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  font-weight: 500;
+}
+
+.llm-plan-task-pill-completed {
+  background: color-mix(in srgb, #2e9b55 14%, transparent);
+  color: #2e9b55;
+}
+
+.llm-plan-task-pill-failed,
+.llm-plan-task-pill-blocked {
+  background: color-mix(in srgb, #c84b4b 14%, transparent);
+  color: #c84b4b;
+}
+
+.llm-plan-task-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 9px 9px 40px;
+  padding-left: 9px;
+  border-left: 1px solid var(--stroke-secondary);
+}
+
+.llm-plan-task-details p {
+  margin: 0;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  line-height: 1.4;
+}
+
+.llm-plan-task-details .llm-plan-task-failure {
+  color: #c84b4b;
+}
+
+.llm-plan-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.llm-plan-action {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 7px;
+  background: var(--material-background);
+  color: var(--fill-primary);
+  cursor: pointer;
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+}
+
+.llm-plan-action:hover:not(:disabled) {
+  border-color: var(--stroke-primary);
+  background: var(--fill-quinary);
+}
+
+.llm-plan-action:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.llm-plan-action:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.llm-plan-approve {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: white;
+}
+
+.llm-plan-approve:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-accent) 82%, black);
+  background: color-mix(in srgb, var(--color-accent) 88%, black);
+}
+
+.llm-plan-cancel {
+  margin-left: auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--fill-secondary);
+}
+
+.llm-plan-approval-hint,
+.llm-plan-error {
+  margin: 10px 0 0;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  line-height: 1.4;
+}
+
+.llm-plan-error {
+  color: #c84b4b;
+}
+
+.llm-plan-revision-box {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.llm-plan-revision-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 68px;
+  padding: 8px 9px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 7px;
+  background: var(--material-background, Canvas);
+  color: var(--fill-primary);
+  font-size: var(--llm-fs-11);
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.llm-plan-revision-input:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.llm-plan-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .llm-selected-context.llm-paper-context-summary-chip {
   --llm-context-chip-icon-size: 18px;
   box-sizing: border-box;
@@ -9450,6 +10008,25 @@ label.llm-search-results-item:hover {
   border-radius: 0;
   background: transparent;
   position: static;
+}
+
+/* Plan is a removable composer mode chip, not an expandable context stack. */
+.llm-selected-context.llm-plan-mode-chip {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  min-height: 26px;
+  padding: 3px 5px 3px 8px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 4px;
+  background: var(--material-background);
+}
+
+.llm-selected-context.llm-plan-mode-chip:hover {
+  border-color: var(--stroke-primary);
+  color: var(--fill-primary);
 }
 
 .llm-selected-context.expanded .llm-selected-context-header {

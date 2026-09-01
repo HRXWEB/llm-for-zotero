@@ -150,6 +150,17 @@ function dedupePaperContexts(
   });
 }
 
+export function hasApprovedFullReadAuthorization(
+  request: AgentToolContext["request"],
+): boolean {
+  return Boolean(
+    request.planContext?.phase === "executing" &&
+    request.actionContract?.obligations.some(
+      (obligation) => obligation.operation === "read_full",
+    ),
+  );
+}
+
 function resolveFullReadTargets(params: {
   input: PaperReadInput;
   context: AgentToolContext;
@@ -166,7 +177,11 @@ function resolveFullReadTargets(params: {
         )
       : [];
   const userText = (params.context.request.userText || "").trim();
-  if (userText && !detectExplicitFullReadIntent(userText)) {
+  if (
+    userText &&
+    !detectExplicitFullReadIntent(userText) &&
+    !hasApprovedFullReadAuthorization(params.context.request)
+  ) {
     throw new Error(
       "paper_read mode:'full' requires an explicit affirmative user request to read the complete document.",
     );

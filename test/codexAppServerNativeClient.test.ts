@@ -2717,7 +2717,7 @@ describe("Codex app-server native client", function () {
     assert.notProperty(turnStartParams || {}, "approvalsReviewer");
   });
 
-  it("submits automatic skill matches as structured native Codex skill inputs", async function () {
+  it("submits explicit skill selections as structured native Codex skill inputs", async function () {
     setUserSkills([
       parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
       parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
@@ -2854,6 +2854,7 @@ describe("Codex app-server native client", function () {
         },
         onSkillActivated: (skillId) => activatedSkills.push(skillId),
         processKey,
+        skillContext: { forcedSkillIds: ["evidence-based-qa"] },
       });
     } finally {
       CodexAppServerProcess.spawn = originalSpawn;

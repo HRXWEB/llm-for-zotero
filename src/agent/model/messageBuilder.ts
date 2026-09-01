@@ -190,9 +190,45 @@ function buildFullUserMessage(
             (obligation) => obligation.capability,
           ),
         )}`,
-        "Do not widen an exact collection to its parent or descendants. A completion claim requires a verified tool receipt covering this contract; already-satisfied targets count, but prose and opaque script/command output do not.",
+        request.planContext?.phase === "planning"
+          ? "This contract bounds the proposed plan. Do not execute it during planning; no mutation receipt is expected until the user approves the plan."
+          : "Do not widen an exact collection to its parent or descendants. A completion claim requires a verified tool receipt covering this contract; already-satisfied targets count, but prose and opaque script/command output do not.",
       ].join("\n"),
     );
+  }
+  if (request.planContext?.phase === "planning") {
+    contextLines.push(
+      [
+        "PLAN MODE — pre-approval boundary:",
+        `Plan identity: ${request.planContext.planId} revision ${request.planContext.revision}.`,
+        "You may inspect Zotero context, PDFs, and read-only web/literature sources. You must not mutate Zotero, write files, run commands or scripts, import/upload data, change settings, or trigger any other side effect.",
+        "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps and objective acceptance criteria. Keep each step content to one short sentence; put validation detail in acceptanceCriteria. Then set ready=true and stop for user review.",
+      ].join("\n"),
+    );
+  } else if (request.planContext?.phase === "executing") {
+    const ledger = request.metadata?.planExecutionLedger as
+      | import("../plans/types").PlanExecutionLedger
+      | null
+      | undefined;
+    if (ledger) {
+      contextLines.push(
+        [
+          "APPROVED PLAN EXECUTION:",
+          `Plan identity: ${ledger.planId} revision ${ledger.revision}; execution ${ledger.executionId}.`,
+          `Approved digest: ${ledger.planDigest}.`,
+          "Execute required tasks in order. Provider task status is only a request; the host accepts completion only from verified evidence.",
+          ...ledger.tasks.map(
+            (task, index) =>
+              `${index + 1}. [${task.status}] taskId=${task.taskId}\n` +
+              `   ${task.content}\n` +
+              `   While active: ${task.activeForm}\n` +
+              `   Acceptance: ${task.acceptanceCriteria.join("; ")}`,
+          ),
+          "The host has already started the first pending task and owns the full ledger. After evidence exists, call task_update with only the task or tasks whose status changes, using their exact taskId values. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks.",
+          "Your final answer should answer the original request naturally. Do not expose plan IDs, execution IDs, task IDs, digests, or append a plan-status/checklist recap; the host renders progress separately.",
+        ].join("\n"),
+      );
+    }
   }
   if (request.activeNoteContext) {
     const note = request.activeNoteContext;

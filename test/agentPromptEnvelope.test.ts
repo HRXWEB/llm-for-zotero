@@ -4,6 +4,7 @@ import {
   composeAgentModelInput,
   renderAgentPromptEnvelope,
 } from "../src/agent/model/messageBuilder";
+import type { PlanExecutionLedger } from "../src/agent/plans/types";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
@@ -15,6 +16,56 @@ function messageText(message: AgentModelMessage): string {
 }
 
 describe("agent prompt envelope", function () {
+  it("keeps host-owned execution identities out of the final answer", async function () {
+    const ledger: PlanExecutionLedger = {
+      version: 1,
+      executionId: "execution-secret",
+      planId: "plan-secret",
+      revision: 1,
+      planDigest: "sha256:secret",
+      conversationKey: 703,
+      attempt: 1,
+      provider: "original",
+      grant: {
+        version: 1,
+        planId: "plan-secret",
+        revision: 1,
+        planDigest: "sha256:secret",
+        conversationKey: 703,
+        conversationGeneration: 1,
+        approvedAt: 1,
+      },
+      status: "running",
+      tasks: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const request = resolvedAgentRequest({
+      conversationKey: 703,
+      mode: "agent",
+      userText: "Execute the approved plan",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: ledger.planId,
+        revision: ledger.revision,
+        executionId: ledger.executionId,
+        approvedDigest: ledger.planDigest,
+        provider: "original",
+      },
+      metadata: { planExecutionLedger: ledger },
+    });
+
+    const messages = await buildAgentInitialMessages(request, [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(
+      prompt,
+      "Your final answer should answer the original request naturally",
+    );
+    assert.include(prompt, "Do not expose plan IDs");
+    assert.include(prompt, "the host renders progress separately");
+  });
+
   it("distinguishes omitted transcript history from an explicit empty override", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 701,

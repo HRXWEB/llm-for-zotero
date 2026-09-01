@@ -48,8 +48,29 @@ import {
 } from "./toolResultTraceInfo";
 import { stripWebSourceMarkersForDisplay } from "../../../webAccess/attribution";
 import { createWebFaviconImage } from "../webFavicon";
+import type {
+  AgentActionContract,
+  PlanArtifact,
+  PlanExecutionLedger,
+} from "../../../agent/types";
+import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
+import { loadPlanArtifact } from "../../../agent/plans/store";
+import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
+import {
+  PLAN_APPROVED_EVENT,
+  PLAN_CANCEL_EVENT,
+  PLAN_REVISE_EVENT,
+  stageApprovedPlanExecution,
+} from "../planModeState";
+import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
+
+const INTERNAL_PLAN_TOOL_NAMES = new Set([
+  "update_plan",
+  "task_update",
+  "request_user_input",
+]);
 
 type AgentTraceSummaryRow = {
   kind: AgentTraceSummaryKind;
@@ -166,6 +187,7 @@ function appendAgentActivityDisclosure(params: {
 }): void {
   const { doc, wrap, list, message, userMessage, events } = params;
   const working = message.streaming === true;
+  const planPhase = resolveTracePlanPhase(events);
   const previous = agentActivityExpandedCache.get(message);
   const state = working
     ? !previous || !previous.wasWorking
@@ -182,11 +204,20 @@ function appendAgentActivityDisclosure(params: {
 
   const summary = doc.createElement("summary") as HTMLElement;
   summary.className = "llm-agent-activity-summary";
+  const duration = formatAgentActivityDuration(
+    resolveAgentActivityDurationMs(message, userMessage, events),
+  );
   summary.textContent = working
-    ? "Working…"
-    : `Worked for ${formatAgentActivityDuration(
-        resolveAgentActivityDurationMs(message, userMessage, events),
-      )}`;
+    ? planPhase === "planning"
+      ? "Planning…"
+      : planPhase === "executing"
+        ? "Executing plan…"
+        : "Working…"
+    : planPhase === "planning"
+      ? `Planned in ${duration}`
+      : planPhase === "executing"
+        ? `Plan ran for ${duration}`
+        : `Worked for ${duration}`;
   details.append(summary, list);
   details.addEventListener("toggle", () => {
     agentActivityExpandedCache.set(message, {
@@ -195,6 +226,24 @@ function appendAgentActivityDisclosure(params: {
     });
   });
   wrap.appendChild(details);
+}
+
+function resolveTracePlanPhase(
+  events: readonly AgentRunEventRecord[],
+): "planning" | "executing" | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const payload = events[index]?.payload;
+    if (payload?.type === "plan_execution_updated") return "executing";
+    if (payload?.type === "plan_ready" || payload?.type === "plan_updated") {
+      return "planning";
+    }
+    if (payload?.type === "status") {
+      const text = payload.text.trim().toLowerCase();
+      if (text.startsWith("executing the approved plan")) return "executing";
+      if (text.startsWith("planning the request")) return "planning";
+    }
+  }
+  return null;
 }
 
 export function buildAgentTraceMarkdownForRender(
@@ -3479,6 +3528,7 @@ function appendLegacyAgentTraceEvent(
       return true;
     }
     case "tool_call": {
+      if (INTERNAL_PLAN_TOOL_NAMES.has(entry.payload.name)) return true;
       const resultEvent = ctx.toolResultsByCallId.get(entry.payload.callId);
       const resultInfo = buildToolResultTraceInfo(
         entry.payload.name,
@@ -3543,6 +3593,7 @@ function appendLegacyAgentTraceEvent(
       appendReasoningTraceItem(ctx, entry.payload);
       return true;
     case "tool_result": {
+      if (INTERNAL_PLAN_TOOL_NAMES.has(entry.payload.name)) return true;
       if (
         entry.payload.ok &&
         getToolDefinition(entry.payload.name)?.presentation
@@ -3785,6 +3836,7 @@ export function buildAgentTraceDisplayItems(
   });
   const requestChips = buildAgentTraceRequestChips(userMessage);
   const requestSummary = buildAgentTraceRequestSummary(userMessage);
+  const planPhase = resolveTracePlanPhase(compactedEvents);
   const adapterContext: AgentTraceAdapterContext = {
     items,
     isCodexTrace,
@@ -3804,20 +3856,32 @@ export function buildAgentTraceDisplayItems(
   items.push({
     type: "message",
     tone: "neutral",
-    text: isCodexTrace
-      ? "Request sent to Codex."
-      : buildInitialAgentMessage(requestChips),
+    text:
+      planPhase === "planning"
+        ? "Planning the request against the available context."
+        : planPhase === "executing"
+          ? "Executing the approved plan in order."
+          : isCodexTrace
+            ? "Request sent to Codex."
+            : buildInitialAgentMessage(requestChips),
   });
   items.push({
     type: "action",
     row: {
       kind: "plan",
       icon: "↳",
-      text: isCodexTrace
-        ? "Codex received the request"
-        : requestChips.length
-          ? "Request and attached context received"
-          : "Request received",
+      text:
+        planPhase === "planning"
+          ? requestChips.length
+            ? "Plan request and attached context received"
+            : "Plan request received"
+          : planPhase === "executing"
+            ? "Approved tasks and context received"
+            : isCodexTrace
+              ? "Codex received the request"
+              : requestChips.length
+                ? "Request and attached context received"
+                : "Request received",
     },
     chips: requestChips,
     detailKey: "request",
@@ -3974,6 +4038,478 @@ function renderAgentTraceDetailsBody(
 
 export const renderAgentTraceDetailsBodyForTests = renderAgentTraceDetailsBody;
 
+function createPlanningDriveIcon(doc: Document): HTMLSpanElement {
+  const loader = doc.createElement("span") as HTMLSpanElement;
+  loader.className = "llm-at-planning-drive";
+  loader.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < 9; index += 1) {
+    const pixel = doc.createElement("span") as HTMLSpanElement;
+    pixel.className = "llm-at-planning-drive-pixel";
+    loader.appendChild(pixel);
+  }
+  return loader;
+}
+
+const PLAN_STATUS_SYMBOLS: Record<string, string> = {
+  pending: "",
+  in_progress: "",
+  waiting_for_user: "!",
+  interrupted: "↻",
+  completed: "✓",
+  blocked: "!",
+  failed: "×",
+  skipped: "–",
+  cancelled: "×",
+};
+
+function dispatchPlanEvent(
+  root: HTMLElement,
+  name: string,
+  detail: Record<string, unknown>,
+): void {
+  const EventCtor = root.ownerDocument.defaultView?.CustomEvent;
+  if (!EventCtor) return;
+  root.dispatchEvent(new EventCtor(name, { bubbles: true, detail }));
+}
+
+function getPlanProjection(
+  events: AgentRunEventRecord[],
+):
+  | { artifact: PlanArtifact; ledger?: undefined }
+  | { artifact?: undefined; ledger: PlanExecutionLedger }
+  | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index].payload;
+    if (event.type === "plan_execution_updated") {
+      return { ledger: event.ledger };
+    }
+    if (event.type === "plan_ready" || event.type === "plan_updated") {
+      return { artifact: event.artifact };
+    }
+  }
+  return null;
+}
+
+function getPlanActionContract(
+  events: AgentRunEventRecord[],
+): AgentActionContract | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index].payload;
+    if (
+      event.type === "provider_event" &&
+      event.providerType === "agent_action_contract" &&
+      event.payload?.contract
+    ) {
+      return event.payload.contract as AgentActionContract;
+    }
+  }
+  return undefined;
+}
+
+function renderPlanContainer(params: {
+  doc: Document;
+  events: AgentRunEventRecord[];
+  projection:
+    | { artifact: PlanArtifact; ledger?: undefined }
+    | { artifact?: undefined; ledger: PlanExecutionLedger };
+}): HTMLElement {
+  const root = params.doc.createElement("section");
+  root.className = "llm-plan-container";
+  const actionContract = getPlanActionContract(params.events);
+
+  const artifactStatusLabel = (status: PlanArtifact["status"]): string => {
+    switch (status) {
+      case "drafting":
+        return "Planning";
+      case "awaiting_approval":
+        return "Ready to review";
+      case "approved":
+        return "Approved";
+      case "superseded":
+        return "Superseded";
+      case "cancelled":
+        return "Cancelled";
+    }
+  };
+
+  const executionStatusLabel = (
+    status: PlanExecutionLedger["status"],
+  ): string => {
+    switch (status) {
+      case "pending":
+        return "Starting";
+      case "running":
+        return "In progress";
+      case "waiting_for_user":
+        return "Needs input";
+      case "interrupted":
+        return "Interrupted";
+      case "completed":
+        return "Completed";
+      case "completed_with_exceptions":
+        return "Completed with exceptions";
+      case "blocked":
+        return "Blocked";
+      case "failed":
+        return "Failed";
+      case "cancelled":
+        return "Cancelled";
+    }
+  };
+
+  const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
+    const markdown = params.doc.createElement("div");
+    markdown.className = "llm-plan-markdown";
+    const source = [
+      artifact.explanation?.trim() || "",
+      ...artifact.steps.map((step, index) => `${index + 1}. ${step.content}`),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    try {
+      renderRenderedMarkdownInto(markdown, source, params.doc);
+    } catch {
+      markdown.textContent = source;
+    }
+    return markdown;
+  };
+
+  const renderExecutionTasks = (ledger: PlanExecutionLedger): HTMLElement => {
+    const tasks = params.doc.createElement("div");
+    tasks.className = "llm-plan-task-list";
+    ledger.tasks.forEach((entry, index) => {
+      const hasDetails = Boolean(
+        entry.acceptanceCriteria.length ||
+        entry.evidenceIds.length ||
+        entry.failureReasons.length ||
+        entry.parentTaskId,
+      );
+      const row = params.doc.createElement(hasDetails ? "details" : "div") as
+        | HTMLDetailsElement
+        | HTMLDivElement;
+      row.className = `llm-plan-task llm-plan-task-${entry.status}`;
+      if (hasDetails) {
+        (row as HTMLDetailsElement).open = [
+          "waiting_for_user",
+          "interrupted",
+          "blocked",
+          "failed",
+        ].includes(entry.status);
+      }
+
+      const line = params.doc.createElement(hasDetails ? "summary" : "div");
+      line.className = "llm-plan-task-line";
+      const badge = params.doc.createElement("span");
+      badge.className = `llm-plan-task-badge llm-plan-task-badge-${entry.status}`;
+      badge.setAttribute("aria-hidden", "true");
+      const symbol = PLAN_STATUS_SYMBOLS[entry.status] || "";
+      badge.textContent = symbol || `${index + 1}`;
+
+      const content = params.doc.createElement("span");
+      content.className = "llm-plan-task-content";
+      const label = params.doc.createElement("span");
+      label.className = "llm-plan-task-label";
+      label.textContent =
+        entry.status === "in_progress" ? entry.activeForm : entry.content;
+      content.appendChild(label);
+      if (
+        entry.status === "in_progress" &&
+        entry.activeForm !== entry.content
+      ) {
+        const original = params.doc.createElement("span");
+        original.className = "llm-plan-task-original";
+        original.textContent = entry.content;
+        content.appendChild(original);
+      } else if (entry.parentTaskId) {
+        const supporting = params.doc.createElement("span");
+        supporting.className = "llm-plan-task-original";
+        supporting.textContent = "Supporting step";
+        content.appendChild(supporting);
+      }
+
+      const pill = params.doc.createElement("span");
+      pill.className = `llm-plan-task-pill llm-plan-task-pill-${entry.status}`;
+      pill.textContent =
+        entry.status === "completed"
+          ? "Done"
+          : entry.status === "failed"
+            ? "Failed"
+            : entry.status === "blocked"
+              ? "Blocked"
+              : entry.status === "waiting_for_user"
+                ? "Needs input"
+                : entry.status === "interrupted"
+                  ? "Interrupted"
+                  : entry.status === "skipped"
+                    ? "Skipped"
+                    : entry.status === "cancelled"
+                      ? "Cancelled"
+                      : "";
+      if (!pill.textContent) pill.hidden = true;
+
+      line.append(badge, content, pill);
+      row.appendChild(line);
+
+      if (hasDetails) {
+        const detail = params.doc.createElement("div");
+        detail.className = "llm-plan-task-details";
+        if (entry.acceptanceCriteria.length) {
+          const criteria = params.doc.createElement("p");
+          criteria.className = "llm-plan-task-criteria";
+          criteria.textContent = `Done when: ${entry.acceptanceCriteria.join(" · ")}`;
+          detail.appendChild(criteria);
+        }
+        if (entry.evidenceIds.length) {
+          const evidence = params.doc.createElement("p");
+          evidence.className = "llm-plan-task-evidence";
+          evidence.textContent = `${entry.evidenceIds.length} evidence record${
+            entry.evidenceIds.length === 1 ? "" : "s"
+          } attached`;
+          detail.appendChild(evidence);
+        }
+        if (entry.failureReasons.length) {
+          const failure = params.doc.createElement("p");
+          failure.className = "llm-plan-task-failure";
+          failure.textContent = entry.failureReasons.join(" · ");
+          detail.appendChild(failure);
+        }
+        row.appendChild(detail);
+      }
+      tasks.appendChild(row);
+    });
+    return tasks;
+  };
+
+  const paint = (
+    projection:
+      | { artifact: PlanArtifact; ledger?: undefined }
+      | { artifact?: undefined; ledger: PlanExecutionLedger },
+  ) => {
+    root.replaceChildren();
+    const artifact = projection.artifact;
+    const ledger = projection.ledger;
+    const planId = artifact?.planId || ledger!.planId;
+    const revision = artifact?.revision || ledger!.revision;
+    root.dataset.llmPlanId = planId;
+    root.dataset.llmPlanRevision = `${revision}`;
+    root.classList.toggle("llm-plan-container-execution", Boolean(ledger));
+    root.setAttribute("aria-label", ledger ? "Task progress" : "Plan");
+
+    const header = params.doc.createElement("div");
+    header.className = "llm-plan-header";
+    const heading = params.doc.createElement("div");
+    heading.className = "llm-plan-heading";
+    const title = params.doc.createElement("strong");
+    title.className = "llm-plan-title";
+    title.textContent = ledger ? "Task progress" : "Plan";
+    heading.appendChild(title);
+    if (revision > 1) {
+      const version = params.doc.createElement("span");
+      version.className = "llm-plan-version";
+      version.textContent = `Revision ${revision}`;
+      heading.appendChild(version);
+    }
+    const status = params.doc.createElement("span");
+    status.className = "llm-plan-status";
+    status.textContent = ledger
+      ? executionStatusLabel(ledger.status)
+      : artifactStatusLabel(artifact!.status);
+    status.dataset.status = ledger?.status || artifact!.status;
+    header.append(heading, status);
+    root.appendChild(header);
+
+    if (artifact) {
+      root.appendChild(renderArtifactMarkdown(artifact));
+    } else {
+      const required = ledger!.tasks.filter(
+        (entry) => entry.kind === "required_step",
+      );
+      const completed = required.filter(
+        (entry) => entry.status === "completed",
+      ).length;
+      const progress = params.doc.createElement("div");
+      progress.className = "llm-plan-progress";
+      const progressCopy = params.doc.createElement("span");
+      progressCopy.className = "llm-plan-progress-summary";
+      progressCopy.textContent = `${completed} of ${required.length} steps complete`;
+      const progressTrack = params.doc.createElement("span");
+      progressTrack.className = "llm-plan-progress-track";
+      const progressFill = params.doc.createElement("span");
+      progressFill.className = "llm-plan-progress-fill";
+      progressFill.style.width = `${
+        required.length ? Math.round((completed / required.length) * 100) : 0
+      }%`;
+      progressTrack.appendChild(progressFill);
+      progress.append(progressCopy, progressTrack);
+      root.append(progress, renderExecutionTasks(ledger!));
+    }
+
+    const live = params.doc.createElement("div");
+    live.className = "llm-plan-live-region";
+    live.setAttribute("aria-live", "polite");
+    live.textContent = projection.ledger
+      ? ledger!.tasks.find((entry) => entry.status === "in_progress")
+          ?.activeForm ||
+        status.textContent ||
+        ""
+      : status.textContent || "";
+    root.appendChild(live);
+
+    if (projection.ledger?.status === "interrupted") {
+      const recoveryActions = params.doc.createElement("div");
+      recoveryActions.className = "llm-plan-actions";
+      const resume = params.doc.createElement("button");
+      resume.type = "button";
+      resume.className = "llm-plan-action llm-plan-approve";
+      resume.textContent = "Resume execution";
+      resume.addEventListener("click", () => {
+        stageApprovedPlanExecution(projection.ledger!);
+        dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
+          planId: projection.ledger!.planId,
+          revision: projection.ledger!.revision,
+          executionId: projection.ledger!.executionId,
+          recovery: true,
+        });
+      });
+      recoveryActions.appendChild(resume);
+      root.appendChild(recoveryActions);
+    }
+
+    if (projection.artifact?.status === "awaiting_approval") {
+      const approvalHint = params.doc.createElement("p");
+      approvalHint.className = "llm-plan-approval-hint";
+      approvalHint.textContent =
+        "Approve to start these steps. Anything outside this plan will still require a new decision.";
+      root.appendChild(approvalHint);
+      const actions = params.doc.createElement("div");
+      actions.className = "llm-plan-actions";
+      const approve = params.doc.createElement("button");
+      approve.type = "button";
+      approve.className = "llm-plan-action llm-plan-approve";
+      approve.textContent = "Approve plan";
+      const revise = params.doc.createElement("button");
+      revise.type = "button";
+      revise.className = "llm-plan-action llm-plan-revise";
+      revise.textContent = "Request changes";
+      const cancel = params.doc.createElement("button");
+      cancel.type = "button";
+      cancel.className = "llm-plan-action llm-plan-cancel";
+      cancel.textContent = "Cancel";
+      actions.append(approve, revise, cancel);
+      root.appendChild(actions);
+
+      const revisionBox = params.doc.createElement("div");
+      revisionBox.className = "llm-plan-revision-box";
+      revisionBox.style.display = "none";
+      const revisionInput = params.doc.createElement("textarea");
+      revisionInput.className = "llm-plan-revision-input";
+      revisionInput.placeholder = "What should change in this plan?";
+      const sendRevision = params.doc.createElement("button");
+      sendRevision.type = "button";
+      sendRevision.className = "llm-plan-action llm-plan-approve";
+      sendRevision.textContent = "Send revision";
+      revisionBox.append(revisionInput, sendRevision);
+      root.appendChild(revisionBox);
+
+      const reviewArtifact = projection.artifact;
+      approve.addEventListener("click", () => {
+        approve.disabled = true;
+        revise.disabled = true;
+        cancel.disabled = true;
+        approve.textContent = "Starting…";
+        void planExecutionCoordinator
+          .approve({
+            planId: reviewArtifact.planId,
+            revision: reviewArtifact.revision,
+            conversationGeneration: getConversationWriteGeneration(
+              reviewArtifact.conversationKey,
+            ),
+            actionContract,
+          })
+          .then(async (ledger) => {
+            stageApprovedPlanExecution(ledger);
+            const approvedArtifact = await loadPlanArtifact(
+              reviewArtifact.planId,
+              reviewArtifact.revision,
+            );
+            paint({
+              artifact:
+                approvedArtifact ||
+                ({
+                  ...reviewArtifact,
+                  status: "approved",
+                  approvedAt: Date.now(),
+                  updatedAt: Date.now(),
+                } as PlanArtifact),
+            });
+            dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
+              planId: ledger.planId,
+              revision: ledger.revision,
+              executionId: ledger.executionId,
+            });
+          })
+          .catch((error) => {
+            approve.disabled = false;
+            revise.disabled = false;
+            cancel.disabled = false;
+            approve.textContent = "Approve plan";
+            const errorMessage = params.doc.createElement("p");
+            errorMessage.className = "llm-plan-error";
+            errorMessage.textContent =
+              error instanceof Error ? error.message : String(error);
+            root.appendChild(errorMessage);
+          });
+      });
+      revise.addEventListener("click", () => {
+        revisionBox.style.display =
+          revisionBox.style.display === "none" ? "flex" : "none";
+        if (revisionBox.style.display !== "none") revisionInput.focus();
+      });
+      sendRevision.addEventListener("click", () => {
+        const comment = revisionInput.value.trim();
+        if (!comment) return;
+        dispatchPlanEvent(root, PLAN_REVISE_EVENT, {
+          planId: reviewArtifact.planId,
+          revision: reviewArtifact.revision,
+          provider: reviewArtifact.provider,
+          comment,
+        });
+      });
+      cancel.addEventListener("click", () => {
+        void (async () => {
+          const confirmed = await showStandaloneConfirmationDialog(params.doc, {
+            title: "Cancel this plan?",
+            message: "The cancelled plan will remain in conversation history.",
+            confirmLabel: "Cancel plan",
+            cancelLabel: "Keep plan",
+            destructive: true,
+          });
+          if (!confirmed) return;
+          const artifact = await planExecutionCoordinator.cancelArtifact({
+            planId: reviewArtifact.planId,
+            revision: reviewArtifact.revision,
+          });
+          if (artifact) paint({ artifact });
+          dispatchPlanEvent(root, PLAN_CANCEL_EVENT, {
+            planId: reviewArtifact.planId,
+            revision: reviewArtifact.revision,
+          });
+        })();
+      });
+    }
+  };
+
+  paint(params.projection);
+  const artifact = params.projection.artifact;
+  if (artifact) {
+    void loadPlanArtifact(artifact.planId, artifact.revision).then((stored) => {
+      if (!root.isConnected && !root.parentElement) return;
+      if (stored) paint({ artifact: stored });
+    });
+  }
+  return root;
+}
+
 export function renderAgentTrace({
   doc,
   message,
@@ -4020,6 +4556,7 @@ export function renderAgentTrace({
   }
   const { items: processItems, inlineTextReplacesAssistantText } =
     buildAgentTraceDisplayItems(events, userMessage, message);
+  const tracePlanPhase = resolveTracePlanPhase(events);
   if (inlineTextReplacesAssistantText) {
     onInterleavedText?.();
   }
@@ -4162,12 +4699,24 @@ export function renderAgentTrace({
     }
     const row = doc.createElement("div");
     row.className = `llm-at-row llm-at-row-${itemEntry.row.kind}`;
-    const icon = doc.createElement("span");
-    icon.className = `llm-at-icon${
-      itemEntry.row.iconName ? ` llm-at-icon-${itemEntry.row.iconName}` : ""
-    }`;
-    icon.setAttribute("aria-hidden", "true");
-    if (!itemEntry.row.iconName) icon.textContent = itemEntry.row.icon;
+    const isActivePlanningRow =
+      message.streaming === true &&
+      tracePlanPhase === "planning" &&
+      itemEntry.row.kind === "plan" &&
+      /^planning\b/i.test(itemEntry.row.text.trim());
+    if (isActivePlanningRow) {
+      row.classList.add("llm-at-row-planning-active");
+    }
+    const icon = isActivePlanningRow
+      ? createPlanningDriveIcon(doc)
+      : doc.createElement("span");
+    if (!isActivePlanningRow) {
+      icon.className = `llm-at-icon${
+        itemEntry.row.iconName ? ` llm-at-icon-${itemEntry.row.iconName}` : ""
+      }`;
+      icon.setAttribute("aria-hidden", "true");
+      if (!itemEntry.row.iconName) icon.textContent = itemEntry.row.icon;
+    }
     const text = doc.createElement("span");
     text.className = `llm-at-text llm-at-${itemEntry.row.kind}-text`;
     text.textContent = itemEntry.row.text;
@@ -4205,6 +4754,43 @@ export function renderAgentTrace({
     events,
     forceOpen: Boolean(pending),
   });
+
+  const planProjection = getPlanProjection(events);
+  if (planProjection) {
+    // The structured plan is the planning turn's visible answer. Keep the
+    // provider's often-duplicated prose in durable history without rendering a
+    // second copy below the card. Execution turns still render their final
+    // answer normally beside the task-progress projection.
+    if (planProjection.artifact) onInterleavedText?.();
+    const planContainer = renderPlanContainer({
+      doc,
+      events,
+      projection: planProjection,
+    });
+    const planId =
+      planProjection.artifact?.planId || planProjection.ledger!.planId;
+    for (const node of Array.from(
+      doc.querySelectorAll<HTMLElement>(".llm-plan-container"),
+    )) {
+      const prior = node as HTMLElement;
+      if (
+        prior.dataset.llmPlanId !== planId ||
+        prior.dataset.llmPlanRevision === planContainer.dataset.llmPlanRevision
+      ) {
+        continue;
+      }
+      prior.classList.add("llm-plan-history-collapsed");
+      if (prior.dataset.llmPlanCollapseBound !== "true") {
+        prior.dataset.llmPlanCollapseBound = "true";
+        prior
+          .querySelector(".llm-plan-header")
+          ?.addEventListener("click", () => {
+            prior.classList.toggle("llm-plan-history-collapsed");
+          });
+      }
+    }
+    wrap.appendChild(planContainer);
+  }
 
   // The rule separates the activity trace from the answer, so visible answer
   // text is authoritative even when a restored row retained a stale streaming
