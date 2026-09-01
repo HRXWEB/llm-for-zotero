@@ -15,19 +15,6 @@ type OpenDialogWindow = Window & {
   openDialog?: (...args: unknown[]) => Window | null;
 };
 
-function createButton(
-  doc: Document,
-  label: string,
-  title: string,
-): HTMLButtonElement {
-  const button = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
-  button.type = "button";
-  button.textContent = label;
-  button.title = title;
-  button.setAttribute("aria-label", title);
-  return button;
-}
-
 function initialize(
   sourceDoc: Document,
   targetWin: Window,
@@ -49,6 +36,8 @@ function initialize(
       "--fill-primary",
       "--fill-secondary",
       "--fill-tertiary",
+      "--fill-quaternary",
+      "--fill-quinary",
       "--stroke-secondary",
       "--material-background",
       "--material-sidepane",
@@ -61,10 +50,7 @@ function initialize(
       .filter(Boolean)
       .join("\n");
     if (variables) {
-      const style = doc.createElementNS(
-        HTML_NS,
-        "style",
-      ) as HTMLStyleElement;
+      const style = doc.createElementNS(HTML_NS, "style") as HTMLStyleElement;
       style.textContent = `:root {\n${variables}\n}`;
       doc.documentElement?.prepend(style);
     }
@@ -77,23 +63,28 @@ function initialize(
   doc.documentElement?.appendChild(css);
 
   root.className = "llm-plan-document-window-root";
-  const header = doc.createElementNS(HTML_NS, "header") as HTMLElement;
-  header.className = "llm-plan-document-window-header";
-  const title = doc.createElementNS(HTML_NS, "h1") as HTMLHeadingElement;
-  title.textContent = document.title;
-  const close = createButton(doc, "×", "Close document window");
-  close.addEventListener("click", () => targetWin.close());
-  header.append(title, close);
-
   const article = doc.createElementNS(HTML_NS, "article") as HTMLElement;
-  article.className =
-    "llm-plan-markdown llm-plan-document-window-content";
+  article.className = "llm-plan-markdown llm-plan-document-window-content";
   renderRenderedMarkdownInto(article, document.visibleMarkdown, doc);
+  const firstElement = article.firstElementChild;
+  const firstHeadingMatchesTitle = Boolean(
+    firstElement &&
+    /^h[1-6]$/.test(firstElement.localName) &&
+    (firstElement.textContent || "").trim() === document.title.trim(),
+  );
+  if (firstHeadingMatchesTitle) {
+    firstElement?.classList.add("llm-plan-document-window-title");
+  } else {
+    const title = doc.createElementNS(HTML_NS, "h1") as HTMLHeadingElement;
+    title.className = "llm-plan-document-window-title";
+    title.textContent = document.title;
+    article.prepend(title);
+  }
   decoratePlanDocumentCitations({ doc, root: article, document });
 
   const figures = renderPlanDocumentFigures(doc, document);
-  root.replaceChildren(header, article);
-  if (figures) root.appendChild(figures);
+  if (figures) article.appendChild(figures);
+  root.replaceChildren(article);
   doc.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape") targetWin.close();
   });
