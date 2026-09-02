@@ -151,6 +151,94 @@ describe("OpenAICompatibleAgentAdapter", function () {
     );
   });
 
+  it("moves Kimi anyOf types into the union branches", async function () {
+    let capturedBody: Record<string, unknown> = {};
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "application/json" },
+            json: async () => ({ choices: [{ message: { content: "OK" } }] }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+
+    const inputSchema = {
+      type: "object",
+      properties: {
+        target: {
+          type: "object",
+          properties: {
+            itemId: { type: "number" },
+            name: { type: "string" },
+          },
+          additionalProperties: false,
+          anyOf: [{ required: ["itemId"] }, { required: ["name"] }],
+        },
+        pages: {
+          anyOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+    };
+
+    await adapter.runStep({
+      request: makeRequest({
+        model: "kimi-for-coding",
+        apiBase: "https://api.kimi.com/coding/v1",
+        providerProtocol: "openai_chat_compat",
+      }),
+      messages: [{ role: "user", content: "Read the selected paper" }],
+      tools: [
+        {
+          name: "paper_read",
+          description: "read paper",
+          inputSchema,
+          mutability: "read",
+          requiresConfirmation: false,
+        },
+      ],
+    });
+
+    const serializedTools = capturedBody.tools as Array<{
+      function: {
+        parameters: {
+          properties: {
+            target: Record<string, unknown>;
+            pages: { anyOf: Array<Record<string, unknown>> };
+          };
+        };
+      };
+    }>;
+    const target = serializedTools[0].function.parameters.properties.target;
+    const targetVariants = target.anyOf as Array<Record<string, unknown>>;
+    assert.notProperty(target, "type");
+    assert.deepEqual(
+      targetVariants.map((variant) => variant.type),
+      ["object", "object"],
+    );
+    assert.deepEqual(
+      serializedTools[0].function.parameters.properties.pages.anyOf.map(
+        (variant) => variant.type,
+      ),
+      ["string", "number"],
+    );
+    assert.equal(inputSchema.properties.target.type, "object");
+  });
+
   it("redacts malformed streamed tool argument JSON", async function () {
     (
       globalThis as typeof globalThis & {

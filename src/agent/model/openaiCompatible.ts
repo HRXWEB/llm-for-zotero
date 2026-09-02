@@ -7,6 +7,7 @@ import {
   resolveRequestAuthState,
 } from "../../utils/llmClient";
 import { normalizeTemperature } from "../../utils/normalization";
+import { detectProviderPreset } from "../../utils/providerPresets";
 import { resolveProviderTransportEndpoint } from "../../utils/providerTransport";
 import { extractContextCacheUsage } from "../../contextCache/manager";
 import type {
@@ -15,6 +16,7 @@ import type {
   AgentModelStep,
   AgentRuntimeRequest,
   AgentToolCall,
+  ToolSpec,
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
@@ -81,6 +83,60 @@ function isToolCapableApiBase(request: AgentRuntimeRequest): boolean {
   if (!apiBase) return false;
   if (request.authMode === "codex_auth") return false;
   return true;
+}
+
+function normalizeKimiJsonSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map((entry) => normalizeKimiJsonSchema(entry));
+  }
+  if (!schema || typeof schema !== "object") return schema;
+
+  const source = schema as Record<string, unknown>;
+  const normalized = Object.fromEntries(
+    Object.entries(source).map(([key, value]) => [
+      key,
+      normalizeKimiJsonSchema(value),
+    ]),
+  ) as Record<string, unknown>;
+
+  if (source.type !== undefined && Array.isArray(source.anyOf)) {
+    const parentType = normalizeKimiJsonSchema(source.type);
+    delete normalized.type;
+    normalized.anyOf = source.anyOf.map((variant) => {
+      const normalizedVariant = normalizeKimiJsonSchema(variant);
+      if (
+        !normalizedVariant ||
+        typeof normalizedVariant !== "object" ||
+        Array.isArray(normalizedVariant) ||
+        "type" in normalizedVariant
+      ) {
+        return normalizedVariant;
+      }
+      return {
+        type: parentType,
+        ...normalizedVariant,
+      };
+    });
+  }
+
+  return normalized;
+}
+
+function buildProviderFunctionTools(
+  request: AgentRuntimeRequest,
+  tools: ToolSpec[],
+) {
+  const serializedTools = buildOpenAIFunctionTools(tools);
+  if (detectProviderPreset(request.apiBase || "") !== "kimi") {
+    return serializedTools;
+  }
+  return serializedTools.map((tool) => ({
+    ...tool,
+    function: {
+      ...tool.function,
+      parameters: normalizeKimiJsonSchema(tool.function.parameters) as object,
+    },
+  }));
 }
 
 function hasPdfFileRef(message: AgentModelMessage): boolean {
@@ -427,7 +483,7 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           model: request.model,
           messages: resolvedMessages,
           ...buildPromptCachePayloadHints(request.contextCache),
-          tools: buildOpenAIFunctionTools(params.tools),
+          tools: buildProviderFunctionTools(request, params.tools),
           tool_choice: "auto",
           stream: true,
           stream_options: { include_usage: true },
