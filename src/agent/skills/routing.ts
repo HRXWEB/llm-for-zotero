@@ -242,9 +242,7 @@ export function resolveSkillRouting(
   const forcedIds = new Set(request.forcedSkillIds || []);
   const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
   const explicitSkillIds = Array.from(
-    new Set(
-      (request.forcedSkillIds || []).filter((id) => skillsById.has(id)),
-    ),
+    new Set((request.forcedSkillIds || []).filter((id) => skillsById.has(id))),
   );
   const automatic = Array.from(new Set(classifiedIds || [])).filter((id) => {
     const skill = skillsById.get(id);

@@ -25,7 +25,7 @@ function createReadTool(name: string): AgentToolDefinition<unknown, unknown> {
       name,
       description: `Read tool ${name}`,
       inputSchema: { type: "object", additionalProperties: true },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     validate: (args) => ({ ok: true, value: args ?? {} }),

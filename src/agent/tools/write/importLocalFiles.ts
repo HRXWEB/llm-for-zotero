@@ -74,7 +74,7 @@ export function createImportLocalFilesTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

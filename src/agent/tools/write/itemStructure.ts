@@ -95,7 +95,7 @@ export function createCreateItemsTool(
           libraryID: { type: "number" },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 
@@ -238,7 +238,7 @@ export function createReparentItemsTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 
@@ -370,7 +370,7 @@ export function createRelateItemsTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

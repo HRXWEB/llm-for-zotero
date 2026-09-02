@@ -2095,9 +2095,10 @@ export class AgentRuntime {
             execution.action,
           );
           if (!executionAllowed()) return lifecycleError();
-          const confirmedExecution = resolution.approved
-            ? await execution.execute(resolution.data)
-            : execution.deny(resolution.data);
+          // Resolution semantics belong to the rendered action schema. Some
+          // review-card controls deliberately carry approved:false while
+          // continuing the workflow without applying a mutation.
+          const confirmedExecution = await execution.execute(resolution);
           executedCall = {
             toolResult: confirmedExecution.result,
             toolDefinition: confirmedExecution.tool,
@@ -2115,7 +2116,11 @@ export class AgentRuntime {
         toolExecutionRecords.push({
           name: toolResult.name,
           ok: toolResult.ok,
-          mutability: executedCall.toolDefinition?.spec.mutability,
+          mutability:
+            executedCall.toolDefinition?.spec.executionClass ===
+            "external_effect"
+              ? "write"
+              : "read",
           effect: toolResult.effect,
           input: executedCall.input,
           content: toolResult.content,
@@ -2179,7 +2184,8 @@ export class AgentRuntime {
         );
         await planSession.recordToolResult({
           toolName: toolResult.name,
-          mutability: executedCall.toolDefinition?.spec.mutability,
+          executionClass: executedCall.toolDefinition?.spec.executionClass,
+          input: executedCall.input,
           result: toolResult,
           artifacts: toolResult.artifacts,
           runId,

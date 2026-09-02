@@ -128,7 +128,10 @@ describe("agent prompt envelope", function () {
     const messages = await buildAgentInitialMessages(request, [], []);
     const prompt = messages.map(messageText).join("\n");
     assert.include(prompt, "Exact title: Exact approved review title");
-    assert.include(prompt, "Required sections: Findings; Scope and limitations");
+    assert.include(
+      prompt,
+      "Required sections: Findings; Scope and limitations",
+    );
     assert.include(prompt, "submit_plan_document.title must match");
   });
 

@@ -986,7 +986,7 @@ export function createPaperReadTool(
           topK: { type: "number" },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
       exposure: "model",
       tier: "normal",

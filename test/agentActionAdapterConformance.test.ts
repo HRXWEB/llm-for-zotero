@@ -31,7 +31,7 @@ function createRegistry(executed: { value: boolean }): AgentToolRegistry {
       name: "library_update",
       description: "update library",
       inputSchema: { type: "object" },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: false,
     },
     validate: (input) => ({ ok: true, value: input as never }),
@@ -154,7 +154,7 @@ describe("Agent action adapter conformance", function () {
         ],
       };
       const prepared = {
-        mutability: "write" as const,
+        executionClass: "external_effect" as const,
         hasExplicitAdapter: true,
         proposals: [
           {

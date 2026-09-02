@@ -133,7 +133,7 @@ export function createDelegatingTool<TResult = unknown>(params: {
   name: string;
   description: string;
   inputSchema: object;
-  mutability: "read" | "write";
+  executionClass: "read" | "control" | "external_effect";
   requiresConfirmation: boolean;
   label: string;
   summaries?: NonNullable<AgentToolDefinition["presentation"]>["summaries"];
@@ -146,7 +146,7 @@ export function createDelegatingTool<TResult = unknown>(params: {
       name: params.name,
       description: params.description,
       inputSchema: params.inputSchema,
-      mutability: params.mutability,
+      executionClass: params.executionClass,
       requiresConfirmation: params.requiresConfirmation,
       exposure: "model",
       tier: params.tier || "normal",

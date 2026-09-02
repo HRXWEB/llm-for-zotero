@@ -1,5 +1,4 @@
 import type {
-  FormattedCitationCluster,
   PlanCitationSource,
   PlanDocument,
 } from "../../agent/documents/types";
@@ -84,7 +83,10 @@ export async function navigatePlanDocumentCitationSource(
     }
   }
 
-  const item = Zotero.Items.getByLibraryAndKey(source.libraryID, source.itemKey);
+  const item = Zotero.Items.getByLibraryAndKey(
+    source.libraryID,
+    source.itemKey,
+  );
   if (!item) return false;
   // selectItems() updates the library selection but does not necessarily make
   // it visible when the user clicked from a reader-backed document card.
@@ -120,54 +122,6 @@ function attachSourceNavigation(
       afterNavigate?.(),
     );
   });
-}
-
-function showCitationSourceChooser(params: {
-  doc: Document;
-  cluster: FormattedCitationCluster;
-}): void {
-  const backdrop = params.doc.createElement("div");
-  backdrop.className = "llm-plan-document-dialog-backdrop";
-  const dialog = params.doc.createElement("section");
-  dialog.className = "llm-plan-document-source-dialog";
-  dialog.setAttribute("role", "dialog");
-  dialog.setAttribute("aria-modal", "true");
-  const header = params.doc.createElement("div");
-  header.className = "llm-plan-document-dialog-header";
-  const title = params.doc.createElement("strong");
-  title.textContent = "Citation sources";
-  const close = params.doc.createElement("button");
-  close.type = "button";
-  close.className = "llm-plan-document-dialog-close";
-  close.textContent = "×";
-  close.setAttribute("aria-label", "Close source chooser");
-  const dismiss = () => backdrop.remove();
-  close.addEventListener("click", dismiss);
-  backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) dismiss();
-  });
-  header.append(title, close);
-  const list = params.doc.createElement("div");
-  list.className = "llm-plan-document-source-list";
-  for (const source of params.cluster.sources) {
-    const link = params.doc.createElement("a");
-    link.className = "llm-plan-document-source-link";
-    link.href = planDocumentCitationSourceHref(source);
-    link.textContent = getPlanDocumentItemTitle(
-      source.libraryID,
-      source.itemKey,
-    );
-    attachSourceNavigation(link, source, dismiss);
-    const detail = params.doc.createElement("span");
-    detail.textContent = source.locator
-      ? `PDF page ${source.locator.pageIndex + 1}`
-      : "Zotero item";
-    link.appendChild(detail);
-    list.appendChild(link);
-  }
-  dialog.append(header, list);
-  backdrop.appendChild(dialog);
-  (params.doc.body || params.doc.documentElement).appendChild(backdrop);
 }
 
 export function decoratePlanDocumentCitations(params: {
@@ -215,34 +169,6 @@ export function decoratePlanDocumentCitations(params: {
     link.dataset.llmPlanCitationSource = "true";
     link.title = "Open cited Zotero source";
     attachSourceNavigation(link, source);
-  }
-
-  const showText = params.doc.defaultView?.NodeFilter?.SHOW_TEXT || 4;
-  for (const cluster of params.document.citationBundle.clusters) {
-    if (cluster.sources.length < 2 || !cluster.text) continue;
-    const walker = params.doc.createTreeWalker(params.root, showText);
-    let textNode: Node | null = null;
-    while ((textNode = walker.nextNode())) {
-      const text = textNode.nodeValue || "";
-      const offset = text.indexOf(cluster.text);
-      if (offset < 0 || !textNode.parentNode) continue;
-      const fragment = params.doc.createDocumentFragment();
-      if (offset) fragment.append(text.slice(0, offset));
-      const button = params.doc.createElement("button");
-      button.type = "button";
-      button.className = "llm-plan-document-citation-cluster";
-      button.textContent = cluster.text;
-      button.title = "View citation sources";
-      button.addEventListener("click", () =>
-        showCitationSourceChooser({ doc: params.doc, cluster }),
-      );
-      fragment.appendChild(button);
-      if (offset + cluster.text.length < text.length) {
-        fragment.append(text.slice(offset + cluster.text.length));
-      }
-      textNode.parentNode.replaceChild(fragment, textNode);
-      break;
-    }
   }
 }
 

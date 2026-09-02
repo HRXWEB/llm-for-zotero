@@ -73,7 +73,7 @@ export function createWriteNotesBatchTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

@@ -67,7 +67,7 @@ export function createCiteExportTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
 

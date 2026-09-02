@@ -61,6 +61,8 @@ function validateLocator(params: {
   if (!params.source.locator) return;
   const trusted = params.evidence.some(
     (record) =>
+      record.version === 2 &&
+      Boolean(record.observationId) &&
       params.source.evidenceRefs.includes(record.evidenceRef) &&
       record.libraryID === params.source.libraryID &&
       record.itemKey === params.source.itemKey &&
@@ -122,6 +124,8 @@ export function formatPlanDocumentCitations(params: {
         const evidence = evidenceByRef.get(evidenceRef);
         if (
           !evidence ||
+          evidence.version !== 2 ||
+          !evidence.observationId ||
           evidence.libraryID !== source.libraryID ||
           evidence.itemKey !== source.itemKey
         ) {
@@ -217,7 +221,15 @@ export function formatPlanDocumentCitations(params: {
     (_token, citationId: string) => {
       const cluster = clusterById.get(citationId);
       if (!cluster) throw new Error(`Citation ${citationId} was not formatted`);
-      if (cluster.sources.length !== 1) return cluster.text;
+      if (cluster.sources.length !== 1) {
+        const sourceLinks = cluster.sources
+          .map(
+            (source, index) =>
+              `[${index + 1}](${buildPlanCitationSourceUri(source)})`,
+          )
+          .join(" ");
+        return `${cluster.text} ${sourceLinks}`;
+      }
       return `[${escapeMarkdownLabel(cluster.text)}](${buildPlanCitationSourceUri(cluster.sources[0])})`;
     },
   );

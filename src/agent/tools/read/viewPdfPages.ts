@@ -99,7 +99,7 @@ export function createViewPdfPagesTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: true,
     },
     presentation: {

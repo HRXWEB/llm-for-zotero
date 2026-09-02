@@ -24,7 +24,7 @@ export function createSelfContainedTestTool(): AgentWriteToolDefinition<
           target: { type: "string" },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     guidance: {

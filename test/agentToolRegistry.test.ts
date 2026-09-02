@@ -5,6 +5,18 @@ import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import type { AgentToolContext } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
+const describeTestMutation = () => [
+  {
+    id: "settings:test",
+    proofDomain: "zotero_state" as const,
+    capability: "zotero.settings" as const,
+    operation: "settings_update" as const,
+    source: "zotero_native" as const,
+    requestedTargets: [],
+    destinationCollectionIds: [],
+  },
+];
+
 describe("AgentToolRegistry", function () {
   const originalZotero = globalThis.Zotero;
 
@@ -51,7 +63,7 @@ describe("AgentToolRegistry", function () {
         name: "zotero_script",
         description: "run a Zotero script",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: true,
       },
       validate: () => {
@@ -98,7 +110,7 @@ describe("AgentToolRegistry", function () {
         name: "mutate_library",
         description: "apply changes",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: true,
       },
       validate: (args) =>
@@ -112,6 +124,7 @@ describe("AgentToolRegistry", function () {
               },
             }
           : { ok: false, error: "operations required" },
+      describeAction: describeTestMutation,
       createPendingAction: (input) => ({
         toolName: "mutate_library",
         title: "Apply changes?",
@@ -198,8 +211,11 @@ describe("AgentToolRegistry", function () {
     );
     assert.equal(result.deny().result.ok, false);
     const approved = await result.execute({
-      selectedOperations: [{ id: "op-1", checked: true }],
-      operationsJson: JSON.stringify([{ id: "op-1", type: "apply_tags" }]),
+      approved: true,
+      data: {
+        selectedOperations: [{ id: "op-1", checked: true }],
+        operationsJson: JSON.stringify([{ id: "op-1", type: "apply_tags" }]),
+      },
     });
     assert.equal(approved.result.ok, true);
     assert.deepEqual(approved.result.content, {
@@ -219,7 +235,7 @@ describe("AgentToolRegistry", function () {
         name: "mutate_library",
         description: "apply changes",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: true,
       },
       validate: () => ({
@@ -277,11 +293,12 @@ describe("AgentToolRegistry", function () {
         name: "mutate_library",
         description: "apply changes",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: true,
       },
       validate: () => ({ ok: true, value: {} }),
       planMutation: () => ({ effect: "write", reversibility: "full" }),
+      describeAction: describeTestMutation,
       acceptInheritedApproval: () => true,
       createPendingAction: () => ({
         toolName: "mutate_library",
@@ -325,7 +342,7 @@ describe("AgentToolRegistry", function () {
         name: "edit_current_note",
         description: "edit the active note",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: true,
       },
       isAvailable: (request) => Boolean(request.activeNoteContext),
@@ -382,7 +399,7 @@ describe("AgentToolRegistry", function () {
         name: "read_tool",
         description: "read",
         inputSchema: { type: "object" },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
@@ -393,7 +410,7 @@ describe("AgentToolRegistry", function () {
         name: "write_tool_list",
         description: "list write-tool state",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
@@ -446,11 +463,12 @@ describe("AgentToolRegistry", function () {
         name: "write_tool",
         description: "write",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
       planMutation: () => ({ effect: "write", reversibility: "full" }),
+      describeAction: describeTestMutation,
       execute: async () => ({
         content: { value: "written" },
         effect: "applied",
@@ -484,7 +502,7 @@ describe("AgentToolRegistry", function () {
         name: "slow_read",
         description: "read",
         inputSchema: { type: "object" },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
@@ -524,7 +542,7 @@ describe("AgentToolRegistry", function () {
         name: "unknown_write",
         description: "write",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
@@ -546,6 +564,91 @@ describe("AgentToolRegistry", function () {
     );
   });
 
+  it("runs confirmed control operations without an action contract or mutation receipt", async function () {
+    const registry = new AgentToolRegistry();
+    let executions = 0;
+    registry.register({
+      spec: {
+        name: "plan_control",
+        description: "change plan metadata",
+        inputSchema: { type: "object" },
+        executionClass: "control",
+        requiresConfirmation: true,
+        interaction: "user_input",
+      },
+      validate: () => ({ ok: true, value: {} }),
+      createPendingAction: () => ({
+        toolName: "plan_control",
+        title: "Continue?",
+        confirmLabel: "Continue",
+        cancelLabel: "Cancel",
+        fields: [],
+        actions: [
+          { id: "continue", label: "Continue", approved: true },
+          { id: "cancel", label: "Cancel", approved: false },
+        ],
+        defaultActionId: "continue",
+        cancelActionId: "cancel",
+      }),
+      execute: async () => {
+        executions += 1;
+        return { updated: true };
+      },
+    });
+
+    const prepared = await registry.prepareExecution(
+      { id: "control", name: "plan_control", arguments: {} },
+      baseContext,
+    );
+    assert.equal(prepared.kind, "confirmation");
+    if (prepared.kind !== "confirmation") return;
+    const executed = await prepared.execute({ approved: true });
+    assert.equal(executions, 1);
+    assert.isTrue(executed.result.ok);
+    assert.deepEqual(executed.result.actionReceipts, []);
+  });
+
+  it("blocks an untyped external effect before execution and fabricates no command receipt", async function () {
+    const registry = new AgentToolRegistry();
+    let executions = 0;
+    registry.register({
+      spec: {
+        name: "unknown_external_effect",
+        description: "unknown write",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: () => ({ ok: true, value: {} }),
+      planMutation: () => ({ effect: "write", reversibility: "none" }),
+      execute: async () => {
+        executions += 1;
+        return { content: { ok: true }, effect: "applied" as const };
+      },
+    });
+
+    const prepared = await registry.prepareExecution(
+      {
+        id: "unknown-external",
+        name: "unknown_external_effect",
+        arguments: {},
+      },
+      baseContext,
+    );
+    assert.equal(prepared.kind, "result");
+    assert.equal(executions, 0);
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
+    assert.notInclude(
+      prepared.execution.result.actionReceipts.map((entry) => entry.operation),
+      "command_execute",
+    );
+    assert.include(
+      JSON.stringify(prepared.execution.result.content),
+      "no typed action adapter",
+    );
+  });
+
   it("fails closed when Agent mode has no configured contract verifier", async function () {
     const registry = new AgentToolRegistry();
     let executed = false;
@@ -554,10 +657,11 @@ describe("AgentToolRegistry", function () {
         name: "unverified_write",
         description: "write",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
+      describeAction: describeTestMutation,
       execute: async () => {
         executed = true;
         return { content: { ok: true }, effect: "applied" as const };

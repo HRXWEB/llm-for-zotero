@@ -32,7 +32,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
       name: "read_paper",
       description: "search",
       inputSchema: { type: "object" },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
   ];
@@ -308,7 +308,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
           name: "search_paper",
           description: "search",
           inputSchema: { type: "object" },
-          mutability: "read",
+          executionClass: "read",
           requiresConfirmation: false,
         },
       ],

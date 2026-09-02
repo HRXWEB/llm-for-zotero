@@ -15,7 +15,10 @@ import {
   listScopeSnapshotItems,
   loadResearchJobForExecution,
 } from "../research/store";
-import type { ResearchCorpusItem } from "../research/types";
+import type {
+  ResearchCorpusItem,
+  ResearchEvidenceRecord,
+} from "../research/types";
 import { getResearchItemFingerprints } from "../research/scopeSnapshot";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { formatPlanDocumentCitations } from "./citationService";
@@ -333,7 +336,10 @@ async function resolveVerifiedQuotes(params: {
   };
 }
 
-function coverageItem(item: ResearchCorpusItem): DocumentCoverageItem {
+function coverageItem(
+  item: ResearchCorpusItem,
+  evidence: readonly ResearchEvidenceRecord[],
+): DocumentCoverageItem {
   const liveItem = Zotero.Items.getByLibraryAndKey(
     item.libraryID,
     item.itemKey,
@@ -357,12 +363,23 @@ function coverageItem(item: ResearchCorpusItem): DocumentCoverageItem {
     title,
     status,
     reason: item.decisionReason,
-    evidenceDepth:
-      status === "included" && item.readable
-        ? "body"
-        : item.indexed
-          ? "abstract"
-          : "metadata",
+    evidenceDepth: (() => {
+      const kinds = evidence
+        .filter(
+          (entry) =>
+            entry.libraryID === item.libraryID &&
+            entry.itemKey === item.itemKey &&
+            entry.version === 2 &&
+            Boolean(entry.observationId),
+        )
+        .map((entry) => entry.sourceKind);
+      if (kinds.some((kind) => ["body", "figure", "quote"].includes(kind))) {
+        return "body";
+      }
+      if (kinds.includes("abstract")) return "abstract";
+      if (kinds.includes("metadata")) return "metadata";
+      return "none";
+    })(),
   };
 }
 
@@ -668,7 +685,7 @@ export class PlanDocumentFinalizer {
           await listResearchCorpusItems({
             researchJobId: researchJob.researchJobId,
           })
-        ).map(coverageItem)
+        ).map((item) => coverageItem(item, researchEvidence))
       : [];
     const validation: PlanDocument["validation"] = {
       integrityValidated: true,
@@ -730,13 +747,14 @@ export class PlanDocumentFinalizer {
       updatedAt: now,
     };
     const integrityEvidence: TaskEvidence = {
-      version: 2,
+      version: 3,
       evidenceId: `${documentId}:integrity`,
       executionId: ledger.executionId,
       taskId: task.taskId,
       kind: "document_integrity",
       verified: true,
       requirementId: integrityRequirement.requirementId,
+      criterionIds: integrityRequirement.criterionIds,
       contractDigest: integrityRequirement.contractDigest,
       payload: {
         type: "document_integrity",
@@ -781,13 +799,14 @@ export async function attachPublishedDocumentEvidence(params: {
     throw new Error("Document publication requirement not found");
   }
   const evidence: TaskEvidence = {
-    version: 2,
+    version: 3,
     evidenceId: `${params.document.documentId}:published`,
     executionId: ledger.executionId,
     taskId: task.taskId,
     kind: "document_published",
     verified: true,
     requirementId: requirement.requirementId,
+    criterionIds: requirement.criterionIds,
     contractDigest: requirement.contractDigest,
     payload: {
       type: "document_published",

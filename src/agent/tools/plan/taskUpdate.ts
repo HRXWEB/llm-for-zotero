@@ -5,7 +5,11 @@ import type {
 } from "../../types";
 import { planExecutionCoordinator } from "../../plans/coordinator";
 import { listTaskEvidence } from "../../plans/store";
-import type { TaskEvidence } from "../../plans/types";
+import type {
+  PlanAcceptanceCriterion,
+  PlanCompletionRequirementKind,
+  TaskEvidence,
+} from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
 
 type TaskUpdateInput = {
@@ -15,7 +19,7 @@ type TaskUpdateInput = {
     parentTaskId?: string;
     content?: string;
     activeForm?: string;
-    acceptanceCriteria?: string[];
+    acceptanceCriteria?: PlanAcceptanceCriterion[];
     expectedEffect?: "read" | "artifact" | "mutation" | "reasoning";
     expectedCapability?: string;
     targetIds?: string[];
@@ -34,6 +38,15 @@ const STATUSES = new Set<ExecutionTaskStatus>([
   "failed",
   "skipped",
   "cancelled",
+]);
+const VERIFIERS = new Set<PlanCompletionRequirementKind>([
+  "verified_read",
+  "research_coverage",
+  "document_integrity",
+  "document_published",
+  "mutation_receipts",
+  "bounded_reasoning",
+  "user_decision",
 ]);
 
 function validateTaskUpdateInput(
@@ -63,6 +76,29 @@ function validateTaskUpdateInput(
     }
     ids.add(taskId);
     if (status === "in_progress") active += 1;
+    const acceptanceCriteria = Array.isArray(raw.acceptanceCriteria)
+      ? raw.acceptanceCriteria.flatMap((value) => {
+          if (!validateObject<Record<string, unknown>>(value)) return [];
+          const criterionId =
+            typeof value.criterionId === "string"
+              ? value.criterionId.trim()
+              : "";
+          const description =
+            typeof value.description === "string"
+              ? value.description.trim()
+              : "";
+          const verifier = value.verifier as PlanCompletionRequirementKind;
+          return criterionId && description && VERIFIERS.has(verifier)
+            ? [{ criterionId, description, verifier }]
+            : [];
+        })
+      : undefined;
+    if (
+      Array.isArray(raw.acceptanceCriteria) &&
+      acceptanceCriteria?.length !== raw.acceptanceCriteria.length
+    ) {
+      return fail(`tasks[${index}].acceptanceCriteria is invalid`);
+    }
     tasks.push({
       taskId,
       status,
@@ -87,12 +123,7 @@ function validateTaskUpdateInput(
         typeof raw.activeForm === "string"
           ? raw.activeForm.trim() || undefined
           : undefined,
-      acceptanceCriteria: Array.isArray(raw.acceptanceCriteria)
-        ? raw.acceptanceCriteria.filter(
-            (value): value is string =>
-              typeof value === "string" && Boolean(value.trim()),
-          )
-        : undefined,
+      acceptanceCriteria,
       expectedEffect: ["read", "artifact", "mutation", "reasoning"].includes(
         String(raw.expectedEffect || ""),
       )
@@ -149,7 +180,19 @@ export function createTaskUpdateTool(): AgentToolDefinition<
                 activeForm: { type: "string" },
                 acceptanceCriteria: {
                   type: "array",
-                  items: { type: "string" },
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["criterionId", "description", "verifier"],
+                    properties: {
+                      criterionId: { type: "string" },
+                      description: { type: "string" },
+                      verifier: {
+                        type: "string",
+                        enum: Array.from(VERIFIERS),
+                      },
+                    },
+                  },
                 },
                 expectedEffect: {
                   type: "string",
@@ -162,7 +205,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
           },
         },
       },
-      mutability: "read",
+      executionClass: "control",
       requiresConfirmation: false,
     },
     isAvailable: (request) => request.planContext?.phase === "executing",
@@ -214,22 +257,23 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         }
         if (!current) throw new Error(`Unknown taskId: ${request.taskId}`);
         if (request.reasoningAssertion) {
-          if (current.expectedEffect !== "reasoning") {
-            throw new Error(
-              "Reasoning assertions cannot verify an external-effect task",
-            );
-          }
           const requirement = current.completionRequirements?.find(
             (entry) => entry.kind === "bounded_reasoning",
           );
+          if (!requirement) {
+            throw new Error(
+              "Reasoning assertions may attest only criteria declared with the bounded_reasoning verifier",
+            );
+          }
           const evidence: TaskEvidence = {
-            version: requirement ? 2 : 1,
+            version: requirement ? 3 : 1,
             evidenceId: `${plan.executionId}:${request.taskId}:reasoning:${Date.now()}`,
             executionId: plan.executionId,
             taskId: request.taskId,
             kind: "reasoning_assertion",
             verified: true,
             requirementId: requirement?.requirementId,
+            criterionIds: requirement?.criterionIds,
             contractDigest: requirement?.contractDigest,
             payload: requirement
               ? {

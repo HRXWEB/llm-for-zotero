@@ -36,11 +36,22 @@ describe("mutation-plan confirmation policy", function () {
         name: "future_write",
         description: "test write",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
       ...(plan ? { planMutation: async () => plan } : {}),
+      describeAction: () => [
+        {
+          id: "settings:test",
+          proofDomain: "zotero_state",
+          capability: "zotero.settings",
+          operation: "settings_update",
+          source: "zotero_native",
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        },
+      ],
       createPendingAction: () => ({
         toolName: "future_write",
         title: "Review write",

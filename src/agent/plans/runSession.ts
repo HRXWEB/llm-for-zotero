@@ -15,7 +15,7 @@ import {
   loadLatestPlanDocumentForExecution,
   loadPlanDocumentOutbox,
 } from "../documents/store";
-import { extractVerifiedReadSources } from "./readEvidence";
+import { createTrustedReadObservations } from "./readObservation";
 
 export function buildPlanFinalCorrection(
   failure: string,
@@ -29,7 +29,6 @@ export function buildPlanFinalCorrection(
 export async function recordMcpPlanEvidence(
   plan: PlanRuntimeContext | undefined,
   event: ZoteroMcpToolActivityEvent,
-  options: { autoAdvance?: boolean } = {},
 ): Promise<PlanExecutionLedger | null> {
   if (plan?.phase !== "executing" || event.phase !== "completed" || !event.ok) {
     return null;
@@ -57,13 +56,14 @@ export async function recordMcpPlanEvidence(
       (entry) => entry.kind === requirementKind,
     );
     ledger = await planExecutionCoordinator.attachEvidence({
-      version: requirement ? 2 : 1,
+      version: requirement ? 3 : 1,
       evidenceId: `${plan.executionId}:${taskId}:${kind}:${event.requestId}`,
       executionId: plan.executionId,
       taskId,
       kind,
       verified: true,
       requirementId: requirement?.requirementId,
+      criterionIds: requirement?.criterionIds,
       contractDigest: requirement?.contractDigest,
       payload:
         payload ||
@@ -72,6 +72,7 @@ export async function recordMcpPlanEvidence(
               type: "verified_read",
               reference,
               sources: event.verifiedReadSources,
+              observations: event.readObservations,
             }
           : requirement?.kind === "bounded_reasoning"
             ? { type: "bounded_reasoning", assertion: summary }
@@ -103,21 +104,6 @@ export async function recordMcpPlanEvidence(
         })),
       },
     );
-  }
-  if (options.autoAdvance) {
-    try {
-      ledger = await planExecutionCoordinator.requestTransition({
-        executionId: plan.executionId,
-        taskId,
-        toStatus: "completed",
-        requestedBy: plan.provider,
-        reason: `Verified ${event.toolName} evidence`,
-      });
-      ledger = await planExecutionCoordinator.startNextTask(plan.executionId);
-    } catch {
-      // Evidence may be partial for the active acceptance criteria. Keep the
-      // task active until another verified result or provider transition.
-    }
   }
   return ledger;
 }
@@ -177,6 +163,18 @@ export class PlanExecutionRunSession {
         userMessage: "The approved plan artifact is unavailable or changed.",
       };
     }
+    if (
+      artifact.version !== 4 ||
+      ledger.version !== 2 ||
+      ledger.tasks.some((task) => task.version !== 2) ||
+      (artifact.actionContract && artifact.actionContract.version !== 3)
+    ) {
+      return {
+        kind: "failed",
+        userMessage:
+          "This plan uses a legacy execution schema and is history-only. Create and approve a new plan to continue.",
+      };
+    }
     if (artifact.actionContract) {
       this.request.actionContract = artifact.actionContract;
       if (
@@ -219,7 +217,8 @@ export class PlanExecutionRunSession {
 
   async recordToolResult(params: {
     toolName: string;
-    mutability?: "read" | "write";
+    executionClass?: "read" | "control" | "external_effect";
+    input?: unknown;
     result: AgentToolResult;
     artifacts?: AgentToolArtifact[];
     runId: string;
@@ -237,8 +236,14 @@ export class PlanExecutionRunSession {
         receipts: params.result.actionReceipts,
       });
     }
-    if (params.result.ok && params.mutability === "read") {
+    if (params.result.ok && params.executionClass === "read") {
       const reference = `${params.runId}:${params.result.callId}`;
+      const observations = await createTrustedReadObservations({
+        toolName: params.toolName,
+        callId: params.result.callId,
+        input: params.input,
+        result: params.result.content,
+      });
       ledger = await planExecutionCoordinator.attachEvidence(
         this.makeEvidence({
           executionId: plan.executionId,
@@ -248,7 +253,22 @@ export class PlanExecutionRunSession {
           payload: {
             type: "verified_read",
             reference,
-            sources: extractVerifiedReadSources(params.result.content),
+            sources: observations.map(
+              ({
+                libraryID,
+                itemKey,
+                attachmentItemKey,
+                pageIndex,
+                sourceFingerprint,
+              }) => ({
+                libraryID,
+                itemKey,
+                attachmentItemKey,
+                pageIndex,
+                sourceFingerprint,
+              }),
+            ),
+            observations,
           },
           reference,
           summary: `Verified result from ${params.toolName}`,
@@ -377,7 +397,7 @@ export class PlanExecutionRunSession {
         this.correctionUsed = true;
         const artifact = await loadPlanArtifact(plan.planId, plan.revision);
         const requiresDocument =
-          artifact?.version === 3 &&
+          artifact?.version === 4 &&
           artifact.contract?.deliverable.kind === "document";
         return {
           kind: "correct",
@@ -401,10 +421,11 @@ export class PlanExecutionRunSession {
       (entry) => entry.kind === requirementKind,
     );
     return {
-      version: requirement ? 2 : 1,
+      version: requirement ? 3 : 1,
       evidenceId: `${params.executionId}:${params.taskId}:${params.kind}:${createdAt}:${Math.random().toString(36).slice(2, 7)}`,
       ...params,
       requirementId: requirement?.requirementId,
+      criterionIds: requirement?.criterionIds,
       contractDigest: requirement?.contractDigest,
       payload:
         params.payload ||

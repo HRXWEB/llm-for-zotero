@@ -147,7 +147,7 @@ describe("gemini 3.x reasoning profiles", function () {
         name: "query_library",
         description: "search",
         inputSchema: { type: "object" },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
     ];

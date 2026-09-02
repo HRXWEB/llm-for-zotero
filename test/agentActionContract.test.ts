@@ -238,7 +238,7 @@ function mutationTool(): AgentToolDefinition<any, unknown> {
       name: "library_update",
       description: "test",
       inputSchema: { type: "object" },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     validate: (input) => ({ ok: true, value: input }),

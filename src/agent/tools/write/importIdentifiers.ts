@@ -56,7 +56,7 @@ export function createImportIdentifiersTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

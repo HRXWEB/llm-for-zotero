@@ -41,8 +41,12 @@ import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type {
   ExecutionTask,
   TaskEvidence,
-  VerifiedReadSource,
+  TrustedReadObservation,
 } from "../src/agent/plans/types";
+import {
+  OPERATION_CATALOG,
+  operationAuthorityIsConsistent,
+} from "../src/agent/contracts/operationCatalog";
 
 const policy = resolveResearchPolicy("plan_research");
 
@@ -215,6 +219,39 @@ describe("Plan Mode research architecture v3", function () {
     assert.deepEqual(contract.researchPolicy, policy);
   });
 
+  it("rejects empty, mismatched, or silently widened research scopes", function () {
+    const contract = (scope: unknown) => ({
+      investigation: { ...investigation(), scope },
+      deliverable: { kind: "answer" },
+      researchPolicy: policy,
+    });
+    assert.throws(
+      () =>
+        decodePlanContract(
+          contract({ libraryID: 1, kind: "items", itemKeys: [] }),
+        ),
+      /requires itemKeys/,
+    );
+    assert.throws(
+      () =>
+        decodePlanContract(
+          contract({
+            libraryID: 1,
+            kind: "library",
+            itemKeys: ["AAAA1111"],
+          }),
+        ),
+      /does not accept filters/,
+    );
+    assert.throws(
+      () => decodePlanContract(contract({ libraryID: 1, kind: "mixed" })),
+      /requires at least one filter/,
+    );
+    assert.doesNotThrow(() =>
+      decodePlanContract(contract({ libraryID: 1, kind: "library" })),
+    );
+  });
+
   it("deep-decodes action authority and rejects inconsistent capability pairs", function () {
     const valid = {
       version: 2,
@@ -250,6 +287,38 @@ describe("Plan Mode research architecture v3", function () {
         }),
       /authority is inconsistent/,
     );
+    assert.throws(
+      () =>
+        decodeActionContract({
+          ...valid,
+          obligations: [{ ...valid.obligations[0], proofDomain: "execution" }],
+        }),
+      /authority is inconsistent/,
+    );
+  });
+
+  it("defines one exhaustive capability and proof domain for every operation", function () {
+    for (const [operation, authority] of Object.entries(OPERATION_CATALOG)) {
+      assert.isTrue(
+        operationAuthorityIsConsistent({
+          operation,
+          capability: authority.capability,
+          proofDomain: authority.proofDomain,
+        }),
+        operation,
+      );
+      assert.isFalse(
+        operationAuthorityIsConsistent({
+          operation,
+          capability: authority.capability,
+          proofDomain:
+            authority.proofDomain === "execution"
+              ? "zotero_state"
+              : "execution",
+        }),
+        operation,
+      );
+    }
   });
 
   it("never lets an inferred contract pre-authorize research-selected targets", function () {
@@ -407,31 +476,47 @@ describe("Plan Mode research architecture v3", function () {
     const evidence = (
       reference: string,
       createdAt: number,
-      sources: VerifiedReadSource[],
+      observations: TrustedReadObservation[],
     ): TaskEvidence => ({
-      version: 1,
+      version: 3,
       evidenceId: reference,
       executionId: "execution",
       taskId: "task",
       kind: "verified_read",
       verified: true,
       reference,
-      payload: { type: "verified_read", reference, sources },
+      payload: { type: "verified_read", reference, observations },
       createdAt,
+    });
+    const observation = (
+      observationId: string,
+      capabilities: TrustedReadObservation["capabilities"],
+      extra: Partial<TrustedReadObservation> = {},
+    ): TrustedReadObservation => ({
+      version: 1,
+      observationId,
+      issuer: "zotero_host",
+      toolName: "paper_read",
+      callDigest: `sha256:${observationId}:call`,
+      inputDigest: `sha256:${observationId}:input`,
+      resultDigest: `sha256:${observationId}:result`,
+      libraryID: 1,
+      itemKey: "AAAA1111",
+      capabilities,
+      certificateDigest: `sha256:${observationId}:certificate`,
+      ...extra,
     });
     const selected = selectPreferredVerifiedReads(
       [
         evidence("body-read", 1, [
-          {
-            libraryID: 1,
-            itemKey: "AAAA1111",
+          observation("body-observation", ["body"], {
             attachmentItemKey: "PDFP2222",
             pageIndex: 4,
             sourceFingerprint: "pdfjs:document-1",
-          },
+          }),
         ]),
         evidence("later-metadata-read", 2, [
-          { libraryID: 1, itemKey: "AAAA1111" },
+          observation("metadata-observation", ["metadata"]),
         ]),
       ],
       new Set(["1:AAAA1111"]),
@@ -470,17 +555,28 @@ describe("Plan Mode research architecture v3", function () {
 
   it("requires every bound mutation obligation receipt", function () {
     const task: ExecutionTask = {
-      version: 1,
+      version: 2,
       taskId: "t",
       executionId: "e",
       planStepId: "s",
       kind: "required_step",
       content: "Apply changes",
       activeForm: "Applying changes",
-      acceptanceCriteria: ["Every target is verified"],
+      acceptanceCriteria: [
+        {
+          criterionId: "c1",
+          description: "Every target is verified",
+          verifier: "mutation_receipts",
+        },
+      ],
       expectedEffect: "mutation",
       completionRequirements: [
-        { requirementId: "r", kind: "mutation_receipts", contractDigest: "d" },
+        {
+          requirementId: "r",
+          kind: "mutation_receipts",
+          criterionIds: ["c1"],
+          contractDigest: "d",
+        },
       ],
       obligationIds: ["o1", "o2"],
       status: "in_progress",
@@ -491,13 +587,14 @@ describe("Plan Mode research architecture v3", function () {
       updatedAt: 1,
     };
     const evidence = (obligationId: string): TaskEvidence => ({
-      version: 2,
+      version: 3,
       evidenceId: `e-${obligationId}`,
       executionId: "e",
       taskId: "t",
       kind: "mutation_receipt",
       verified: true,
       requirementId: "r",
+      criterionIds: ["c1"],
       contractDigest: "d",
       receipt: {
         version: 2,
@@ -536,6 +633,83 @@ describe("Plan Mode research architecture v3", function () {
           },
         }),
       /authority is inconsistent/,
+    );
+  });
+
+  it("requires terminal research coverage from the same task and contract", function () {
+    const task: ExecutionTask = {
+      version: 2,
+      taskId: "research-task",
+      executionId: "execution",
+      planStepId: "research-step",
+      kind: "required_step",
+      content: "Research",
+      activeForm: "Researching",
+      acceptanceCriteria: [
+        {
+          criterionId: "coverage",
+          description: "Cover the approved corpus",
+          verifier: "research_coverage",
+        },
+      ],
+      expectedEffect: "read",
+      completionRequirements: [
+        {
+          requirementId: "coverage-requirement",
+          kind: "research_coverage",
+          criterionIds: ["coverage"],
+          contractDigest: "sha256:contract",
+        },
+      ],
+      obligationIds: [],
+      status: "in_progress",
+      attemptCount: 1,
+      evidenceIds: [],
+      failureReasons: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const evidence = (
+      coverageStatus: "complete" | "complete_with_limitations" | "partial",
+      overrides: Partial<TaskEvidence> = {},
+    ): TaskEvidence => ({
+      version: 3,
+      evidenceId: `coverage-${coverageStatus}`,
+      executionId: "execution",
+      taskId: "research-task",
+      kind: "research_coverage",
+      verified: true,
+      requirementId: "coverage-requirement",
+      criterionIds: ["coverage"],
+      contractDigest: "sha256:contract",
+      payload: {
+        type: "research_coverage",
+        researchJobId: "research",
+        coverageStatus,
+        totalItems: 10,
+        screenedItems: coverageStatus === "partial" ? 5 : 10,
+        candidateItems: 4,
+        deepReadCompleted: coverageStatus === "partial" ? 2 : 4,
+      },
+      createdAt: 1,
+      ...overrides,
+    });
+
+    assert.throws(() =>
+      assertTaskCompletionEvidence(task, [evidence("partial")]),
+    );
+    assert.throws(() =>
+      assertTaskCompletionEvidence(task, [
+        evidence("complete", { taskId: "another-task" }),
+      ]),
+    );
+    assert.doesNotThrow(() =>
+      assertTaskCompletionEvidence(task, [evidence("complete")]),
+    );
+    assert.doesNotThrow(() =>
+      assertTaskCompletionEvidence(task, [
+        evidence("complete_with_limitations"),
+      ]),
     );
   });
 

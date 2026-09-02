@@ -69,7 +69,7 @@ export function readLatestActionContractCheckpoint(
       | AgentActionProgressLedger
       | undefined;
     if (
-      contract?.version === 2 &&
+      contract?.version === 3 &&
       typeof contract.id === "string" &&
       Array.isArray(contract.obligations) &&
       progress?.version === 1 &&

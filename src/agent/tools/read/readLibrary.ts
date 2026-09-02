@@ -121,7 +121,7 @@ export function createReadLibraryTool(
           maxAnnotations: { type: "number" },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     presentation: {

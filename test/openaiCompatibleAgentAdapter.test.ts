@@ -26,7 +26,7 @@ describe("OpenAICompatibleAgentAdapter", function () {
       name: "read_paper",
       description: "read paper",
       inputSchema: { type: "object" },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
   ];

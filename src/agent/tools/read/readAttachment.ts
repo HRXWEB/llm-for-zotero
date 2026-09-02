@@ -72,7 +72,7 @@ export function createReadAttachmentTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: true,
     },
     presentation: {

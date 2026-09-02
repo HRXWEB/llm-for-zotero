@@ -100,37 +100,104 @@ export async function getResearchItemFingerprints(
   };
 }
 
-async function resolveScopeItemIds(
+export async function resolveResearchScopeItemIds(
   gateway: ZoteroGateway,
   scope: ResearchScopeSpec,
 ): Promise<number[]> {
-  const explicitIds = (scope.itemKeys || [])
-    .map((itemKey) => itemByLibraryAndKey(scope.libraryID, itemKey)?.id || 0)
-    .filter((itemId) => itemId > 0);
+  const itemKeys = "itemKeys" in scope ? scope.itemKeys || [] : [];
+  const collectionIds =
+    "collectionIds" in scope ? scope.collectionIds || [] : [];
+  const tagNames = "tagNames" in scope ? scope.tagNames || [] : [];
   if (
     scope.kind === "library" &&
-    !scope.collectionIds?.length &&
-    !scope.tagNames?.length &&
-    !explicitIds.length
+    ("itemKeys" in scope ||
+      "collectionIds" in scope ||
+      "tagNames" in scope ||
+      "includeAutomaticTags" in scope)
   ) {
+    throw new Error("Whole-library research scope does not accept filters");
+  }
+  if (scope.kind === "items" && !itemKeys.length) {
+    throw new Error("Item research scope requires nonempty item keys");
+  }
+  if (scope.kind === "collections" && !collectionIds.length) {
+    throw new Error("Collection research scope requires collection filters");
+  }
+  if (scope.kind === "tags" && !tagNames.length) {
+    throw new Error("Tag research scope requires tag filters");
+  }
+  if (
+    scope.kind === "mixed" &&
+    !itemKeys.length &&
+    !collectionIds.length &&
+    !tagNames.length
+  ) {
+    throw new Error("Mixed research scope requires at least one filter");
+  }
+  const resolvedKeys = itemKeys.map((itemKey) => ({
+    itemKey,
+    itemId: itemByLibraryAndKey(scope.libraryID, itemKey)?.id || 0,
+  }));
+  const missingKeys = resolvedKeys
+    .filter((entry) => entry.itemId <= 0)
+    .map((entry) => entry.itemKey);
+  if (missingKeys.length) {
+    throw new Error(
+      `Research scope contains unresolved item keys: ${missingKeys.join(", ")}`,
+    );
+  }
+  const explicitIds = resolvedKeys.map((entry) => entry.itemId);
+  if (scope.kind === "library") {
     const listed = await gateway.listBibliographicItemTargets({
       libraryID: scope.libraryID,
     });
     return listed.items.map((item) => item.itemId);
   }
-  const tagContexts: TagContextRef[] = (scope.tagNames || []).map((name) => ({
+  const tagContexts: TagContextRef[] = tagNames.map((name) => ({
     name,
     normalizedName: name.trim().toLowerCase(),
     libraryID: scope.libraryID,
-    includeAutomatic: scope.includeAutomaticTags === true,
+    includeAutomatic:
+      "includeAutomaticTags" in scope && scope.includeAutomaticTags === true,
   }));
   const resolved = await gateway.resolveLibraryScopeItemIds({
     libraryID: scope.libraryID,
     itemIds: explicitIds,
-    collectionIds: [...(scope.collectionIds || [])],
+    collectionIds: [...collectionIds],
     tagContexts,
   });
+  if (!resolved.itemIds.length) {
+    throw new Error(
+      `Explicit research scope resolved to zero items${
+        itemKeys.length ? `; requested item keys: ${itemKeys.join(", ")}` : ""
+      }`,
+    );
+  }
   return resolved.itemIds;
+}
+
+export function assertResearchScopeTargets(params: {
+  scope: ResearchScopeSpec;
+  targetItemIds: readonly number[];
+}): void {
+  if (params.scope.kind === "library") return;
+  const bibliographicIds = new Set(params.targetItemIds);
+  const explicitItemKeys =
+    "itemKeys" in params.scope ? params.scope.itemKeys || [] : [];
+  const nonBibliographicKeys = explicitItemKeys.filter((itemKey) => {
+    const item = itemByLibraryAndKey(params.scope.libraryID, itemKey);
+    return !item || !bibliographicIds.has(item.id);
+  });
+  if (nonBibliographicKeys.length) {
+    throw new Error(
+      `Research scope item keys are not bibliographic corpus items: ${nonBibliographicKeys.join(", ")}`,
+    );
+  }
+  if (!params.targetItemIds.length) {
+    throw new Error(
+      "Explicit research scope resolved to zero bibliographic items",
+    );
+  }
 }
 
 export async function materializeResearchScopeSnapshot(params: {
@@ -146,9 +213,16 @@ export async function materializeResearchScopeSnapshot(params: {
 }> {
   const createdAt = params.now ?? Date.now();
   const snapshotId = `${params.planId}:r${params.revision}:scope`;
-  const targets = params.gateway.getBibliographicItemTargetsByItemIds(
-    await resolveScopeItemIds(params.gateway, params.scope),
+  const resolvedItemIds = await resolveResearchScopeItemIds(
+    params.gateway,
+    params.scope,
   );
+  const targets =
+    params.gateway.getBibliographicItemTargetsByItemIds(resolvedItemIds);
+  assertResearchScopeTargets({
+    scope: params.scope,
+    targetItemIds: targets.map((target) => target.itemId),
+  });
   const items: ResearchScopeSnapshotItem[] = [];
   for (let ordinal = 0; ordinal < targets.length; ordinal += 1) {
     const target = targets[ordinal];
@@ -167,6 +241,9 @@ export async function materializeResearchScopeSnapshot(params: {
       ...fingerprints,
       ordinal: items.length,
     });
+  }
+  if (params.scope.kind !== "library" && !items.length) {
+    throw new Error("Explicit research scope resolved to zero usable items");
   }
   const digest = `sha256:${await sha256Text(
     canonicalJson(

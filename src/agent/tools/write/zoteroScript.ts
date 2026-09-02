@@ -935,7 +935,7 @@ export function createZoteroScriptTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

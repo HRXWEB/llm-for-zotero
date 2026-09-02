@@ -98,7 +98,7 @@ export function createSearchPaperTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     presentation: {

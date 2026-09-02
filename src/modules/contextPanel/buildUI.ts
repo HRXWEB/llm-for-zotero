@@ -25,6 +25,7 @@ import {
 } from "./portalScope";
 import { getConversationKey } from "./conversationIdentity";
 import { createRuntimeSystemControls } from "./runtimeSystemControls";
+import { buildContextUsagePresentation } from "./textUtils";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -1001,24 +1002,24 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     "span",
     "llm-context-usage-control",
   );
+  const contextUsagePresentation = buildContextUsagePresentation({
+    sessionTokens: 0,
+  });
   const contextGauge = createElement(doc, "span", "llm-context-gauge", {
     id: "llm-context-gauge",
-    title: t("Context window usage unavailable"),
+    title: contextUsagePresentation.title,
   });
   contextGauge.setAttribute("role", "img");
   contextGauge.setAttribute("tabindex", "0");
-  contextGauge.setAttribute(
-    "aria-label",
-    t("Context window usage unavailable"),
-  );
+  contextGauge.setAttribute("aria-label", contextUsagePresentation.title);
   contextGauge.setAttribute("aria-describedby", "llm-token-usage");
   const tokenUsage = createElement(doc, "span", "llm-token-usage", {
     id: "llm-token-usage",
   });
   tokenUsage.setAttribute("role", "tooltip");
-  tokenUsage.dataset.label = t("Context window:");
-  tokenUsage.dataset.summary = t("Usage unavailable");
-  tokenUsage.dataset.detail = t("Send a message to measure usage");
+  tokenUsage.dataset.label = contextUsagePresentation.label;
+  tokenUsage.dataset.summary = contextUsagePresentation.summary;
+  tokenUsage.dataset.detail = contextUsagePresentation.detail;
   contextUsageControl.append(contextGauge, tokenUsage);
   footerControls.append(permissionControl, contextUsageControl);
   statusBar.append(statusLine, footerControls);

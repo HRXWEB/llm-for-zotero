@@ -3090,7 +3090,18 @@ export function createExternalBackendBridgeRuntime(options: {
                   planStepId: `${planning.planId}:r${planning.revision}:s${index + 1}`,
                   content,
                   activeForm: content,
-                  acceptanceCriteria: [`Verify: ${content}`],
+                  acceptanceCriteria: [
+                    {
+                      criterionId: `${planning.planId}:r${planning.revision}:s${index + 1}:criterion`,
+                      description: `Verify: ${content}`,
+                      verifier:
+                        inferPlanStepEffect(content) === "mutation"
+                          ? "mutation_receipts"
+                          : inferPlanStepEffect(content) === "read"
+                            ? "verified_read"
+                            : "bounded_reasoning",
+                    },
+                  ],
                   expectedEffect: inferPlanStepEffect(content),
                 })),
                 actionContractId: params.request.actionContract?.id,
@@ -3245,7 +3256,6 @@ export function createExternalBackendBridgeRuntime(options: {
                   const ledger = await recordMcpPlanEvidence(
                     params.request.planContext,
                     event,
-                    { autoAdvance: true },
                   );
                   if (ledger) {
                     await emitTurnEvent({

@@ -228,7 +228,7 @@ describe("library_batch", function () {
         name: "batch_test_write",
         description: "Apply one test page",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true as const, value: {} }),
@@ -236,6 +236,17 @@ describe("library_batch", function () {
         effect: "write" as const,
         reversibility: "full" as const,
       }),
+      describeAction: () => [
+        {
+          id: "batch-test:tags",
+          proofDomain: "zotero_state",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          source: "zotero_native",
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        },
+      ],
       execute: async (_input, toolContext) => {
         itemId += 1;
         const coordinated = await executeLibraryMutationAction({

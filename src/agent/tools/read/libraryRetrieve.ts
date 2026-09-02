@@ -260,7 +260,7 @@ export function createLibraryRetrieveTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
       exposure: "model",
     },

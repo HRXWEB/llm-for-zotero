@@ -122,7 +122,7 @@ function validateInput(
       }
       const parameters = validateObject<Record<string, unknown>>(raw.parameters)
         ? decodeActionContract({
-            version: 2,
+            version: 3,
             id: `research-mutation-preview-${operationIndex}`,
             writeDisposition: "required",
             interpretationSource: "deterministic_fallback",
@@ -271,7 +271,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
           },
         },
       },
-      mutability: "write",
+      executionClass: "control",
       requiresConfirmation: true,
       interaction: "user_input",
     },
@@ -395,7 +395,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
       });
       const contractId = `research-action:${plan.executionId}:${targetSetDigest.slice(-16)}`;
       const actionContract: AgentActionContract = {
-        version: 2,
+        version: 3,
         id: contractId,
         writeDisposition: "required",
         interpretationSource: "deterministic_fallback",

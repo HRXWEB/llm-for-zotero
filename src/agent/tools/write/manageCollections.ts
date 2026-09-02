@@ -77,7 +77,7 @@ export function createManageCollectionsTool(
         },
         required: ["action"],
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

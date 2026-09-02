@@ -140,7 +140,7 @@ export function createWebReadTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
       localAgentOnly: true,
     },

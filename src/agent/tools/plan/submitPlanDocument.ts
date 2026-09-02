@@ -351,7 +351,7 @@ export function createSubmitPlanDocumentTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "control",
       requiresConfirmation: false,
     },
     isAvailable: (request) => request.planContext?.phase === "executing",

@@ -20,13 +20,37 @@ import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
 type EndpointReply = [number, string, string];
 
+function testWriteDescriptor(name: string) {
+  return [
+    name === "zotero_script"
+      ? {
+          id: "zotero-script:test",
+          proofDomain: "execution" as const,
+          capability: "zotero.script" as const,
+          operation: "zotero_script_execute" as const,
+          source: "zotero_script" as const,
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        }
+      : {
+          id: `settings:${name}`,
+          proofDomain: "zotero_state" as const,
+          capability: "zotero.settings" as const,
+          operation: "settings_update" as const,
+          source: "zotero_native" as const,
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        },
+  ];
+}
+
 function createReadTool(name: string): AgentToolDefinition<unknown, unknown> {
   return {
     spec: {
       name,
       description: `Read tool ${name}`,
       inputSchema: { type: "object", additionalProperties: true },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -40,10 +64,12 @@ function createWriteTool(name: string): AgentToolDefinition<unknown, unknown> {
       name,
       description: `Write tool ${name}`,
       inputSchema: { type: "object", additionalProperties: true },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     validate: (args) => ({ ok: true, value: args ?? {} }),
+    planMutation: async () => ({ effect: "write", reversibility: "full" }),
+    describeAction: () => testWriteDescriptor(name),
     execute: async () => ({ content: { ok: true }, effect: "applied" }),
   };
 }
@@ -809,10 +835,11 @@ describe("Zotero MCP server", function () {
                     },
                   }
                 : { type: "object", additionalProperties: true },
-            mutability: "write",
+            executionClass: "external_effect",
             requiresConfirmation: false,
           },
           validate: (args) => ({ ok: true, value: args ?? {} }),
+          describeAction: () => testWriteDescriptor(name),
           execute: async (input) => {
             executed.push({ name, input });
             return { content: { name, input }, effect: "applied" };
@@ -930,10 +957,11 @@ describe("Zotero MCP server", function () {
           name,
           description: `Native access tool ${name}`,
           inputSchema: { type: "object", additionalProperties: true },
-          mutability: "write",
+          executionClass: "external_effect",
           requiresConfirmation: false,
         },
         validate: (args) => ({ ok: true, value: args ?? {} }),
+        describeAction: () => testWriteDescriptor(name),
         planMutation: async () => ({
           effect: "none",
           reversibility: "none",
@@ -1080,7 +1108,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1140,7 +1168,7 @@ describe("Zotero MCP server", function () {
         name: "library_search",
         description: "Query library",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1194,7 +1222,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1312,7 +1340,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1414,7 +1442,7 @@ describe("Zotero MCP server", function () {
         name: "library_retrieve",
         description: "Retrieve from library",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1611,7 +1639,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1679,7 +1707,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1738,7 +1766,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read paper",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1815,7 +1843,7 @@ describe("Zotero MCP server", function () {
         name: "library_search",
         description: "Search library",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -1829,10 +1857,11 @@ describe("Zotero MCP server", function () {
         name: "library_update",
         description: "Update library",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("library_update"),
       planMutation: async () => ({
         effect: "write",
         reversibility: "full",
@@ -1923,7 +1952,7 @@ describe("Zotero MCP server", function () {
         name: "library_search",
         description: "Query library",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -2162,7 +2191,7 @@ describe("Zotero MCP server", function () {
         name: "paper_read",
         description: "Read attachment",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: true,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -2222,10 +2251,11 @@ describe("Zotero MCP server", function () {
         name: "library_update",
         description: "Apply tags",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("library_update"),
       createPendingAction: async () => ({
         toolName: "library_update",
         title: "Apply Tags",
@@ -2286,10 +2316,11 @@ describe("Zotero MCP server", function () {
           name,
           description: `Policy-controlled tool ${name}`,
           inputSchema: { type: "object", additionalProperties: true },
-          mutability: "write",
+          executionClass: "external_effect",
           requiresConfirmation: true,
         },
         validate: (args) => ({ ok: true, value: args ?? {} }),
+        describeAction: () => testWriteDescriptor(name),
         planMutation: async () => ({
           effect: "none",
           reversibility: "none",
@@ -2361,10 +2392,11 @@ describe("Zotero MCP server", function () {
         name: "note_write",
         description: "Edit or create notes",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("note_write"),
       createPendingAction: async (input) => {
         const record = input as Record<string, unknown>;
         return {
@@ -2463,10 +2495,11 @@ describe("Zotero MCP server", function () {
         name: "note_write",
         description: "Edit active note",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("note_write"),
       createPendingAction: async (_input, context) => {
         assert.equal(context.request.activeNoteContext?.noteId, 501);
         assert.equal(
@@ -2553,7 +2586,7 @@ describe("Zotero MCP server", function () {
         name: "library_read",
         description: "Read an item",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
@@ -2687,10 +2720,11 @@ describe("Zotero MCP server", function () {
         name: "library_update",
         description: "Apply tags",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("library_update"),
       createPendingAction: async (_input, context: AgentToolContext) => {
         pendingConversationKey = context.request.conversationKey;
         return {
@@ -2764,10 +2798,11 @@ describe("Zotero MCP server", function () {
         name: "zotero_script",
         description: "Run Zotero script",
         inputSchema: { type: "object", additionalProperties: true },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
+      describeAction: () => testWriteDescriptor("zotero_script"),
       planMutation: async () => ({
         effect: "write",
         reversibility: "full",

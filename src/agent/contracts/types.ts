@@ -2,6 +2,7 @@ import type {
   LibraryMutationOperation,
   LibraryMutationState,
 } from "../services/libraryMutation/contracts";
+import type { ActionConstraint } from "../authorization/types";
 
 export type AgentActionCapability =
   | "zotero.read"
@@ -116,13 +117,12 @@ export type AgentActionObligation = AgentActionIntent & {
 
 /** Immutable interpretation of one user request. */
 export type AgentActionContract = {
-  version: 2;
+  version: 2 | 3;
   id: string;
   /** Only explicit user restrictions are authoritative at execution time. */
-  hardConstraints?: Array<{
-    kind: "no_write";
-    description: string;
-  }>;
+  hardConstraints?: Array<
+    ActionConstraint | { kind: "no_write"; description: string }
+  >;
   writeDisposition: "none" | "required" | "uncertain";
   interpretationSource: "classifier" | "deterministic_fallback";
   obligations: AgentActionObligation[];

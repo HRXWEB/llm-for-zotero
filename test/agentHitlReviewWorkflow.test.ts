@@ -149,7 +149,7 @@ function createStubSearchTool(
       name: "literature_search",
       description: "search",
       inputSchema: { type: "object" },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     validate: (args) => ({
@@ -184,7 +184,7 @@ function createStubFacadeTool(
       name: toolName,
       description: toolName,
       inputSchema: { type: "object" },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     validate: (args) => ({
@@ -194,6 +194,17 @@ function createStubFacadeTool(
           ? (args as Record<string, unknown>)
           : {},
     }),
+    describeAction: () => [
+      {
+        id: `review:${toolName}`,
+        proofDomain: "zotero_state",
+        capability: "zotero.settings",
+        operation: "settings_update",
+        source: "zotero_native",
+        requestedTargets: [],
+        destinationCollectionIds: [],
+      },
+    ],
     createPendingAction: (input) => ({
       toolName,
       title: "Confirm library change",

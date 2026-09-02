@@ -42,7 +42,7 @@ export function createTrashItemsTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

@@ -9,12 +9,24 @@ export type ResearchCoverageStatus =
 
 export type ResearchScopeSpec = Readonly<{
   libraryID: number;
-  kind: "library" | "collections" | "tags" | "items" | "mixed";
-  collectionIds?: readonly number[];
-  tagNames?: readonly string[];
-  includeAutomaticTags?: boolean;
-  itemKeys?: readonly string[];
-}>;
+}> &
+  (
+    | Readonly<{ kind: "library" }>
+    | Readonly<{ kind: "collections"; collectionIds: readonly number[] }>
+    | Readonly<{
+        kind: "tags";
+        tagNames: readonly string[];
+        includeAutomaticTags?: boolean;
+      }>
+    | Readonly<{ kind: "items"; itemKeys: readonly string[] }>
+    | Readonly<{
+        kind: "mixed";
+        collectionIds?: readonly number[];
+        tagNames?: readonly string[];
+        includeAutomaticTags?: boolean;
+        itemKeys?: readonly string[];
+      }>
+  );
 
 export type ResearchCriterion = Readonly<{
   id: string;
@@ -100,9 +112,26 @@ export type ResearchJob = Readonly<{
   candidateItems: number;
   deepReadCompleted: number;
   deepReadPlanned: number;
+  exceptionGrant?: ResearchExceptionGrant;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
+}>;
+
+export type ResearchExceptionGrant = Readonly<{
+  version: 1;
+  grantId: string;
+  planDigest: string;
+  executionId: string;
+  researchJobId: string;
+  totalItems: number;
+  screenedItems: number;
+  candidateItems: number;
+  deepReadCompleted: number;
+  limitationSummary: string;
+  status: "authorized" | "consumed";
+  grantedAt: number;
+  consumedAt?: number;
 }>;
 
 export type ResearchCorpusItem = Readonly<{
@@ -148,7 +177,7 @@ export type ResearchWorkItem = Readonly<{
 }>;
 
 export type ResearchEvidenceRecord = Readonly<{
-  version: 1;
+  version: 1 | 2;
   evidenceRef: string;
   researchJobId: string;
   executionId: string;
@@ -157,6 +186,8 @@ export type ResearchEvidenceRecord = Readonly<{
   itemKey: string;
   sourceFingerprint: string;
   sourceKind: "metadata" | "abstract" | "body" | "figure" | "quote";
+  /** Required on v2 evidence; points to host-issued observation metadata. */
+  observationId?: string;
   locator?: Readonly<{
     kind: "pdf_page";
     attachmentItemKey: string;

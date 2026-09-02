@@ -38,7 +38,7 @@ export function createUndoLastActionTool(
         additionalProperties: false,
         properties: {},
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     presentation: {

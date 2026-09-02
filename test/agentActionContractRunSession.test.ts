@@ -17,7 +17,7 @@ function createContract(
   overrides: Partial<AgentActionContract> = {},
 ): AgentActionContract {
   return {
-    version: 2,
+    version: 3,
     id,
     writeDisposition: "required",
     interpretationSource: "classifier",
@@ -156,7 +156,7 @@ describe("ActionContractRunSession checkpoint parsing", function () {
   }> = [
     {
       name: "rejects the wrong contract version",
-      contract: { ...contract, version: 1 },
+      contract: { ...contract, version: 2 },
       progress,
     },
     {

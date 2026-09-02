@@ -72,17 +72,6 @@ function attachConfirmationResolution(
   };
 }
 
-function withConfirmationActionId(
-  data: unknown,
-  actionId: string | undefined,
-): unknown {
-  if (!actionId) return data;
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    return { ...(data as Record<string, unknown>), __actionId: actionId };
-  }
-  return { __actionId: actionId, value: data };
-}
-
 /**
  * Executes a single tool call from within an action step.
  *
@@ -134,7 +123,7 @@ export async function callTool(
 
   // Confirmation required
   if (ctx.confirmationMode === "auto_approve") {
-    const execution = await prepared.execute(undefined);
+    const execution = await prepared.execute({ approved: true });
     return execution.result;
   }
 
@@ -150,16 +139,10 @@ export async function callTool(
     prepared.action,
   );
 
-  if (!resolution.approved) {
-    return attachConfirmationResolution(prepared.deny(resolution.data).result, {
-      actionId: resolution.actionId,
-      data: resolution.data,
-    });
-  }
-
-  const execution = await prepared.execute(
-    withConfirmationActionId(resolution.data, resolution.actionId),
-  );
+  // The registry validates the action ID against the rendered schema before
+  // deciding whether it is a cancellation. Review workflows may use
+  // approved:false for non-mutating navigation actions such as Next/Refresh.
+  const execution = await prepared.execute(resolution);
   return attachConfirmationResolution(execution.result, {
     actionId: resolution.actionId,
     data: resolution.data,

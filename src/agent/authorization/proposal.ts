@@ -1,4 +1,8 @@
-import type { AgentMutationPlan, AgentToolDefinition } from "../types";
+import type {
+  AgentActionProposal,
+  AgentMutationPlan,
+  AgentToolDefinition,
+} from "../types";
 import type {
   ActionDomain,
   ActionEffect,
@@ -93,6 +97,71 @@ function collectTargets(input: unknown): string[] {
     .slice(0, 1000);
 }
 
+function typedDomain(
+  proposal: AgentActionProposal,
+  toolName: string,
+): ActionDomain[] {
+  if (proposal.proofDomain === "file_state") return ["filesystem"];
+  if (proposal.proofDomain === "execution") {
+    return proposal.capability === "zotero.script"
+      ? ["privileged_zotero"]
+      : toolName === "run_command"
+        ? ["local_execution", "filesystem", "network"]
+        : ["local_execution"];
+  }
+  return ["zotero_library"];
+}
+
+function typedEffect(
+  proposal: AgentActionProposal,
+  input: unknown,
+  plan: AgentMutationPlan,
+): ActionEffect[] {
+  const operation = proposal.operation;
+  if (operation === "read_full") return ["read"];
+  if (operation === "command_execute") return ["execute"];
+  if (operation === "zotero_script_execute") {
+    const value =
+      input && typeof input === "object"
+        ? (input as Record<string, unknown>)
+        : {};
+    return value.effect === "write" || value.mode === "write"
+      ? ["execute", "modify"]
+      : ["execute", "read"];
+  }
+  // An operation descriptor names the possible action. The validated
+  // mutation plan describes this concrete call. If the host has already
+  // established that a non-execution operation is a no-op, do not authorize
+  // or confirm it as a mutation merely because its nominal operation is an
+  // update.
+  if (plan.effect === "none") return ["read"];
+  if (operation === "file_write") {
+    const action =
+      input && typeof input === "object"
+        ? String((input as Record<string, unknown>).action || "")
+        : "";
+    return action === "delete" ? ["delete"] : ["modify"];
+  }
+  if (
+    operation.startsWith("delete_") ||
+    operation === "trash_items" ||
+    operation.startsWith("remove_")
+  ) {
+    return ["delete"];
+  }
+  if (
+    operation.startsWith("create_") ||
+    operation.startsWith("import_") ||
+    operation === "note_create" ||
+    operation === "save_note" ||
+    operation === "save_notes_batch" ||
+    operation === "save_saved_search"
+  ) {
+    return ["create"];
+  }
+  return ["modify"];
+}
+
 function inferRiskSignals(
   toolName: string,
   input: unknown,
@@ -135,6 +204,7 @@ export function buildActionProposal(params: {
   tool: AgentToolDefinition<any, any>;
   input: unknown;
   plan: AgentMutationPlan;
+  typedProposals?: readonly AgentActionProposal[];
   intentBinding?: {
     conversationKey?: number;
     conversationGeneration?: number;
@@ -142,13 +212,31 @@ export function buildActionProposal(params: {
     userText?: string;
   };
 }): ActionProposal {
-  const domains = inferDomain(params.tool.spec.name);
-  const effects = inferEffects(
-    params.tool.spec.name,
-    params.input,
-    params.plan,
-  );
-  const targets = collectTargets(params.input);
+  const typedProposals = params.typedProposals || [];
+  const domains = [
+    ...new Set(
+      typedProposals.length
+        ? typedProposals.flatMap((proposal) =>
+            typedDomain(proposal, params.tool.spec.name),
+          )
+        : inferDomain(params.tool.spec.name),
+    ),
+  ];
+  const effects = [
+    ...new Set(
+      typedProposals.length
+        ? typedProposals.flatMap((proposal) =>
+            typedEffect(proposal, params.input, params.plan),
+          )
+        : inferEffects(params.tool.spec.name, params.input, params.plan),
+    ),
+  ];
+  const targets = [
+    ...new Set([
+      ...collectTargets(params.input),
+      ...typedProposals.flatMap((proposal) => proposal.requestedTargets),
+    ]),
+  ].slice(0, 1000);
   const intentBinding = {
     conversationKey: params.intentBinding?.conversationKey,
     conversationGeneration: params.intentBinding?.conversationGeneration,
@@ -163,6 +251,7 @@ export function buildActionProposal(params: {
       input: params.input,
       domains,
       effects,
+      typedProposals,
       intentBinding,
     }),
   );
@@ -170,7 +259,9 @@ export function buildActionProposal(params: {
     version: 1,
     runtime: "original",
     toolName: params.tool.spec.name,
-    operation: `${params.tool.spec.name}:${effects.join("+")}`,
+    operation: typedProposals.length
+      ? typedProposals.map((proposal) => proposal.operation).join("+")
+      : `${params.tool.spec.name}:${effects.join("+")}`,
     domains,
     effects,
     targets,

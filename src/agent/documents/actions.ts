@@ -79,7 +79,11 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
   note.libraryID = libraryID;
   if (singleParent && !singleParent.deleted) {
     note.parentID = singleParent.id;
-  } else if (scope?.collectionIds?.length === 1) {
+  } else if (
+    scope &&
+    (scope.kind === "collections" || scope.kind === "mixed") &&
+    scope.collectionIds?.length === 1
+  ) {
     note.addToCollection(scope.collectionIds[0]);
   }
   const persisted = await createFinalizedZoteroNote({

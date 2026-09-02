@@ -511,7 +511,7 @@ export function createEditCurrentNoteTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
     guidance: {

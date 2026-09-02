@@ -24,7 +24,11 @@ import literatureReviewRaw from "./literature-review.md";
 import importCitedReferenceRaw from "./import-cited-reference.md";
 import { resolveSkillRouting } from "./routing";
 
-export { getSkillRoutingDiagnostics, matchesSkill, parseSkill } from "./skillLoader";
+export {
+  getSkillRoutingDiagnostics,
+  matchesSkill,
+  parseSkill,
+} from "./skillLoader";
 export {
   getSkillContextEligibility,
   isSkillContextEligible,

@@ -17,6 +17,7 @@ import type {
   ExecutionTask,
   ExecutionTaskStatus,
   PlanArtifact,
+  PlanAcceptanceCriterion,
   PlanCompletionRequirement,
   PlanCompletionRequirementKind,
   PlanContract,
@@ -40,6 +41,48 @@ function normalizedText(value: unknown, label: string): string {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) throw new Error(`${label} is required`);
   return text;
+}
+
+const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
+  "verified_read",
+  "research_coverage",
+  "document_integrity",
+  "document_published",
+  "mutation_receipts",
+  "bounded_reasoning",
+  "user_decision",
+]);
+
+function normalizeAcceptanceCriteria(
+  value: readonly PlanAcceptanceCriterion[],
+  label: string,
+): PlanAcceptanceCriterion[] {
+  if (!value.length) throw new Error(`${label} requires acceptance criteria`);
+  const ids = new Set<string>();
+  return value.map((criterion, index) => {
+    if (!criterion || typeof criterion !== "object") {
+      throw new Error(`${label}[${index}] must be a typed criterion`);
+    }
+    const criterionId = normalizedText(
+      criterion.criterionId,
+      `${label}[${index}].criterionId`,
+    );
+    if (ids.has(criterionId)) {
+      throw new Error(`${label} contains duplicate criterion ${criterionId}`);
+    }
+    ids.add(criterionId);
+    if (!CRITERION_VERIFIERS.has(criterion.verifier)) {
+      throw new Error(`${label}[${index}].verifier is invalid`);
+    }
+    return {
+      criterionId,
+      description: normalizedText(
+        criterion.description,
+        `${label}[${index}].description`,
+      ),
+      verifier: criterion.verifier,
+    };
+  });
 }
 
 function makeId(prefix: string): string {
@@ -111,9 +154,10 @@ const ALLOWED_TRANSITIONS: Record<ExecutionTaskStatus, ExecutionTaskStatus[]> =
       "completed",
       "blocked",
       "failed",
+      "skipped",
       "cancelled",
     ],
-    waiting_for_user: ["in_progress", "blocked", "cancelled"],
+    waiting_for_user: ["in_progress", "blocked", "skipped", "cancelled"],
     interrupted: ["in_progress", "completed", "failed", "cancelled"],
     completed: [],
     blocked: ["in_progress", "failed", "cancelled"],
@@ -154,13 +198,21 @@ export function assertTaskCompletionEvidence(
   task: ExecutionTask,
   evidence: readonly TaskEvidence[],
 ): void {
-  const verified = evidence.filter((entry) => entry.verified);
+  const verified = evidence.filter(
+    (entry) =>
+      entry.verified &&
+      entry.executionId === task.executionId &&
+      entry.taskId === task.taskId,
+  );
   if (task.completionRequirements?.length) {
     for (const requirement of task.completionRequirements) {
       const matching = verified.filter(
         (entry) =>
           entry.requirementId === requirement.requirementId &&
-          entry.contractDigest === requirement.contractDigest,
+          entry.contractDigest === requirement.contractDigest &&
+          requirement.criterionIds.every((criterionId) =>
+            entry.criterionIds?.includes(criterionId),
+          ),
       );
       const satisfied =
         requirement.kind === "mutation_receipts"
@@ -187,7 +239,8 @@ export function assertTaskCompletionEvidence(
               if (requirement.kind === "verified_read") {
                 return (
                   entry.kind === "verified_read" &&
-                  entry.payload?.type === "verified_read"
+                  entry.payload?.type === "verified_read" &&
+                  Boolean(entry.payload.observations?.length)
                 );
               }
               if (requirement.kind === "bounded_reasoning") {
@@ -200,7 +253,9 @@ export function assertTaskCompletionEvidence(
                 return (
                   entry.kind === "research_coverage" &&
                   entry.payload?.type === "research_coverage" &&
-                  entry.payload.coverageStatus !== "failed"
+                  (entry.payload.coverageStatus === "complete" ||
+                    entry.payload.coverageStatus ===
+                      "complete_with_limitations")
                 );
               }
               if (requirement.kind === "document_integrity") {
@@ -214,6 +269,12 @@ export function assertTaskCompletionEvidence(
                 return (
                   entry.kind === "document_published" &&
                   entry.payload?.type === "document_published"
+                );
+              }
+              if (requirement.kind === "user_decision") {
+                return (
+                  entry.kind === "user_decision" &&
+                  entry.payload?.type === "user_decision"
                 );
               }
               return false;
@@ -316,103 +377,38 @@ export async function computePlanDigest(params: {
   return `sha256:${await sha256Text(canonicalJson(params))}`;
 }
 
-function defaultRequirementKind(params: {
-  effect: PlanStep["expectedEffect"];
-  contract: PlanContract;
-}): PlanCompletionRequirementKind {
-  if (params.effect === "mutation") return "mutation_receipts";
-  if (params.effect === "reasoning") return "bounded_reasoning";
-  if (
-    params.effect === "artifact" &&
-    params.contract.deliverable.kind === "document"
-  ) {
-    return "document_integrity";
-  }
-  return "verified_read";
-}
-
 function assignCompletionRequirements(params: {
-  steps: readonly (Omit<PlanStep, "completionRequirements"> & {
-    requestedRequirementKinds?: readonly PlanCompletionRequirementKind[];
-  })[];
-  contract: PlanContract;
+  steps: readonly Omit<PlanStep, "completionRequirements">[];
   contractDigest: string;
 }): PlanStep[] {
-  const kindsByStep = params.steps.map((step) => {
-    const requested = step.requestedRequirementKinds?.length
-      ? [...new Set(step.requestedRequirementKinds)]
-      : [
-          defaultRequirementKind({
-            effect: step.expectedEffect,
-            contract: params.contract,
-          }),
-        ];
-    return requested;
-  });
-  const firstMutation = params.steps.findIndex(
-    (step) => step.expectedEffect === "mutation",
-  );
-  const lastNonMutationBeforeWrite = (() => {
-    const end =
-      firstMutation >= 0 ? firstMutation - 1 : params.steps.length - 1;
-    for (let index = end; index >= 0; index -= 1) {
-      if (params.steps[index].expectedEffect !== "mutation") return index;
+  return params.steps.map((step) => {
+    const criteria =
+      step.acceptanceCriteria as readonly PlanAcceptanceCriterion[];
+    const grouped = new Map<
+      PlanCompletionRequirementKind,
+      PlanAcceptanceCriterion[]
+    >();
+    for (const criterion of criteria) {
+      const entries = grouped.get(criterion.verifier) || [];
+      entries.push(criterion);
+      grouped.set(criterion.verifier, entries);
     }
-    return -1;
-  })();
-  const lastNonMutation = (() => {
-    for (let index = params.steps.length - 1; index >= 0; index -= 1) {
-      if (params.steps[index].expectedEffect !== "mutation") return index;
-    }
-    return params.steps.length - 1;
-  })();
-  const lastArtifact = (() => {
-    for (let index = params.steps.length - 1; index >= 0; index -= 1) {
-      if (params.steps[index].expectedEffect === "artifact") return index;
-    }
-    return lastNonMutation;
-  })();
-  if (
-    params.contract.investigation &&
-    !kindsByStep.some((kinds) => kinds.includes("research_coverage"))
-  ) {
-    const owner =
-      firstMutation >= 0 ? lastNonMutationBeforeWrite : lastNonMutation;
-    if (owner < 0) {
-      throw new Error(
-        "Research-selected mutations require a non-mutation research step before the write",
-      );
-    }
-    kindsByStep[owner].push("research_coverage");
-  }
-  if (params.contract.deliverable.kind === "document") {
-    if (!kindsByStep.some((kinds) => kinds.includes("document_integrity"))) {
-      kindsByStep[lastArtifact].push("document_integrity");
-    }
-    if (!kindsByStep.some((kinds) => kinds.includes("document_published"))) {
-      kindsByStep[lastArtifact].push("document_published");
-    }
-  }
-  if (
-    params.contract.effects?.libraryMutation &&
-    !kindsByStep.some((kinds) => kinds.includes("mutation_receipts"))
-  ) {
-    const mutationIndex = params.steps.findIndex(
-      (step) => step.expectedEffect === "mutation",
-    );
-    if (mutationIndex >= 0)
-      kindsByStep[mutationIndex].push("mutation_receipts");
-  }
-  return params.steps.map((step, index) => {
-    const { requestedRequirementKinds: _requested, ...planStep } = step;
     const completionRequirements: PlanCompletionRequirement[] = [
-      ...new Set(kindsByStep[index]),
-    ].map((kind) => ({
+      ...grouped,
+    ].map(([kind, entries]) => ({
       requirementId: `${step.planStepId}:requirement:${kind}`,
       kind,
+      criterionIds: entries.map((entry) => entry.criterionId),
       contractDigest: params.contractDigest,
+      targetBoundary: step.targetBoundary
+        ? {
+            targetIds: step.targetBoundary.targetIds,
+            scopeDigest: step.targetBoundary.scopeDigest,
+            expectedCount: step.targetBoundary.targetIds?.length,
+          }
+        : undefined,
     }));
-    return { ...planStep, completionRequirements };
+    return { ...step, completionRequirements };
   });
 }
 
@@ -567,7 +563,7 @@ export class PlanExecutionCoordinator {
     parentTaskId: string;
     content: string;
     activeForm?: string;
-    acceptanceCriteria: readonly string[];
+    acceptanceCriteria: readonly PlanAcceptanceCriterion[];
     expectedEffect: PlanStep["expectedEffect"];
     expectedCapability?: string;
     targetIds?: readonly string[];
@@ -614,8 +610,31 @@ export class PlanExecutionCoordinator {
       }
     }
     const now = params.now ?? Date.now();
+    const acceptanceCriteria = normalizeAcceptanceCriteria(
+      params.acceptanceCriteria,
+      "Supporting task acceptance criteria",
+    );
+    const supportingStep = assignCompletionRequirements({
+      steps: [
+        {
+          planStepId: normalizedText(
+            params.taskId,
+            "Supporting task requirement namespace",
+          ),
+          content: params.content,
+          activeForm: params.activeForm || params.content,
+          acceptanceCriteria,
+          expectedEffect: params.expectedEffect,
+          expectedCapability: params.expectedCapability,
+          targetBoundary: params.targetIds?.length
+            ? { kind: "selection", targetIds: params.targetIds }
+            : undefined,
+        },
+      ],
+      contractDigest: artifact.contractDigest || artifact.digest,
+    })[0];
     const child: ExecutionTask = {
-      version: 1,
+      version: 2,
       taskId: normalizedText(params.taskId, "Supporting task ID"),
       executionId: ledger.executionId,
       planStepId: parent.planStepId,
@@ -626,10 +645,9 @@ export class PlanExecutionCoordinator {
         params.activeForm || params.content,
         "Supporting task activeForm",
       ),
-      acceptanceCriteria: params.acceptanceCriteria
-        .map((criterion) => criterion.trim())
-        .filter(Boolean),
+      acceptanceCriteria,
       expectedEffect: params.expectedEffect,
+      completionRequirements: supportingStep.completionRequirements,
       expectedCapability: params.expectedCapability,
       obligationIds: parent.obligationIds,
       status: "pending",
@@ -677,10 +695,9 @@ export class PlanExecutionCoordinator {
       planStepId?: string;
       content: string;
       activeForm?: string;
-      acceptanceCriteria: readonly string[];
+      acceptanceCriteria: readonly PlanAcceptanceCriterion[];
       expectedCapability?: string;
       expectedEffect: PlanStep["expectedEffect"];
-      completionRequirementKinds?: readonly PlanCompletionRequirementKind[];
       targetBoundary?: PlanStep["targetBoundary"];
     }>;
     contract?: PlanContract;
@@ -741,6 +758,7 @@ export class PlanExecutionCoordinator {
     }
     const contractDigest = await computePlanContractDigest(decodedContract);
     const seen = new Set<string>();
+    const seenCriteria = new Set<string>();
     const normalizedSteps = params.steps.map((step, index) => {
       const planStepId =
         step.planStepId?.trim() ||
@@ -748,11 +766,17 @@ export class PlanExecutionCoordinator {
       if (seen.has(planStepId))
         throw new Error(`Duplicate planStepId: ${planStepId}`);
       seen.add(planStepId);
-      const acceptanceCriteria = step.acceptanceCriteria
-        .map((criterion) => criterion.trim())
-        .filter(Boolean);
-      if (!acceptanceCriteria.length) {
-        throw new Error(`Plan step ${index + 1} requires acceptance criteria`);
+      const acceptanceCriteria = normalizeAcceptanceCriteria(
+        step.acceptanceCriteria,
+        `Plan step ${index + 1} acceptance criteria`,
+      );
+      for (const criterion of acceptanceCriteria) {
+        if (seenCriteria.has(criterion.criterionId)) {
+          throw new Error(
+            `Duplicate acceptance criterion ID: ${criterion.criterionId}`,
+          );
+        }
+        seenCriteria.add(criterion.criterionId);
       }
       return {
         planStepId,
@@ -764,13 +788,11 @@ export class PlanExecutionCoordinator {
         acceptanceCriteria,
         expectedCapability: step.expectedCapability?.trim() || undefined,
         expectedEffect: step.expectedEffect,
-        requestedRequirementKinds: step.completionRequirementKinds,
         targetBoundary: step.targetBoundary,
       };
     });
     const steps = assignCompletionRequirements({
       steps: normalizedSteps,
-      contract: decodedContract,
       contractDigest,
     });
     validatePlanStepContract({ contract: decodedContract, steps });
@@ -785,7 +807,7 @@ export class PlanExecutionCoordinator {
       contractDigest,
     });
     const artifact: PlanArtifact = {
-      version: 3,
+      version: 4,
       planId: params.planId,
       conversationKey: params.conversationKey,
       provider: params.provider,
@@ -869,7 +891,7 @@ export class PlanExecutionCoordinator {
       `plan-execution-${artifact.planId}-r${artifact.revision}`,
     );
     const tasks: ExecutionTask[] = artifact.steps.map((step) => ({
-      version: 1,
+      version: 2,
       taskId: `${executionId}:${step.planStepId}`,
       executionId,
       planStepId: step.planStepId,
@@ -902,7 +924,7 @@ export class PlanExecutionCoordinator {
       updatedAt: now,
     };
     const ledger: PlanExecutionLedger = {
-      version: 1,
+      version: 2,
       executionId,
       planId: artifact.planId,
       revision: artifact.revision,
@@ -1052,13 +1074,14 @@ export class PlanExecutionCoordinator {
         receipt.verification === "verified" &&
         ["applied", "already_satisfied", "observed"].includes(receipt.status);
       const evidence: TaskEvidence = {
-        version: requirement ? 2 : 1,
+        version: requirement ? 3 : 1,
         evidenceId,
         executionId: params.executionId,
         taskId: params.taskId,
         kind: "mutation_receipt",
         verified,
         requirementId: requirement?.requirementId,
+        criterionIds: requirement?.criterionIds,
         contractDigest: requirement?.contractDigest,
         receipt,
         payload: requirement

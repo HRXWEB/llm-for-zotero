@@ -59,7 +59,7 @@ export function createUpdateLibraryTagTool(
           libraryID: { type: "number" },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 
@@ -200,7 +200,7 @@ export function createSetItemTagsTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

@@ -311,7 +311,15 @@ export type ToolSpec = {
   name: string;
   description: string;
   inputSchema: object;
-  mutability: "read" | "write";
+  /**
+   * Safety class for the validated operation.
+   *
+   * Reads may be cached/deduplicated. Controls only change the internal
+   * plan/approval lifecycle (or pause for user input), so they are never
+   * deduplicated and never consume an external action contract. External
+   * effects require a typed action adapter and the full authorization path.
+   */
+  executionClass: "read" | "control" | "external_effect";
   requiresConfirmation: boolean;
   /**
    * Model-visible tools are advertised to agent/model runtimes and MCP
@@ -1029,7 +1037,7 @@ export type AgentWriteToolDefinition<
   TInput = unknown,
   TResult = unknown,
 > = Omit<AgentToolDefinition<TInput, TResult>, "spec" | "execute"> & {
-  spec: ToolSpec & { mutability: "write" };
+  spec: ToolSpec & { executionClass: "external_effect" };
   execute: (
     input: TInput,
     context: AgentToolContext,
@@ -1077,7 +1085,7 @@ export type PreparedToolExecution =
       requestId: string;
       action: AgentPendingAction;
       execute: (
-        resolutionData?: unknown,
+        resolution: AgentConfirmationResolution,
       ) => Promise<PreparedToolExecutionResult>;
       deny: (resolutionData?: unknown) => PreparedToolExecutionResult;
     };

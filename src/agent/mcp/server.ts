@@ -61,7 +61,11 @@ import { loadPlanArtifact } from "../plans/store";
 import { loadLatestResearchMutationApprovalGrant } from "../research/store";
 import { validateResearchMutationGrant } from "../research/mutationApproval";
 import { extractVerifiedReadSources } from "../plans/readEvidence";
-import type { VerifiedReadSource } from "../plans/types";
+import type {
+  TrustedReadObservation,
+  VerifiedReadSource,
+} from "../plans/types";
+import { createTrustedReadObservations } from "../plans/readObservation";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -289,7 +293,11 @@ let activeZoteroMcpScope: ZoteroMcpActiveScope | null = null;
 let registeredMcpDeps: McpServerDeps | null = null;
 const mcpReadDedupeCache = new Map<
   string,
-  { expiresAt: number; result: McpToolCallResult }
+  {
+    expiresAt: number;
+    result: McpToolCallResult;
+    observations: readonly TrustedReadObservation[];
+  }
 >();
 
 export type ZoteroMcpToolActivityEvent = {
@@ -310,6 +318,7 @@ export type ZoteroMcpToolActivityEvent = {
   kind?: "global" | "paper";
   quoteCitations?: QuoteCitation[];
   verifiedReadSources?: VerifiedReadSource[];
+  readObservations?: readonly TrustedReadObservation[];
   timestamp: number;
 };
 
@@ -982,12 +991,27 @@ function cloneMcpResultWithDuplicateMarker(
   };
 }
 
-function getCachedMcpReadResult(key: string | null): McpToolCallResult | null {
+function cloneTrustedReadObservations(
+  observations: readonly TrustedReadObservation[],
+): TrustedReadObservation[] {
+  return observations.map((observation) => ({
+    ...observation,
+    capabilities: [...observation.capabilities],
+  }));
+}
+
+function getCachedMcpReadResult(key: string | null): {
+  result: McpToolCallResult;
+  observations: readonly TrustedReadObservation[];
+} | null {
   if (!key) return null;
   pruneExpiredMcpReadDedupeCache();
   const cached = mcpReadDedupeCache.get(key);
   if (!cached) return null;
-  return cloneMcpResultWithDuplicateMarker(cached.result);
+  return {
+    result: cloneMcpResultWithDuplicateMarker(cached.result),
+    observations: cloneTrustedReadObservations(cached.observations),
+  };
 }
 
 function collectPaperIdentities(value: unknown): Array<{
@@ -1177,12 +1201,14 @@ function getRawPdfNativeFilesystemViolation(params: {
 function rememberMcpReadResult(
   key: string | null,
   result: McpToolCallResult,
+  observations: readonly TrustedReadObservation[],
 ): void {
   if (!key || result.isError) return;
   pruneExpiredMcpReadDedupeCache();
   mcpReadDedupeCache.set(key, {
     expiresAt: Date.now() + MCP_READ_DEDUPE_TTL_MS,
     result,
+    observations: cloneTrustedReadObservations(observations),
   });
 }
 
@@ -1190,7 +1216,7 @@ function clearMcpReadDedupeCacheAfterToolResult(
   tool: ToolSpec,
   result: McpToolCallResult,
 ): void {
-  if (tool.mutability !== "write" || result.isError) return;
+  if (tool.executionClass !== "external_effect" || result.isError) return;
   mcpReadDedupeCache.clear();
 }
 
@@ -1222,17 +1248,18 @@ function formatToolTitle(name: string): string {
 
 function isMcpExposedTool(tool: ToolSpec): boolean {
   if (tool.exposure === "internal") return false;
-  if (tool.mutability === "read") return CURATED_READ_TOOL_NAMES.has(tool.name);
-  if (tool.mutability === "write")
+  if (tool.executionClass !== "external_effect")
+    return CURATED_READ_TOOL_NAMES.has(tool.name);
+  if (tool.executionClass === "external_effect")
     return CURATED_WRITE_TOOL_NAMES.has(tool.name);
   return false;
 }
 
 function getMcpToolAnnotations(
   toolName: string,
-  mutability: ToolSpec["mutability"],
+  executionClass: ToolSpec["executionClass"],
 ): McpToolDefinition["annotations"] {
-  if (mutability === "read") return READ_ONLY_TOOL_ANNOTATIONS;
+  if (executionClass !== "external_effect") return READ_ONLY_TOOL_ANNOTATIONS;
   return DESTRUCTIVE_WRITE_TOOL_NAMES.has(toolName)
     ? DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS
     : WRITE_TOOL_ANNOTATIONS;
@@ -1263,13 +1290,17 @@ function handleToolsList(
   const tools: McpToolDefinition[] = toolRegistry
     .listTools()
     .filter((tool) => isMcpToolVisibleInScope(tool, scope))
-    .map(({ name, description, inputSchema, mutability }) => ({
-      name,
-      title: formatToolTitle(name),
-      description: decorateMcpToolDescription(name, description, mutability),
-      inputSchema: decorateMcpToolSchema(inputSchema),
-      annotations: getMcpToolAnnotations(name, mutability),
-    }));
+    .map(({ name, description, inputSchema, executionClass }) => {
+      const mutability =
+        executionClass === "external_effect" ? "write" : "read";
+      return {
+        name,
+        title: formatToolTitle(name),
+        description: decorateMcpToolDescription(name, description, mutability),
+        inputSchema: decorateMcpToolSchema(inputSchema),
+        annotations: getMcpToolAnnotations(name, executionClass),
+      };
+    });
   return { tools };
 }
 
@@ -1321,7 +1352,7 @@ function extractMcpScopeArgs(rawArgs: unknown): {
 function decorateMcpToolDescription(
   toolName: string,
   description: string,
-  mutability: ToolSpec["mutability"],
+  mutability: "read" | "write",
 ): string {
   const scopeGuidance =
     "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'full' only for explicit exhaustive full-text requests with a coverage receipt, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
@@ -1490,6 +1521,7 @@ function buildMcpToolActivityEvent(params: {
   artifacts?: AgentToolArtifact[];
   actionReceipts?: AgentActionReceipt[];
   verifiedReadSources?: VerifiedReadSource[];
+  readObservations?: readonly TrustedReadObservation[];
   mutability?: "read" | "write";
   headers?: Record<string, string>;
 }): ZoteroMcpToolActivityEvent {
@@ -1508,6 +1540,7 @@ function buildMcpToolActivityEvent(params: {
     mutability: params.mutability,
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
+    readObservations: params.readObservations,
     profileSignature: scope?.profileSignature,
     conversationKey: scope?.conversationKey,
     libraryID: scope?.libraryID,
@@ -1752,6 +1785,7 @@ async function handleToolsCall(
     artifacts?: AgentToolArtifact[];
     actionReceipts?: AgentActionReceipt[];
     verifiedReadSources?: VerifiedReadSource[];
+    readObservations?: readonly TrustedReadObservation[];
   }) => {
     emitZoteroMcpToolActivity(
       buildMcpToolActivityEvent({
@@ -1765,7 +1799,9 @@ async function handleToolsCall(
         artifacts: result.artifacts,
         actionReceipts: result.actionReceipts,
         verifiedReadSources: result.verifiedReadSources,
-        mutability: tool?.spec.mutability,
+        readObservations: result.readObservations,
+        mutability:
+          tool?.spec.executionClass === "external_effect" ? "write" : "read",
         quoteCitations: result.quoteCitations,
         headers,
       }),
@@ -1793,7 +1829,10 @@ async function handleToolsCall(
       ? Number(scope?.conversationGeneration)
       : getConversationWriteGeneration(scopeConversationKey)
     : 0;
-  if (tool.spec.mutability === "write" && !scope?.runtimeAuthority) {
+  if (
+    tool.spec.executionClass === "external_effect" &&
+    !scope?.runtimeAuthority
+  ) {
     const error =
       "Effectful Zotero MCP tools require a valid, turn-scoped runtime authorization token.";
     completeActivity({ ok: false, error });
@@ -1845,7 +1884,7 @@ async function handleToolsCall(
 
   try {
     const readDedupeKey =
-      tool.spec.mutability === "read"
+      tool.spec.executionClass === "read"
         ? buildMcpReadDedupeKey({
             toolName: name,
             toolArgs: scopeArgs.toolArgs,
@@ -1856,11 +1895,30 @@ async function handleToolsCall(
     if (cachedReadResult) {
       completeActivity({
         ok: true,
-        quoteCitations: extractQuoteCitationsFromToolContent(cachedReadResult),
-        artifacts: extractArtifactsFromMcpToolCallResult(cachedReadResult),
-        verifiedReadSources: extractVerifiedReadSources(cachedReadResult),
+        quoteCitations: extractQuoteCitationsFromToolContent(
+          cachedReadResult.result,
+        ),
+        artifacts: extractArtifactsFromMcpToolCallResult(
+          cachedReadResult.result,
+        ),
+        verifiedReadSources: cachedReadResult.observations.map(
+          ({
+            libraryID,
+            itemKey,
+            attachmentItemKey,
+            pageIndex,
+            sourceFingerprint,
+          }) => ({
+            libraryID,
+            itemKey,
+            attachmentItemKey,
+            pageIndex,
+            sourceFingerprint,
+          }),
+        ),
+        readObservations: cachedReadResult.observations,
       });
-      return cachedReadResult;
+      return cachedReadResult.result;
     }
 
     const toolContext = createToolContext(rawArgs, headers, deps.zoteroGateway);
@@ -1911,6 +1969,15 @@ async function handleToolsCall(
       return result;
     }
     const result = formatToolResult(prepared.execution);
+    const readObservations =
+      tool.spec.executionClass === "read" && !result.isError
+        ? await createTrustedReadObservations({
+            toolName: name,
+            callId: prepared.execution.result.callId,
+            input: prepared.execution.input,
+            result: prepared.execution.result.content,
+          })
+        : [];
     completeActivity({
       ok: !result.isError,
       error: extractToolCallErrorText(result),
@@ -1919,12 +1986,25 @@ async function handleToolsCall(
       ),
       artifacts: prepared.execution.result.artifacts,
       actionReceipts: prepared.execution.result.actionReceipts,
-      verifiedReadSources: extractVerifiedReadSources(
-        prepared.execution.result.content,
+      verifiedReadSources: readObservations.map(
+        ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }) => ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }),
       ),
+      readObservations,
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
-    rememberMcpReadResult(readDedupeKey, result);
+    rememberMcpReadResult(readDedupeKey, result, readObservations);
     return result;
   } catch (error) {
     completeActivity({

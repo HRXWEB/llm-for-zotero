@@ -4,6 +4,7 @@ import type {
   AgentToolInputValidation,
 } from "../../types";
 import { loadPlanArtifact } from "../../plans/store";
+import { planExecutionCoordinator } from "../../plans/coordinator";
 import { shouldCheckpointResearchExpansion } from "../../research/policy";
 import {
   loadResearchJobForExecution,
@@ -15,6 +16,7 @@ import { fail, ok, validateObject } from "../shared";
 type ApproveResearchExpansionInput = {
   proposedDeepReadCeiling: number;
   reason: string;
+  decision?: "expand_continue" | "finish_limitations" | "revise_cancel";
 };
 
 function validateInput(
@@ -56,6 +58,25 @@ function pendingAction(
         value: String(input.proposedDeepReadCeiling),
       },
     ],
+    actions: [
+      {
+        id: "expand_continue",
+        label: "Expand and continue",
+        approved: true,
+      },
+      {
+        id: "finish_limitations",
+        label: "Finish with limitations",
+        approved: true,
+      },
+      {
+        id: "revise_cancel",
+        label: "Revise or cancel",
+        approved: true,
+      },
+    ],
+    defaultActionId: "expand_continue",
+    cancelActionId: "revise_cancel",
   };
 }
 
@@ -94,7 +115,7 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
           reason: { type: "string" },
         },
       },
-      mutability: "write",
+      executionClass: "control",
       requiresConfirmation: true,
       interaction: "user_input",
     },
@@ -108,6 +129,18 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
     planMutation: () => ({ effect: "none", reversibility: "none" }),
     shouldRequireConfirmation: () => true,
     createPendingAction: pendingAction,
+    applyConfirmation: (input, data) => {
+      const record = validateObject<Record<string, unknown>>(data) ? data : {};
+      const decision = record.confirmationActionId;
+      if (
+        decision !== "expand_continue" &&
+        decision !== "finish_limitations" &&
+        decision !== "revise_cancel"
+      ) {
+        return fail("A declared research expansion decision is required");
+      }
+      return ok({ ...input, decision });
+    },
     execute: async (input, context) => {
       const plan = context.request.planContext;
       if (!plan || plan.phase !== "executing") {
@@ -144,14 +177,58 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
         );
       }
       if (
-        input.proposedDeepReadCeiling < job.candidateItems ||
-        input.proposedDeepReadCeiling <= job.deepReadPlanned
+        (input.decision || "expand_continue") === "expand_continue" &&
+        (input.proposedDeepReadCeiling < job.candidateItems ||
+          input.proposedDeepReadCeiling <= job.deepReadPlanned)
       ) {
         throw new Error(
           "The approved ceiling must cover current candidates and exceed the prior ceiling",
         );
       }
       const now = Date.now();
+      if (input.decision === "finish_limitations") {
+        const next = {
+          ...job,
+          exceptionGrant: {
+            version: 1 as const,
+            grantId: `${job.researchJobId}:exception:${now}`,
+            planDigest: artifact.digest,
+            executionId: job.executionId,
+            researchJobId: job.researchJobId,
+            totalItems: job.totalItems,
+            screenedItems: job.screenedItems,
+            candidateItems: job.candidateItems,
+            deepReadCompleted: job.deepReadCompleted,
+            limitationSummary: input.reason,
+            status: "authorized" as const,
+            grantedAt: now,
+          },
+          updatedAt: now,
+        };
+        await saveResearchJob(next, artifact.conversationKey);
+        return {
+          approved: true,
+          decision: input.decision,
+          exceptionGrantId: next.exceptionGrant.grantId,
+        };
+      }
+      if (input.decision === "revise_cancel") {
+        const next = {
+          ...job,
+          status: "cancelled" as const,
+          updatedAt: now,
+          completedAt: now,
+        };
+        await saveResearchJob(next, artifact.conversationKey);
+        await planExecutionCoordinator.requestTransition({
+          executionId: plan.executionId,
+          taskId: job.parentTaskId,
+          toStatus: "cancelled",
+          requestedBy: "user",
+          reason: input.reason,
+        });
+        return { approved: true, decision: input.decision };
+      }
       const next = {
         ...job,
         status: "running" as const,

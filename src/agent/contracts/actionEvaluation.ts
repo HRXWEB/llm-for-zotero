@@ -8,6 +8,11 @@ import type {
   AgentToolEffect,
 } from "../types";
 import { innermostToolResult } from "./toolResultEnvelope";
+import { operationCatalogEntry } from "./operationCatalog";
+import {
+  normalizeStoredActionConstraints,
+  proposalViolatesConstraints,
+} from "../authorization/policy";
 
 export type ContractEvaluation = {
   state:
@@ -88,7 +93,7 @@ export function createUnverifiedReceipt(params: {
 /** Used only outside the configured Agent contract service. */
 export function createFallbackToolReceipts(params: {
   toolName: string;
-  mutability: "read" | "write";
+  executionClass: "read" | "control" | "external_effect";
   input: unknown;
   ok: boolean;
   effect?: AgentToolEffect;
@@ -97,7 +102,7 @@ export function createFallbackToolReceipts(params: {
   content?: unknown;
 }): AgentActionReceipt[] {
   if (
-    params.mutability === "read" &&
+    params.executionClass === "read" &&
     params.ok &&
     params.input &&
     typeof params.input === "object" &&
@@ -122,23 +127,19 @@ export function createFallbackToolReceipts(params: {
       },
     ];
   }
-  if (params.mutability === "read") return [];
-  const operation: AgentActionOperation =
+  if (params.executionClass !== "external_effect") return [];
+  const operation =
     params.toolName === "file_io"
       ? "file_write"
       : params.toolName === "run_command"
         ? "command_execute"
         : params.toolName === "zotero_script"
           ? "zotero_script_execute"
-          : "command_execute";
-  const capability: AgentActionCapability =
-    params.toolName === "file_io"
-      ? "file.write"
-      : params.toolName === "run_command"
-        ? "command.execute"
-        : params.toolName === "zotero_script"
-          ? "zotero.script"
-          : "command.execute";
+          : null;
+  if (!operation) return [];
+  const authority = operationCatalogEntry(operation);
+  if (!authority) return [];
+  const { capability, proofDomain } = authority;
   if (params.toolName === "file_io" && params.ok) {
     const content = innermostToolResult(params.content);
     const filePath = String(content.filePath || "");
@@ -154,7 +155,7 @@ export function createFallbackToolReceipts(params: {
         version: 2,
         id: `file_write:fallback:${filePath}`,
         proposalId: `file_write:fallback:${filePath}`,
-        proofDomain: "file_state",
+        proofDomain,
         capability: "file.write",
         operation: "file_write",
         verification: verified ? "verified" : "unverified",
@@ -183,7 +184,7 @@ export function createFallbackToolReceipts(params: {
         version: 2,
         id: `${operation}:fallback`,
         proposalId: `${operation}:fallback`,
-        proofDomain: "execution",
+        proofDomain,
         capability,
         operation,
         verification: "execution_only",
@@ -201,13 +202,7 @@ export function createFallbackToolReceipts(params: {
     createUnverifiedReceipt({
       operation,
       capability,
-      proofDomain:
-        params.toolName === "file_io"
-          ? "file_state"
-          : params.toolName === "run_command" ||
-              params.toolName === "zotero_script"
-            ? "execution"
-            : "zotero_state",
+      proofDomain,
       status: params.cancelled
         ? "cancelled"
         : params.ok && params.effect === "partial"
@@ -250,21 +245,45 @@ export function evaluateActionContract(
   receipts: AgentActionReceipt[],
   progress?: AgentActionProgressLedger,
 ): ContractEvaluation {
-  const explicitNoWrite = contract.hardConstraints?.some(
-    (constraint) => constraint.kind === "no_write",
+  const constraints = normalizeStoredActionConstraints(
+    contract.hardConstraints,
   );
-  if (explicitNoWrite) {
-    const attemptedEffect = receipts.some(
-      (receipt) => receipt.operation !== "read_full",
+  if (constraints.length) {
+    const attemptedForbiddenEffect = receipts.some((receipt) =>
+      proposalViolatesConstraints(
+        {
+          domains:
+            receipt.proofDomain === "file_state"
+              ? ["filesystem"]
+              : receipt.proofDomain === "execution"
+                ? receipt.capability === "zotero.script"
+                  ? ["privileged_zotero"]
+                  : ["local_execution"]
+                : ["zotero_library"],
+          effects:
+            receipt.operation === "read_full"
+              ? ["read"]
+              : receipt.proofDomain === "execution"
+                ? ["execute"]
+                : ["modify"],
+        },
+        constraints,
+      ),
     );
-    if (!attemptedEffect) return { state: "satisfied" };
-    return {
-      state: "failed",
-      correction:
-        "Correction for this turn: the user explicitly prohibited changes or execution. Do not retry or claim that anything changed.",
-      failure:
-        "An effectful action was blocked by an explicit user constraint.",
-    };
+    if (!attemptedForbiddenEffect && !contract.obligations.length) {
+      return { state: "satisfied" };
+    }
+    if (!attemptedForbiddenEffect) {
+      // Constraints do not replace normal obligation evaluation when this
+      // particular receipt is outside their declared domains/effects.
+    } else {
+      return {
+        state: "failed",
+        correction:
+          "Correction for this turn: the proposed effect is explicitly denied in this domain. Do not retry or claim that anything changed.",
+        failure: "An action was blocked by an explicit typed user constraint.",
+      };
+    }
   }
   if (!contract.obligations.length) {
     const effectReceipts = receipts.filter(

@@ -8,9 +8,14 @@ import type {
   AgentActionReceipt,
 } from "../contracts/types";
 import {
-  capabilityForLibraryMutation,
-  isLibraryMutationOperationType,
-} from "../services/libraryMutation/handlerOperations";
+  ACTION_CAPABILITIES,
+  operationCatalogEntry,
+} from "../contracts/operationCatalog";
+import type {
+  ActionConstraint,
+  ActionDomain,
+  ActionEffect,
+} from "../authorization/types";
 import type { DocumentSpec } from "../documents/types";
 import {
   decodeResearchPolicySnapshot,
@@ -64,52 +69,6 @@ function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value.map((entry, index) => text(entry, `${label}[${index}]`));
 }
-
-const ACTION_CAPABILITIES = new Set<AgentActionCapability>([
-  "zotero.read",
-  "zotero.tags",
-  "zotero.metadata",
-  "zotero.collections",
-  "zotero.notes",
-  "zotero.import",
-  "zotero.trash",
-  "zotero.attachments",
-  "zotero.annotations",
-  "zotero.settings",
-  "zotero.undo",
-  "file.write",
-  "command.execute",
-  "zotero.script",
-]);
-
-const EXTERNAL_OPERATIONS = new Map<
-  AgentActionOperation,
-  { capability: AgentActionCapability; proofDomain: AgentActionProofDomain }
->([
-  ["note_create", { capability: "zotero.notes", proofDomain: "zotero_state" }],
-  ["note_edit", { capability: "zotero.notes", proofDomain: "zotero_state" }],
-  ["note_append", { capability: "zotero.notes", proofDomain: "zotero_state" }],
-  [
-    "annotation_write",
-    { capability: "zotero.annotations", proofDomain: "zotero_state" },
-  ],
-  [
-    "settings_update",
-    { capability: "zotero.settings", proofDomain: "zotero_state" },
-  ],
-  ["undo", { capability: "zotero.undo", proofDomain: "zotero_state" }],
-  ["revert", { capability: "zotero.undo", proofDomain: "zotero_state" }],
-  ["file_write", { capability: "file.write", proofDomain: "file_state" }],
-  [
-    "command_execute",
-    { capability: "command.execute", proofDomain: "execution" },
-  ],
-  [
-    "zotero_script_execute",
-    { capability: "zotero.script", proofDomain: "execution" },
-  ],
-  ["read_full", { capability: "zotero.read", proofDomain: "zotero_state" }],
-]);
 
 function optionalText(value: unknown, label: string): string | undefined {
   if (value === undefined) return undefined;
@@ -288,12 +247,7 @@ export function decodeActionReceipt(
   if (!ACTION_CAPABILITIES.has(capability)) {
     throw new Error(`${label}.capability is invalid`);
   }
-  const operationDetails = isLibraryMutationOperationType(String(operation))
-    ? {
-        capability: capabilityForLibraryMutation(operation as never),
-        proofDomain: "zotero_state" as const,
-      }
-    : EXTERNAL_OPERATIONS.get(operation);
+  const operationDetails = operationCatalogEntry(String(operation));
   if (
     !operationDetails ||
     operationDetails.capability !== capability ||
@@ -371,12 +325,7 @@ function decodeActionIntent(
   if (!ACTION_CAPABILITIES.has(capability)) {
     throw new Error(`${label}.capability is invalid`);
   }
-  const operationDetails = isLibraryMutationOperationType(String(operation))
-    ? {
-        capability: capabilityForLibraryMutation(operation as never),
-        proofDomain: "zotero_state" as const,
-      }
-    : EXTERNAL_OPERATIONS.get(operation);
+  const operationDetails = operationCatalogEntry(String(operation));
   if (!operationDetails) throw new Error(`${label}.operation is invalid`);
   if (
     operationDetails.capability !== capability ||
@@ -549,6 +498,57 @@ function decodeScope(value: unknown): ResearchScopeSpec {
   if (kind === "items" && !itemKeys?.length) {
     throw new Error("Item research requires itemKeys");
   }
+  if (
+    kind === "library" &&
+    (input.collectionIds !== undefined ||
+      input.tagNames !== undefined ||
+      input.itemKeys !== undefined ||
+      input.includeAutomaticTags !== undefined)
+  ) {
+    throw new Error("Whole-library research scope does not accept filters");
+  }
+  if (
+    kind === "collections" &&
+    (input.tagNames !== undefined ||
+      input.itemKeys !== undefined ||
+      input.includeAutomaticTags !== undefined)
+  ) {
+    throw new Error("Collection research scope accepts only collectionIds");
+  }
+  if (
+    kind === "tags" &&
+    (input.collectionIds !== undefined || input.itemKeys !== undefined)
+  ) {
+    throw new Error("Tag research scope accepts only tagNames");
+  }
+  if (
+    kind === "items" &&
+    (input.collectionIds !== undefined ||
+      input.tagNames !== undefined ||
+      input.includeAutomaticTags !== undefined)
+  ) {
+    throw new Error("Item research scope accepts only itemKeys");
+  }
+  if (
+    kind === "mixed" &&
+    !collectionIds?.length &&
+    !tagNames?.length &&
+    !itemKeys?.length
+  ) {
+    throw new Error("Mixed research scope requires at least one filter");
+  }
+  if (kind === "library") return { libraryID, kind };
+  if (kind === "collections")
+    return { libraryID, kind, collectionIds: collectionIds! };
+  if (kind === "tags") {
+    return {
+      libraryID,
+      kind,
+      tagNames: tagNames!,
+      includeAutomaticTags: input.includeAutomaticTags === true,
+    };
+  }
+  if (kind === "items") return { libraryID, kind, itemKeys: itemKeys! };
   return {
     libraryID,
     kind,
@@ -699,7 +699,10 @@ function decodeDocumentSpec(value: unknown): DocumentSpec {
 
 export function decodeActionContract(value: unknown): AgentActionContract {
   const input = record(value, "effects.libraryMutation.contract");
-  if (input.version !== 2 || !Array.isArray(input.obligations)) {
+  if (
+    (input.version !== 2 && input.version !== 3) ||
+    !Array.isArray(input.obligations)
+  ) {
     throw new Error("effects.libraryMutation.contract is invalid");
   }
   const id = text(input.id, "effects.libraryMutation.contract.id");
@@ -734,16 +737,61 @@ export function decodeActionContract(value: unknown): AgentActionContract {
               entry,
               `effects.libraryMutation.contract.hardConstraints[${index}]`,
             );
-            if (constraint.kind !== "no_write") {
+            const description = text(
+              constraint.description,
+              `effects.libraryMutation.contract.hardConstraints[${index}].description`,
+            );
+            if (constraint.kind === "no_write") {
+              return { kind: "no_write" as const, description };
+            }
+            if (constraint.kind !== "deny_effects") {
               throw new Error("Unsupported action hard constraint");
             }
+            const validEffects = new Set<ActionEffect>([
+              "read",
+              "create",
+              "modify",
+              "delete",
+              "execute",
+              "egress",
+            ]);
+            const validDomains = new Set<ActionDomain>([
+              "zotero_library",
+              "filesystem",
+              "local_execution",
+              "network",
+              "privileged_zotero",
+            ]);
+            const effects = stringArray(
+              constraint.effects,
+              `effects.libraryMutation.contract.hardConstraints[${index}].effects`,
+            ) as ActionEffect[];
+            const domains = stringArray(
+              constraint.domains,
+              `effects.libraryMutation.contract.hardConstraints[${index}].domains`,
+            ) as ActionDomain[];
+            if (
+              !effects.length ||
+              effects.some((effect) => !validEffects.has(effect))
+            ) {
+              throw new Error(
+                "Invalid denied effect in action hard constraint",
+              );
+            }
+            if (
+              !domains.length ||
+              domains.some((domain) => !validDomains.has(domain))
+            ) {
+              throw new Error(
+                "Invalid denied domain in action hard constraint",
+              );
+            }
             return {
-              kind: "no_write" as const,
-              description: text(
-                constraint.description,
-                `effects.libraryMutation.contract.hardConstraints[${index}].description`,
-              ),
-            };
+              kind: "deny_effects",
+              effects,
+              domains,
+              description,
+            } satisfies ActionConstraint;
           });
         })();
   const obligations = input.obligations.map((entry, index) =>
@@ -755,7 +803,7 @@ export function decodeActionContract(value: unknown): AgentActionContract {
   ) as AgentActionContract["obligations"];
   uniqueIds(obligations, "effects.libraryMutation.contract.obligations");
   return {
-    version: 2,
+    version: input.version as 2 | 3,
     id,
     hardConstraints,
     writeDisposition: input.writeDisposition,

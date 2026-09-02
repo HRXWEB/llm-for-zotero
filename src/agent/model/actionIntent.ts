@@ -6,60 +6,15 @@ import type {
   AgentActionProofDomain,
   AgentRuntimeRequest,
 } from "../types";
-import {
-  capabilityForLibraryMutation,
-  isLibraryMutationOperationType,
-} from "../services/libraryMutation/handlerOperations";
+import { operationCatalogEntry } from "../contracts/operationCatalog";
 import type { WriteNoteDestination } from "../writeNoteDestination";
-
-const EXTERNAL_OPERATION_DETAILS: Partial<
-  Record<
-    AgentActionOperation,
-    { capability: AgentActionCapability; proofDomain: AgentActionProofDomain }
-  >
-> = {
-  note_create: { capability: "zotero.notes", proofDomain: "zotero_state" },
-  note_edit: { capability: "zotero.notes", proofDomain: "zotero_state" },
-  note_append: { capability: "zotero.notes", proofDomain: "zotero_state" },
-  annotation_write: {
-    capability: "zotero.annotations",
-    proofDomain: "zotero_state",
-  },
-  settings_update: {
-    capability: "zotero.settings",
-    proofDomain: "zotero_state",
-  },
-  undo: { capability: "zotero.undo", proofDomain: "zotero_state" },
-  revert: { capability: "zotero.undo", proofDomain: "zotero_state" },
-  file_write: { capability: "file.write", proofDomain: "file_state" },
-  command_execute: {
-    capability: "command.execute",
-    proofDomain: "execution",
-  },
-  zotero_script_execute: {
-    capability: "zotero.script",
-    proofDomain: "execution",
-  },
-  read_full: { capability: "zotero.read", proofDomain: "zotero_state" },
-};
 
 function operationDetails(operation: string): {
   operation: AgentActionOperation;
   capability: AgentActionCapability;
   proofDomain: AgentActionProofDomain;
 } | null {
-  if (isLibraryMutationOperationType(operation)) {
-    return {
-      operation,
-      capability: capabilityForLibraryMutation(operation),
-      proofDomain: "zotero_state",
-    };
-  }
-  const external =
-    EXTERNAL_OPERATION_DETAILS[operation as AgentActionOperation];
-  return external
-    ? { operation: operation as AgentActionOperation, ...external }
-    : null;
+  return operationCatalogEntry(operation);
 }
 
 function parseParameters(value: unknown): AgentActionParameters | undefined {

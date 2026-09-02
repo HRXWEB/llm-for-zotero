@@ -202,7 +202,7 @@ function buildFullUserMessage(
         "PLAN MODE — pre-approval boundary:",
         `Plan identity: ${request.planContext.planId} revision ${request.planContext.revision}.`,
         "You may inspect Zotero context, PDFs, and read-only web/literature sources. You must not mutate Zotero, write files, run commands or scripts, import/upload data, change settings, or trigger any other side effect.",
-        "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps and objective acceptance criteria. Keep each step content to one short sentence; put validation detail in acceptanceCriteria. Then set ready=true and stop for user review.",
+        "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps. Every acceptance criterion must provide a stable criterionId, an objective description, and its verifier; the host derives requirements from those criteria. Keep each step content to one short sentence. Then set ready=true and stop for user review.",
       ].join("\n"),
     );
   } else if (request.planContext?.phase === "executing") {
@@ -240,7 +240,13 @@ function buildFullUserMessage(
               `${index + 1}. [${task.status}] taskId=${task.taskId}\n` +
               `   ${task.content}\n` +
               `   While active: ${task.activeForm}\n` +
-              `   Acceptance: ${task.acceptanceCriteria.join("; ")}`,
+              `   Acceptance: ${task.acceptanceCriteria
+                .map((criterion) =>
+                  typeof criterion === "string"
+                    ? criterion
+                    : criterion.description,
+                )
+                .join("; ")}`,
           ),
           ...deliverableLines,
           "The host has already started the first pending task and owns the full ledger. After evidence exists, call task_update with only the task or tasks whose status changes, using their exact taskId values. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks.",

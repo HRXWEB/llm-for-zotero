@@ -486,7 +486,7 @@ export function createFileIOTool(): AgentWriteToolDefinition<
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

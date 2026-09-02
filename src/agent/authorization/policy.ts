@@ -1,28 +1,151 @@
 import type {
+  ActionConstraint,
+  ActionDomain,
+  ActionEffect,
   ActionProposal,
   AuthorizationDecision,
   OriginalAuthorizationContext,
 } from "./types";
 
-const EXPLICIT_NO_WRITE =
-  /\b(?:do\s+not|don't|dont|never|must\s+not)\s+(?:change|modify|edit|write|delete|remove|run|execute|create|save|update|mutate)\b/i;
+const PROHIBITION = String.raw`(?:do\s+not|don't|dont|never|must\s+not|no)`;
+const LIBRARY_MUTATION = new RegExp(
+  String.raw`\b${PROHIBITION}\b[^.!?\n]{0,80}\b(?:change|modify|edit|write|delete|remove|create|save|update|mutate)\b[^.!?\n]{0,60}\b(?:library|zotero|items?|papers?|notes?|collections?|tags?|metadata)\b|\b${PROHIBITION}\b[^.!?\n]{0,40}\b(?:library|zotero|items?|papers?|notes?|collections?|tags?|metadata)\b[^.!?\n]{0,60}\b(?:change|modify|edit|write|delete|remove|create|save|update|mutate)\b`,
+  "i",
+);
+const GENERIC_MUTATION = new RegExp(
+  String.raw`\b${PROHIBITION}\b[^.!?\n]{0,30}\b(?:change|modify|edit|write|delete|remove|create|save|update|mutate)\s+(?:anything|files?|data|state)\b`,
+  "i",
+);
+const EXECUTION = new RegExp(
+  String.raw`\b${PROHIBITION}\b[^.!?\n]{0,30}\b(?:run|execute|launch)\b(?:[^.!?\n]{0,30}\b(?:commands?|scripts?|programs?|tests?|builds?)\b)?`,
+  "i",
+);
+const EGRESS = new RegExp(
+  String.raw`\b${PROHIBITION}\b[^.!?\n]{0,50}\b(?:upload|share|send|transmit|post|publish|network(?:\s+requests?)?|external\s+requests?|egress)\b`,
+  "i",
+);
+
+function constraint(
+  effects: ActionEffect[],
+  domains: ActionDomain[],
+  description: string,
+): ActionConstraint {
+  return { kind: "deny_effects", effects, domains, description };
+}
+
+export function parseActionConstraints(userText: string): ActionConstraint[] {
+  const constraints: ActionConstraint[] = [];
+  if (LIBRARY_MUTATION.test(userText)) {
+    constraints.push(
+      constraint(
+        ["create", "modify", "delete"],
+        ["zotero_library", "privileged_zotero"],
+        "The user prohibited mutations to the Zotero library.",
+      ),
+    );
+  } else if (GENERIC_MUTATION.test(userText)) {
+    constraints.push(
+      constraint(
+        ["create", "modify", "delete"],
+        ["zotero_library", "privileged_zotero", "filesystem"],
+        "The user prohibited persistent state changes.",
+      ),
+    );
+  }
+  if (EXECUTION.test(userText)) {
+    constraints.push(
+      constraint(
+        ["execute"],
+        ["local_execution", "privileged_zotero"],
+        "The user prohibited commands and scripts from executing.",
+      ),
+    );
+  }
+  if (EGRESS.test(userText)) {
+    constraints.push(
+      constraint(
+        ["egress"],
+        ["network"],
+        "The user prohibited external network egress.",
+      ),
+    );
+  }
+  return constraints;
+}
 
 export function hasExplicitNoWriteConstraint(userText: string): boolean {
-  return EXPLICIT_NO_WRITE.test(userText);
+  return parseActionConstraints(userText).some((entry) =>
+    entry.effects.some((effect) =>
+      ["create", "modify", "delete", "execute"].includes(effect),
+    ),
+  );
+}
+
+export function proposalViolatesConstraints(
+  proposal: Pick<ActionProposal, "domains" | "effects">,
+  constraints: readonly ActionConstraint[],
+): ActionConstraint | null {
+  return (
+    constraints.find(
+      (constraint) =>
+        proposal.domains.some((domain) =>
+          constraint.domains.includes(domain),
+        ) &&
+        proposal.effects.some((effect) => constraint.effects.includes(effect)),
+    ) || null
+  );
+}
+
+export function normalizeStoredActionConstraints(
+  constraints:
+    | readonly (ActionConstraint | { kind: "no_write"; description: string })[]
+    | undefined,
+): ActionConstraint[] {
+  return (constraints || []).flatMap((entry) =>
+    entry.kind === "deny_effects"
+      ? [entry]
+      : [
+          constraint(
+            ["create", "modify", "delete", "execute"],
+            [
+              "zotero_library",
+              "filesystem",
+              "local_execution",
+              "privileged_zotero",
+            ],
+            entry.description,
+          ),
+        ],
+  );
 }
 
 export function authorizeOriginalAction(
   proposal: ActionProposal,
   context: OriginalAuthorizationContext,
 ): AuthorizationDecision {
-  const changesState = proposal.effects.some((effect) =>
-    ["create", "modify", "delete", "execute", "egress"].includes(effect),
-  );
-  if (context.hasExplicitNoWrite && changesState) {
+  const legacyConstraints =
+    context.hasExplicitNoWrite && !context.constraints?.length
+      ? [
+          constraint(
+            ["create", "modify", "delete", "execute"],
+            [
+              "zotero_library",
+              "filesystem",
+              "local_execution",
+              "privileged_zotero",
+            ],
+            "The user's request explicitly prohibits changing or executing anything.",
+          ),
+        ]
+      : [];
+  const violation = proposalViolatesConstraints(proposal, [
+    ...(context.constraints || []),
+    ...legacyConstraints,
+  ]);
+  if (violation) {
     return {
       kind: "block",
-      reason:
-        "The user's request explicitly prohibits changing or executing anything.",
+      reason: violation.description,
     };
   }
   if (

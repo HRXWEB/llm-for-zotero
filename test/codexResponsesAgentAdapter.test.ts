@@ -155,7 +155,7 @@ describe("CodexResponsesAgentAdapter", function () {
         name: "library_search",
         description: "Search the library",
         inputSchema: { type: "object" },
-        mutability: "read",
+        executionClass: "read",
         requiresConfirmation: false,
       },
     ];

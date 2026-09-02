@@ -15,6 +15,13 @@ export type ActionEffect =
   | "execute"
   | "egress";
 
+export type ActionConstraint = Readonly<{
+  kind: "deny_effects";
+  effects: ActionEffect[];
+  domains: ActionDomain[];
+  description: string;
+}>;
+
 export type ActionRiskSignal =
   | "ambiguous_target"
   | "scope_expansion"
@@ -57,5 +64,7 @@ export type AuthorizationDecision =
 export type OriginalAuthorizationContext = {
   mode: OriginalAgentPermissionMode;
   userText: string;
-  hasExplicitNoWrite: boolean;
+  constraints?: readonly ActionConstraint[];
+  /** Legacy caller compatibility; new persisted contracts use constraints. */
+  hasExplicitNoWrite?: boolean;
 };

@@ -261,7 +261,7 @@ export function getAgentApi() {
      *     name: "my_custom_tool",
      *     description: "Does something custom",
      *     inputSchema: { type: "object", properties: { query: { type: "string" } } },
-     *     mutability: "read",
+     *     executionClass: "read",
      *     requiresConfirmation: false,
      *   },
      *   validate: (args) => {

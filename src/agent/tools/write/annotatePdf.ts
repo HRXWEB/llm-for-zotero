@@ -109,7 +109,7 @@ export function createAnnotatePdfTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

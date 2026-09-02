@@ -2,6 +2,7 @@ import type {
   ExecutionTask,
   ExecutionTaskStatus,
   PlanArtifact,
+  PlanAcceptanceCriterion,
   PlanArtifactStatus,
   PlanCompletionRequirement,
   PlanCompletionRequirementKind,
@@ -90,6 +91,7 @@ const REQUIREMENT_KINDS = new Set<PlanCompletionRequirementKind>([
   "document_integrity",
   "document_published",
   "mutation_receipts",
+  "user_decision",
 ]);
 const TASK_STATUSES = new Set<ExecutionTaskStatus>([
   "pending",
@@ -122,7 +124,42 @@ const EVIDENCE_KINDS = new Set<TaskEvidenceKind>([
   "research_coverage",
   "document_integrity",
   "document_published",
+  "user_decision",
 ]);
+
+function decodeAcceptanceCriteria(
+  value: unknown,
+  label: string,
+  typed: boolean,
+): Array<string | PlanAcceptanceCriterion> {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (!typed) return stringList(value, label);
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const input = requiredRecord(entry, `${label}[${index}]`);
+    const criterionId = requiredString(
+      input.criterionId,
+      `${label}[${index}].criterionId`,
+    );
+    if (seen.has(criterionId)) {
+      throw new Error(`${label} contains duplicate criterion ${criterionId}`);
+    }
+    seen.add(criterionId);
+    if (
+      !REQUIREMENT_KINDS.has(input.verifier as PlanCompletionRequirementKind)
+    ) {
+      throw new Error(`${label}[${index}].verifier is invalid`);
+    }
+    return {
+      criterionId,
+      description: requiredString(
+        input.description,
+        `${label}[${index}].description`,
+      ),
+      verifier: input.verifier as PlanCompletionRequirementKind,
+    };
+  });
+}
 
 function decodeProvider(value: unknown, label: string): PlanProvider {
   if (!PROVIDERS.has(value as PlanProvider)) {
@@ -134,6 +171,7 @@ function decodeProvider(value: unknown, label: string): PlanProvider {
 function decodeRequirements(
   value: unknown,
   label: string,
+  typed = false,
 ): PlanCompletionRequirement[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
@@ -156,15 +194,37 @@ function decodeRequirements(
     return {
       requirementId,
       kind: input.kind as PlanCompletionRequirementKind,
+      criterionIds: typed
+        ? stringList(input.criterionIds, `${label}[${index}].criterionIds`)
+        : [],
       contractDigest: requiredString(
         input.contractDigest,
         `${label}[${index}].contractDigest`,
       ),
+      targetBoundary: isRecord(input.targetBoundary)
+        ? {
+            targetIds: Array.isArray(input.targetBoundary.targetIds)
+              ? stringList(
+                  input.targetBoundary.targetIds,
+                  `${label}[${index}].targetBoundary.targetIds`,
+                )
+              : undefined,
+            scopeDigest: optionalString(input.targetBoundary.scopeDigest),
+            expectedCount:
+              input.targetBoundary.expectedCount === undefined
+                ? undefined
+                : requiredInteger(
+                    input.targetBoundary.expectedCount,
+                    `${label}[${index}].targetBoundary.expectedCount`,
+                    0,
+                  ),
+          }
+        : undefined,
     };
   });
 }
 
-function decodeStep(value: unknown, index: number): PlanStep {
+function decodeStep(value: unknown, index: number, typed = false): PlanStep {
   const input = requiredRecord(value, `steps[${index}]`);
   if (!STEP_EFFECTS.has(input.expectedEffect as PlanStepEffect)) {
     throw new Error(`steps[${index}].expectedEffect is invalid`);
@@ -197,15 +257,17 @@ function decodeStep(value: unknown, index: number): PlanStep {
     planStepId: requiredString(input.planStepId, `steps[${index}].planStepId`),
     content: requiredString(input.content, `steps[${index}].content`),
     activeForm: requiredString(input.activeForm, `steps[${index}].activeForm`),
-    acceptanceCriteria: stringList(
+    acceptanceCriteria: decodeAcceptanceCriteria(
       input.acceptanceCriteria,
       `steps[${index}].acceptanceCriteria`,
+      typed,
     ),
     expectedCapability: optionalString(input.expectedCapability),
     expectedEffect: input.expectedEffect as PlanStepEffect,
     completionRequirements: decodeRequirements(
       input.completionRequirements,
       `steps[${index}].completionRequirements`,
+      typed,
     ),
     targetBoundary: target,
   };
@@ -258,7 +320,12 @@ function decodeSkillRoutingReceipt(
 
 export function decodePlanArtifact(value: unknown): PlanArtifact {
   const input = requiredRecord(value, "plan artifact");
-  if (input.version !== 1 && input.version !== 2 && input.version !== 3) {
+  if (
+    input.version !== 1 &&
+    input.version !== 2 &&
+    input.version !== 3 &&
+    input.version !== 4
+  ) {
     throw new Error("Plan artifact version is unsupported");
   }
   if (!ARTIFACT_STATUSES.has(input.status as PlanArtifactStatus)) {
@@ -269,7 +336,7 @@ export function decodePlanArtifact(value: unknown): PlanArtifact {
   }
   const status = input.status as PlanArtifactStatus;
   const contract =
-    input.version === 3
+    input.version === 3 || input.version === 4
       ? decodePlanContract(input.contract, {
           requireSnapshot:
             status === "awaiting_approval" || status === "approved",
@@ -295,10 +362,12 @@ export function decodePlanArtifact(value: unknown): PlanArtifact {
     skillRoutingReceipt: decodeSkillRoutingReceipt(input.skillRoutingReceipt),
     contract,
     contractDigest:
-      input.version === 3
+      input.version === 3 || input.version === 4
         ? requiredString(input.contractDigest, "plan artifact contractDigest")
         : optionalString(input.contractDigest),
-    steps: input.steps.map(decodeStep),
+    steps: input.steps.map((step, index) =>
+      decodeStep(step, index, input.version === 4),
+    ),
     createdAt: requiredNumber(input.createdAt, "plan artifact createdAt"),
     updatedAt: requiredNumber(input.updatedAt, "plan artifact updatedAt"),
     approvedAt:
@@ -310,7 +379,7 @@ export function decodePlanArtifact(value: unknown): PlanArtifact {
 
 export function decodeExecutionTask(value: unknown): ExecutionTask {
   const input = requiredRecord(value, "execution task");
-  if (input.version !== 1)
+  if (input.version !== 1 && input.version !== 2)
     throw new Error("Execution task version is unsupported");
   if (!TASK_STATUSES.has(input.status as ExecutionTaskStatus)) {
     throw new Error("Execution task status is invalid");
@@ -322,7 +391,7 @@ export function decodeExecutionTask(value: unknown): ExecutionTask {
     throw new Error("Execution task kind is invalid");
   }
   return {
-    version: 1,
+    version: input.version,
     taskId: requiredString(input.taskId, "execution task taskId"),
     executionId: requiredString(
       input.executionId,
@@ -333,14 +402,16 @@ export function decodeExecutionTask(value: unknown): ExecutionTask {
     kind: input.kind,
     content: requiredString(input.content, "execution task content"),
     activeForm: requiredString(input.activeForm, "execution task activeForm"),
-    acceptanceCriteria: stringList(
+    acceptanceCriteria: decodeAcceptanceCriteria(
       input.acceptanceCriteria,
       "execution task acceptanceCriteria",
+      input.version === 2,
     ),
     expectedEffect: input.expectedEffect as PlanStepEffect,
     completionRequirements: decodeRequirements(
       input.completionRequirements,
       "execution task completionRequirements",
+      input.version === 2,
     ),
     expectedCapability: optionalString(input.expectedCapability),
     obligationIds: stringList(
@@ -372,7 +443,7 @@ export function decodeExecutionTask(value: unknown): ExecutionTask {
 
 export function decodePlanExecutionLedger(value: unknown): PlanExecutionLedger {
   const input = requiredRecord(value, "plan execution ledger");
-  if (input.version !== 1) {
+  if (input.version !== 1 && input.version !== 2) {
     throw new Error("Plan execution ledger version is unsupported");
   }
   if (!EXECUTION_STATUSES.has(input.status as PlanExecutionStatus)) {
@@ -384,7 +455,7 @@ export function decodePlanExecutionLedger(value: unknown): PlanExecutionLedger {
   const grant = requiredRecord(input.grant, "plan execution grant");
   if (grant.version !== 1) throw new Error("Approved plan grant is invalid");
   return {
-    version: 1,
+    version: input.version,
     executionId: requiredString(input.executionId, "executionId"),
     planId: requiredString(input.planId, "planId"),
     revision: requiredNumber(input.revision, "revision"),
@@ -424,7 +495,7 @@ export function decodePlanExecutionLedger(value: unknown): PlanExecutionLedger {
 
 export function decodeTaskEvidence(value: unknown): TaskEvidence {
   const input = requiredRecord(value, "task evidence");
-  if (input.version !== 1 && input.version !== 2) {
+  if (input.version !== 1 && input.version !== 2 && input.version !== 3) {
     throw new Error("Task evidence version is unsupported");
   }
   if (!EVIDENCE_KINDS.has(input.kind as TaskEvidenceKind)) {
@@ -438,6 +509,10 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
       const sources = rawPayload.sources;
       if (sources !== undefined && !Array.isArray(sources)) {
         throw new Error("evidence.payload.sources must be an array");
+      }
+      const observations = rawPayload.observations;
+      if (observations !== undefined && !Array.isArray(observations)) {
+        throw new Error("evidence.payload.observations must be an array");
       }
       payload = {
         type,
@@ -471,6 +546,98 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
                         0,
                       ),
                 sourceFingerprint: optionalString(source.sourceFingerprint),
+              };
+            })
+          : undefined,
+        observations: Array.isArray(observations)
+          ? observations.map((entry, index) => {
+              const observation = requiredRecord(
+                entry,
+                `evidence.payload.observations[${index}]`,
+              );
+              if (
+                observation.version !== 1 ||
+                observation.issuer !== "zotero_host" ||
+                !Array.isArray(observation.capabilities)
+              ) {
+                throw new Error(
+                  `evidence.payload.observations[${index}] is invalid`,
+                );
+              }
+              const capabilities = stringList(
+                observation.capabilities,
+                `evidence.payload.observations[${index}].capabilities`,
+              );
+              if (
+                capabilities.some(
+                  (capability) =>
+                    ![
+                      "metadata",
+                      "abstract",
+                      "body",
+                      "figure",
+                      "quote",
+                    ].includes(capability),
+                )
+              ) {
+                throw new Error(
+                  `evidence.payload.observations[${index}].capabilities is invalid`,
+                );
+              }
+              return {
+                version: 1 as const,
+                issuer: "zotero_host" as const,
+                observationId: requiredString(
+                  observation.observationId,
+                  `evidence.payload.observations[${index}].observationId`,
+                ),
+                toolName: requiredString(
+                  observation.toolName,
+                  `evidence.payload.observations[${index}].toolName`,
+                ),
+                callDigest: requiredString(
+                  observation.callDigest,
+                  `evidence.payload.observations[${index}].callDigest`,
+                ),
+                inputDigest: requiredString(
+                  observation.inputDigest,
+                  `evidence.payload.observations[${index}].inputDigest`,
+                ),
+                resultDigest: requiredString(
+                  observation.resultDigest,
+                  `evidence.payload.observations[${index}].resultDigest`,
+                ),
+                libraryID: requiredInteger(
+                  observation.libraryID,
+                  `evidence.payload.observations[${index}].libraryID`,
+                  1,
+                ),
+                itemKey: requiredString(
+                  observation.itemKey,
+                  `evidence.payload.observations[${index}].itemKey`,
+                ),
+                capabilities: capabilities as Array<
+                  "metadata" | "abstract" | "body" | "figure" | "quote"
+                >,
+                attachmentItemKey: optionalString(
+                  observation.attachmentItemKey,
+                ),
+                pageIndex:
+                  observation.pageIndex === undefined
+                    ? undefined
+                    : requiredInteger(
+                        observation.pageIndex,
+                        `evidence.payload.observations[${index}].pageIndex`,
+                        0,
+                      ),
+                sourceFingerprint: optionalString(
+                  observation.sourceFingerprint,
+                ),
+                quoteCertificate: optionalString(observation.quoteCertificate),
+                certificateDigest: requiredString(
+                  observation.certificateDigest,
+                  `evidence.payload.observations[${index}].certificateDigest`,
+                ),
               };
             })
           : undefined,
@@ -591,11 +758,27 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
           "evidence.payload.receiptIds",
         ),
       };
+    } else if (type === "user_decision") {
+      payload = {
+        type,
+        actionId: requiredString(
+          rawPayload.actionId,
+          "evidence.payload.actionId",
+        ),
+        decidedAt: requiredNumber(
+          rawPayload.decidedAt,
+          "evidence.payload.decidedAt",
+        ),
+      };
     } else {
       throw new Error("evidence.payload.type is invalid");
     }
   }
-  if (input.version === 2 && input.requirementId && !payload) {
+  if (
+    (input.version === 2 || input.version === 3) &&
+    input.requirementId &&
+    !payload
+  ) {
     throw new Error("Typed completion evidence requires a payload");
   }
   return {
@@ -606,6 +789,10 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
     kind: input.kind as TaskEvidenceKind,
     verified: input.verified === true,
     requirementId: optionalString(input.requirementId),
+    criterionIds:
+      input.version === 3
+        ? stringList(input.criterionIds, "evidence.criterionIds")
+        : undefined,
     contractDigest: optionalString(input.contractDigest),
     receipt:
       input.receipt === undefined

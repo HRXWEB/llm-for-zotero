@@ -94,7 +94,7 @@ export function createReadPaperTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     presentation: {

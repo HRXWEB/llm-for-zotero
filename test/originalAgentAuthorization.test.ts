@@ -1,5 +1,8 @@
 import { assert } from "chai";
-import { authorizeOriginalAction } from "../src/agent/authorization/policy";
+import {
+  authorizeOriginalAction,
+  parseActionConstraints,
+} from "../src/agent/authorization/policy";
 import { buildActionProposal } from "../src/agent/authorization/proposal";
 import type {
   ActionProposal,
@@ -7,13 +10,16 @@ import type {
 } from "../src/agent/authorization/types";
 import type { AgentToolDefinition } from "../src/agent/types";
 
-function tool(name: string, mutability: "read" | "write" = "write") {
+function tool(
+  name: string,
+  executionClass: "read" | "external_effect" = "external_effect",
+) {
   return {
     spec: {
       name,
       description: name,
       inputSchema: { type: "object" },
-      mutability,
+      executionClass,
       requiresConfirmation: false,
     },
     validate: (input: unknown) => ({ ok: true as const, value: input }),
@@ -23,7 +29,7 @@ function tool(name: string, mutability: "read" | "write" = "write") {
 
 function proposal(name: string, input: unknown, effect: "none" | "write") {
   return buildActionProposal({
-    tool: tool(name, effect === "none" ? "read" : "write"),
+    tool: tool(name, effect === "none" ? "read" : "external_effect"),
     input,
     plan: {
       effect,
@@ -197,6 +203,54 @@ describe("Original Agent unified authorization", function () {
         { userText: "Delete the project output directory." },
       ).kind,
       "confirm",
+    );
+  });
+
+  it("keeps mutation, execution, and egress constraints in their declared domains", function () {
+    const webResearch = proposal(
+      "web_search",
+      { query: "recent papers" },
+      "none",
+    );
+    assert.equal(
+      decide(webResearch, {
+        userText: "Do not modify my library; look up recent papers.",
+        constraints: parseActionConstraints(
+          "Do not modify my library; look up recent papers.",
+        ),
+      }).kind,
+      "execute",
+    );
+    assert.equal(
+      decide(webResearch, {
+        userText: "No network requests.",
+        constraints: parseActionConstraints("No network requests."),
+      }).kind,
+      "block",
+    );
+    assert.equal(
+      decide(
+        proposal(
+          "file_io",
+          { action: "write", filePath: "/tmp/report.md", content: "done" },
+          "write",
+        ),
+        {
+          userText: "Do not modify my library; write a local report.",
+          hasExplicitNoWrite: true,
+          constraints: parseActionConstraints(
+            "Do not modify my library; write a local report.",
+          ),
+        },
+      ).kind,
+      "execute",
+    );
+    assert.equal(
+      decide(proposal("run_command", { command: "npm test" }, "write"), {
+        userText: "Do not run or execute commands.",
+        constraints: parseActionConstraints("Do not run or execute commands."),
+      }).kind,
+      "block",
     );
   });
 });

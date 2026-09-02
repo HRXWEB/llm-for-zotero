@@ -210,9 +210,7 @@ describe("citations, export and settings", function () {
                 : undefined,
         },
       });
-      const result = resolvePlanDocumentCitationPreference(
-        new ZoteroGateway(),
-      );
+      const result = resolvePlanDocumentCitationPreference(new ZoteroGateway());
       assert.equal(result.styleId, PLAN_AUTHOR_DATE_STYLE_ID);
       assert.equal(result.styleTitle, "APA 7th edition");
     });
@@ -235,9 +233,7 @@ describe("citations, export and settings", function () {
               : undefined,
         },
       });
-      const result = resolvePlanDocumentCitationPreference(
-        new ZoteroGateway(),
-      );
+      const result = resolvePlanDocumentCitationPreference(new ZoteroGateway());
       assert.equal(result.styleId, "custom-author-date");
     });
 
@@ -247,9 +243,7 @@ describe("citations, export and settings", function () {
       install({
         Items: {
           getByLibraryAndKey: (libraryID: number, itemKey: string) =>
-            libraryID === 1 && itemKey === "ITEMKEY"
-              ? { id: 42 }
-              : null,
+            libraryID === 1 && itemKey === "ITEMKEY" ? { id: 42 } : null,
         },
         Libraries: { userLibraryID: 1, get: () => undefined },
         Tabs: {

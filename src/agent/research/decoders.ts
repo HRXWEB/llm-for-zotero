@@ -112,6 +112,17 @@ export function decodeResearchJob(value: unknown): ResearchJob {
   if (!stages.has(input.activeStage as ResearchJob["activeStage"])) {
     throw new Error("Invalid research stage");
   }
+  const grantInput =
+    input.exceptionGrant === undefined
+      ? undefined
+      : object(input.exceptionGrant, "exceptionGrant");
+  if (
+    grantInput &&
+    (grantInput.version !== 1 ||
+      (grantInput.status !== "authorized" && grantInput.status !== "consumed"))
+  ) {
+    throw new Error("Invalid research exception grant");
+  }
   return {
     version: 1,
     researchJobId: string(input.researchJobId, "researchJobId"),
@@ -134,6 +145,50 @@ export function decodeResearchJob(value: unknown): ResearchJob {
       input.deepReadPlanned,
       "deepReadPlanned",
     ),
+    exceptionGrant: grantInput
+      ? {
+          version: 1,
+          grantId: string(grantInput.grantId, "exceptionGrant.grantId"),
+          planDigest: string(
+            grantInput.planDigest,
+            "exceptionGrant.planDigest",
+          ),
+          executionId: string(
+            grantInput.executionId,
+            "exceptionGrant.executionId",
+          ),
+          researchJobId: string(
+            grantInput.researchJobId,
+            "exceptionGrant.researchJobId",
+          ),
+          totalItems: nonNegativeInteger(
+            grantInput.totalItems,
+            "exceptionGrant.totalItems",
+          ),
+          screenedItems: nonNegativeInteger(
+            grantInput.screenedItems,
+            "exceptionGrant.screenedItems",
+          ),
+          candidateItems: nonNegativeInteger(
+            grantInput.candidateItems,
+            "exceptionGrant.candidateItems",
+          ),
+          deepReadCompleted: nonNegativeInteger(
+            grantInput.deepReadCompleted,
+            "exceptionGrant.deepReadCompleted",
+          ),
+          limitationSummary: string(
+            grantInput.limitationSummary,
+            "exceptionGrant.limitationSummary",
+          ),
+          status: grantInput.status as "authorized" | "consumed",
+          grantedAt: number(grantInput.grantedAt, "exceptionGrant.grantedAt"),
+          consumedAt:
+            grantInput.consumedAt === undefined
+              ? undefined
+              : number(grantInput.consumedAt, "exceptionGrant.consumedAt"),
+        }
+      : undefined,
     createdAt: number(input.createdAt, "createdAt"),
     updatedAt: number(input.updatedAt, "updatedAt"),
     completedAt:
@@ -273,7 +328,7 @@ export function decodeResearchEvidenceRecord(
   value: unknown,
 ): ResearchEvidenceRecord {
   const input = object(value, "research evidence record");
-  if (input.version !== 1)
+  if (input.version !== 1 && input.version !== 2)
     throw new Error("Unsupported evidence record version");
   const sourceKinds = new Set([
     "metadata",
@@ -305,7 +360,7 @@ export function decodeResearchEvidenceRecord(
       }
     : undefined;
   return {
-    version: 1,
+    version: input.version,
     evidenceRef: string(input.evidenceRef, "evidenceRef"),
     researchJobId: string(input.researchJobId, "researchJobId"),
     executionId: string(input.executionId, "executionId"),
@@ -314,6 +369,10 @@ export function decodeResearchEvidenceRecord(
     itemKey: string(input.itemKey, "itemKey"),
     sourceFingerprint: string(input.sourceFingerprint, "sourceFingerprint"),
     sourceKind: input.sourceKind as ResearchEvidenceRecord["sourceKind"],
+    observationId:
+      input.version === 2
+        ? string(input.observationId, "observationId")
+        : undefined,
     locator,
     createdAt: number(input.createdAt, "createdAt"),
   };

@@ -247,7 +247,7 @@ export function createWebSearchTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
       localAgentOnly: true,
     },

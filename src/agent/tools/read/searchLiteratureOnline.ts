@@ -209,7 +209,7 @@ export function createSearchLiteratureOnlineTool(
           libraryID: { type: "number" },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     guidance: {

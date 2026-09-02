@@ -10,6 +10,7 @@ import {
   isRegisteredLibraryMutationOperation,
 } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult } from "./toolResultEnvelope";
+import { operationAuthorityIsConsistent } from "./operationCatalog";
 
 export type CollectionSummary = {
   collectionId: number;
@@ -62,7 +63,7 @@ export type ActionContractGateway = {
 };
 
 export type PreparedActionExecution = {
-  mutability: "read" | "write";
+  executionClass: "read" | "control" | "external_effect";
   hasExplicitAdapter: boolean;
   proposals: AgentActionProposal[];
   operations: LibraryMutationOperation[];
@@ -293,7 +294,6 @@ export function verifyNoteWriteTarget(
 export async function prepareActionExecution(
   tool: AgentToolDefinition<any, any>,
   input: unknown,
-  _gateway: ActionContractGateway,
   context?: import("../types").AgentToolContext,
 ): Promise<PreparedActionExecution> {
   const operations = extractLibraryMutationOperations(input);
@@ -305,6 +305,13 @@ export async function prepareActionExecution(
     (operations.length
       ? describeLibraryMutationActions(input)
       : explicitReadActions(input));
+  for (const proposal of proposals) {
+    if (!operationAuthorityIsConsistent(proposal)) {
+      throw new Error(
+        `Typed action adapter rejected an inconsistent authority triple for ${proposal.operation}.`,
+      );
+    }
+  }
   const requestedTargets = uniqueStrings(
     proposals.flatMap((proposal) => proposal.requestedTargets),
   );
@@ -313,7 +320,7 @@ export async function prepareActionExecution(
   ]);
   const verifiedFacts = verifiedFactsForInput(input);
   return {
-    mutability: tool.spec.mutability,
+    executionClass: tool.spec.executionClass,
     hasExplicitAdapter: Boolean(tool.describeAction) || operations.length > 0,
     proposals,
     operations,

@@ -27,7 +27,11 @@ import {
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
-import { hasExplicitNoWriteConstraint } from "../authorization/policy";
+import {
+  normalizeStoredActionConstraints,
+  parseActionConstraints,
+  proposalViolatesConstraints,
+} from "../authorization/policy";
 
 export type {
   ActionContractGateway,
@@ -319,17 +323,9 @@ export class ActionContractService {
       resolved.push(...(await resolveScope(this.gateway, request, intent)));
     }
     return {
-      version: 2,
+      version: 3,
       id: contractId,
-      hardConstraints: hasExplicitNoWriteConstraint(request.userText || "")
-        ? [
-            {
-              kind: "no_write",
-              description:
-                "The user explicitly prohibited changes or execution in this request.",
-            },
-          ]
-        : [],
+      hardConstraints: parseActionConstraints(request.userText || ""),
       writeDisposition,
       interpretationSource:
         request.classifiedIntent?.actionInterpretationSource ||
@@ -427,7 +423,7 @@ export class ActionContractService {
     input: unknown,
     context?: AgentToolContext,
   ): Promise<PreparedActionExecution> {
-    return await prepareActionExecution(tool, input, this.gateway, context);
+    return await prepareActionExecution(tool, input, context);
   }
 
   async validateScope(
@@ -441,7 +437,7 @@ export class ActionContractService {
   ): Promise<ScopeValidationFailure | null> {
     if (!contract) return null;
     if (
-      prepared.mutability === "write" &&
+      prepared.executionClass === "external_effect" &&
       !prepared.proposals.length &&
       (!prepared.hasExplicitAdapter || options.concreteWrite)
     ) {
@@ -455,17 +451,31 @@ export class ActionContractService {
     const hasWriteProposal = prepared.proposals.some(
       (proposal) => proposal.operation !== "read_full",
     );
-    if (
-      hasWriteProposal &&
-      contract.hardConstraints?.some(
-        (constraint) => constraint.kind === "no_write",
+    const violatedConstraint = prepared.proposals
+      .map((proposal) =>
+        proposalViolatesConstraints(
+          {
+            domains:
+              proposal.proofDomain === "file_state"
+                ? ["filesystem"]
+                : proposal.proofDomain === "execution"
+                  ? proposal.capability === "zotero.script"
+                    ? ["privileged_zotero"]
+                    : ["local_execution"]
+                  : ["zotero_library"],
+            effects:
+              proposal.operation === "read_full"
+                ? ["read"]
+                : proposal.proofDomain === "execution"
+                  ? ["execute"]
+                  : ["modify"],
+          },
+          normalizeStoredActionConstraints(contract.hardConstraints),
+        ),
       )
-    ) {
-      return failure(
-        "Write blocked because the user explicitly prohibited changes or execution.",
-        contract,
-        prepared,
-      );
+      .find(Boolean);
+    if (hasWriteProposal && violatedConstraint) {
+      return failure(violatedConstraint.description, contract, prepared);
     }
     if (!contract.obligations.length) {
       // Classifier output is a planning hint, not permission authority.

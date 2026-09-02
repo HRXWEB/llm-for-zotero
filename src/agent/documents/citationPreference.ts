@@ -1,7 +1,6 @@
 import type { ZoteroGateway } from "../services/zoteroGateway";
 
-export const PLAN_AUTHOR_DATE_STYLE_ID =
-  "http://www.zotero.org/styles/apa";
+export const PLAN_AUTHOR_DATE_STYLE_ID = "http://www.zotero.org/styles/apa";
 
 type ZoteroStyleDescriptor = {
   class?: string;
@@ -67,7 +66,6 @@ export function resolvePlanDocumentCitationPreference(
     ).trim() || "en-US";
   const styleTitle =
     gateway?.listCitationStyles().find((style) => style.id === styleId)
-      ?.title ||
-    (styleId === PLAN_AUTHOR_DATE_STYLE_ID ? "APA" : styleId);
+      ?.title || (styleId === PLAN_AUTHOR_DATE_STYLE_ID ? "APA" : styleId);
   return { styleId, styleTitle, locale };
 }

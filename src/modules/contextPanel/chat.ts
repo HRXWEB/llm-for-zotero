@@ -3653,7 +3653,18 @@ function buildCodexNativeTurnCallbacks(ctx: {
           planStepId: `${planning.planId}:r${planning.revision}:s${index + 1}`,
           content: step.content,
           activeForm: step.content,
-          acceptanceCriteria: [`Verify: ${step.content}`],
+          acceptanceCriteria: [
+            {
+              criterionId: `${planning.planId}:r${planning.revision}:s${index + 1}:criterion`,
+              description: `Verify: ${step.content}`,
+              verifier:
+                inferPlanStepEffect(step.content) === "mutation"
+                  ? "mutation_receipts"
+                  : inferPlanStepEffect(step.content) === "read"
+                    ? "verified_read"
+                    : "bounded_reasoning",
+            },
+          ],
           expectedEffect: inferPlanStepEffect(step.content),
         })),
         actionContractId: ctx.actionContract?.id,

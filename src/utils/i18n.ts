@@ -110,6 +110,8 @@ const zhCN: Record<string, string> = {
   "Coming later": "即将推出",
   "Context window:": "上下文窗口：",
   "Context window usage unavailable": "上下文窗口使用量不可用",
+  "Estimated active context window usage": "预计活动上下文窗口使用量",
+  "Active context window usage": "活动上下文窗口使用量",
   "Usage unavailable": "使用量不可用",
   "Send a message to measure usage": "发送消息后显示使用量",
   used: "已使用",

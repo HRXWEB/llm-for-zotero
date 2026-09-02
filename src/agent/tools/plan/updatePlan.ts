@@ -8,6 +8,7 @@ import {
   decodePlanContract,
 } from "../../plans/contracts";
 import type {
+  PlanAcceptanceCriterion,
   PlanCompletionRequirementKind,
   PlanContract,
   PlanStepEffect,
@@ -25,10 +26,9 @@ type UpdatePlanInput = {
     planStepId?: string;
     content: string;
     activeForm: string;
-    acceptanceCriteria: string[];
+    acceptanceCriteria: PlanAcceptanceCriterion[];
     expectedCapability?: string;
     expectedEffect: PlanStepEffect;
-    completionRequirements?: PlanCompletionRequirementKind[];
   }>;
 };
 
@@ -39,13 +39,14 @@ const EFFECTS = new Set<PlanStepEffect>([
   "reasoning",
 ]);
 
-const COMPLETION_REQUIREMENTS = new Set<PlanCompletionRequirementKind>([
+const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
   "verified_read",
   "bounded_reasoning",
   "research_coverage",
   "document_integrity",
   "document_published",
   "mutation_receipts",
+  "user_decision",
 ]);
 
 function validateUpdatePlanInput(
@@ -67,9 +68,21 @@ function validateUpdatePlanInput(
     const activeForm =
       typeof raw.activeForm === "string" ? raw.activeForm.trim() : "";
     const acceptanceCriteria = Array.isArray(raw.acceptanceCriteria)
-      ? raw.acceptanceCriteria
-          .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-          .filter(Boolean)
+      ? raw.acceptanceCriteria.flatMap((entry) => {
+          if (!validateObject<Record<string, unknown>>(entry)) return [];
+          const criterionId =
+            typeof entry.criterionId === "string"
+              ? entry.criterionId.trim()
+              : "";
+          const description =
+            typeof entry.description === "string"
+              ? entry.description.trim()
+              : "";
+          const verifier = entry.verifier as PlanCompletionRequirementKind;
+          return criterionId && description && CRITERION_VERIFIERS.has(verifier)
+            ? [{ criterionId, description, verifier }]
+            : [];
+        })
       : [];
     const expectedEffect = raw.expectedEffect as PlanStepEffect;
     if (!content || !activeForm || !acceptanceCriteria.length) {
@@ -80,18 +93,11 @@ function validateUpdatePlanInput(
     if (!EFFECTS.has(expectedEffect)) {
       return fail(`steps[${index}].expectedEffect is invalid`);
     }
-    const completionRequirements = Array.isArray(raw.completionRequirements)
-      ? raw.completionRequirements.filter(
-          (entry): entry is PlanCompletionRequirementKind =>
-            typeof entry === "string" &&
-            COMPLETION_REQUIREMENTS.has(entry as PlanCompletionRequirementKind),
-        )
-      : undefined;
     if (
-      Array.isArray(raw.completionRequirements) &&
-      completionRequirements?.length !== raw.completionRequirements.length
+      Array.isArray(raw.acceptanceCriteria) &&
+      acceptanceCriteria.length !== raw.acceptanceCriteria.length
     ) {
-      return fail(`steps[${index}].completionRequirements is invalid`);
+      return fail(`steps[${index}].acceptanceCriteria is invalid`);
     }
     steps.push({
       planStepId:
@@ -107,7 +113,6 @@ function validateUpdatePlanInput(
           ? raw.expectedCapability.trim()
           : undefined,
       expectedEffect,
-      completionRequirements,
     });
   }
   if (args.ready === true && (steps.length < 3 || steps.length > 7)) {
@@ -476,41 +481,46 @@ export function createUpdatePlanTool(
                   minItems: 1,
                   description:
                     "Objective completion checks used by the host; keep implementation detail here rather than in content.",
-                  items: { type: "string" },
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["criterionId", "description", "verifier"],
+                    properties: {
+                      criterionId: { type: "string" },
+                      description: { type: "string" },
+                      verifier: {
+                        type: "string",
+                        enum: [
+                          "verified_read",
+                          "research_coverage",
+                          "document_integrity",
+                          "document_published",
+                          "mutation_receipts",
+                          "bounded_reasoning",
+                          "user_decision",
+                        ],
+                      },
+                    },
+                  },
                 },
                 expectedCapability: { type: "string" },
                 expectedEffect: {
                   type: "string",
                   enum: ["read", "artifact", "mutation", "reasoning"],
                 },
-                completionRequirements: {
-                  type: "array",
-                  uniqueItems: true,
-                  items: {
-                    type: "string",
-                    enum: [
-                      "verified_read",
-                      "bounded_reasoning",
-                      "research_coverage",
-                      "document_integrity",
-                      "document_published",
-                      "mutation_receipts",
-                    ],
-                  },
-                },
               },
             },
           },
         },
       },
-      mutability: "read",
+      executionClass: "control",
       requiresConfirmation: false,
     },
     isAvailable: (request) => request.planContext?.phase === "planning",
     guidance: {
       matches: (request) => request.planContext?.phase === "planning",
       instruction:
-        "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and 3–7 stable steps. For a fuzzy multi-paper document, use contract.investigation with question, stable subquestion/criterion IDs, scope such as {libraryID:1,kind:'library'}, requiredEvidenceDepth, estimatedDeepReadPapers, and approvedLargeCorpus; use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use research_coverage on the screening/deep-evidence task, document_integrity and document_published on the document task, and mutation_receipts only on a mutation task. Put objective validation in acceptanceCriteria. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
+        "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and 3–7 stable steps. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. For a fuzzy multi-paper document, use contract.investigation with question, stable subquestion/criterion IDs, strict scope such as {libraryID:1,kind:'library'}, requiredEvidenceDepth, estimatedDeepReadPapers, and approvedLargeCorpus; use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use verifier research_coverage on the screening/deep-evidence criterion, document_integrity and document_published on document criteria, mutation_receipts only on a mutation criterion, and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
     },
     validate: validateUpdatePlanInput,
     execute: async (input, context) => {
@@ -520,10 +530,7 @@ export function createUpdatePlanTool(
       }
       const contract = await resolvePlanContract({
         raw: input.contract,
-        steps: input.steps.map(({ completionRequirements, ...step }) => ({
-          ...step,
-          completionRequirementKinds: completionRequirements,
-        })),
+        steps: input.steps,
         actionContract: context.request.actionContract,
         ready: input.ready,
         gateway,

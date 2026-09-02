@@ -25,19 +25,32 @@ export type PlanCompletionRequirementKind =
   | "research_coverage"
   | "document_integrity"
   | "document_published"
-  | "mutation_receipts";
+  | "mutation_receipts"
+  | "user_decision";
+
+export type PlanAcceptanceCriterion = Readonly<{
+  criterionId: string;
+  description: string;
+  verifier: PlanCompletionRequirementKind;
+}>;
 
 export type PlanCompletionRequirement = Readonly<{
   requirementId: string;
   kind: PlanCompletionRequirementKind;
+  criterionIds: readonly string[];
   contractDigest: string;
+  targetBoundary?: Readonly<{
+    targetIds?: readonly string[];
+    scopeDigest?: string;
+    expectedCount?: number;
+  }>;
 }>;
 
 export type PlanStep = Readonly<{
   planStepId: string;
   content: string;
   activeForm: string;
-  acceptanceCriteria: readonly string[];
+  acceptanceCriteria: readonly (string | PlanAcceptanceCriterion)[];
   expectedCapability?: string;
   expectedEffect: PlanStepEffect;
   /** Authoritative for v3 plans. Legacy plans derive one requirement by effect. */
@@ -77,7 +90,7 @@ export type PlanContract = Readonly<{
 
 /** A revision is editable only while drafting and is frozen by approval. */
 export type PlanArtifact = Readonly<{
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   planId: string;
   conversationKey: number;
   provider: PlanProvider;
@@ -122,13 +135,15 @@ export type TaskEvidenceKind =
   | "reasoning_assertion"
   | "research_coverage"
   | "document_integrity"
-  | "document_published";
+  | "document_published"
+  | "user_decision";
 
 export type TaskEvidencePayload =
   | Readonly<{
       type: "verified_read";
       reference: string;
       sources?: readonly VerifiedReadSource[];
+      observations?: readonly TrustedReadObservation[];
     }>
   | Readonly<{
       type: "bounded_reasoning";
@@ -171,6 +186,11 @@ export type TaskEvidencePayload =
   | Readonly<{
       type: "mutation_receipts";
       receiptIds: readonly string[];
+    }>
+  | Readonly<{
+      type: "user_decision";
+      actionId: string;
+      decidedAt: number;
     }>;
 
 export type VerifiedReadSource = Readonly<{
@@ -181,14 +201,40 @@ export type VerifiedReadSource = Readonly<{
   sourceFingerprint?: string;
 }>;
 
+export type ReadObservationCapability =
+  | "metadata"
+  | "abstract"
+  | "body"
+  | "figure"
+  | "quote";
+
+export type TrustedReadObservation = Readonly<{
+  version: 1;
+  observationId: string;
+  issuer: "zotero_host";
+  toolName: string;
+  callDigest: string;
+  inputDigest: string;
+  resultDigest: string;
+  libraryID: number;
+  itemKey: string;
+  capabilities: readonly ReadObservationCapability[];
+  attachmentItemKey?: string;
+  pageIndex?: number;
+  sourceFingerprint?: string;
+  quoteCertificate?: string;
+  certificateDigest: string;
+}>;
+
 export type TaskEvidence = Readonly<{
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   evidenceId: string;
   executionId: string;
   taskId: string;
   kind: TaskEvidenceKind;
   verified: boolean;
   requirementId?: string;
+  criterionIds?: readonly string[];
   contractDigest?: string;
   receipt?: AgentActionReceipt;
   payload?: TaskEvidencePayload;
@@ -198,7 +244,7 @@ export type TaskEvidence = Readonly<{
 }>;
 
 export type ExecutionTask = Readonly<{
-  version: 1;
+  version: 1 | 2;
   taskId: string;
   executionId: string;
   planStepId: string;
@@ -206,7 +252,7 @@ export type ExecutionTask = Readonly<{
   kind: ExecutionTaskKind;
   content: string;
   activeForm: string;
-  acceptanceCriteria: readonly string[];
+  acceptanceCriteria: readonly (string | PlanAcceptanceCriterion)[];
   expectedEffect: PlanStepEffect;
   completionRequirements?: readonly PlanCompletionRequirement[];
   expectedCapability?: string;
@@ -244,7 +290,7 @@ export type ApprovedPlanGrant = Readonly<{
 }>;
 
 export type PlanExecutionLedger = Readonly<{
-  version: 1;
+  version: 1 | 2;
   executionId: string;
   planId: string;
   revision: number;

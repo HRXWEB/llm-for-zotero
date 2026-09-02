@@ -455,7 +455,7 @@ export function createQueryLibraryTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     guidance: {

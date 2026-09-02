@@ -4293,7 +4293,11 @@ function renderPlanContainer(params: {
         if (entry.acceptanceCriteria.length) {
           const criteria = params.doc.createElement("p");
           criteria.className = "llm-plan-task-criteria";
-          criteria.textContent = `Done when: ${entry.acceptanceCriteria.join(" · ")}`;
+          criteria.textContent = `Done when: ${entry.acceptanceCriteria
+            .map((criterion) =>
+              typeof criterion === "string" ? criterion : criterion.description,
+            )
+            .join(" · ")}`;
           detail.appendChild(criteria);
         }
         if (entry.evidenceIds.length) {

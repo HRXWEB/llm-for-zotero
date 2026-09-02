@@ -107,7 +107,7 @@ export function createRequestUserInputTool(): AgentToolDefinition<
           },
         },
       },
-      mutability: "read",
+      executionClass: "control",
       requiresConfirmation: true,
       localAgentOnly: true,
       interaction: "user_input",
@@ -124,6 +124,7 @@ export function createRequestUserInputTool(): AgentToolDefinition<
         type: "select",
         id: question.id,
         label: question.question,
+        requiredForActionIds: ["continue"],
         options: question.options.map((option) => ({
           id: option.id,
           label: option.description
@@ -131,6 +132,12 @@ export function createRequestUserInputTool(): AgentToolDefinition<
             : option.label,
         })),
       })),
+      actions: [
+        { id: "continue", label: "Continue planning", approved: true },
+        { id: "cancel", label: "Cancel plan", approved: false },
+      ],
+      defaultActionId: "continue",
+      cancelActionId: "cancel",
     }),
     applyConfirmation: (input, data) => {
       const record = validateObject<Record<string, unknown>>(data) ? data : {};

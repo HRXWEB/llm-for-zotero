@@ -2797,7 +2797,6 @@ export async function runCodexAppServerNativeTurn(params: {
               const pending = recordMcpPlanEvidence(
                 params.planContext,
                 redactedEvent,
-                { autoAdvance: true },
               ).then(async (ledger) => {
                 if (ledger) await params.onPlanExecutionUpdated?.(ledger);
               });

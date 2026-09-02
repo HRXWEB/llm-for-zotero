@@ -160,7 +160,7 @@ export function createUpdateMetadataTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 

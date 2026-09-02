@@ -763,7 +763,7 @@ and cloud MinerU involve their respective services or companion runtimes.
 | Use ChatGPT in the browser                                  | [WebChat](#webchat-setup-chatgpt-web-sync) with the Sync for Zotero extension | No                              |
 | Use Codex models with ChatGPT Plus                          | [Codex App Server](#codex-setup-chatgpt-plus-subscribers)                     | No separate API key             |
 | Use Claude Code inside Zotero                               | [Claude Code bridge](#claude-code-setup-experimental)                         | Claude Code auth                |
-| Search and read the current public web                      | [General Web Search](#general-web-search) with Tavily                          | Tavily API key                  |
+| Search and read the current public web                      | [General Web Search](#general-web-search) with Tavily                         | Tavily API key                  |
 | Improve PDF extraction for tables, equations, and figures   | [MinerU PDF parsing](#mineru-pdf-parsing)                                     | Personal MinerU key recommended |
 
 > **Q: Is it free to use?**

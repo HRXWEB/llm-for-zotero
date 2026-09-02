@@ -51,7 +51,7 @@ describe("Original Agent permission gate", function () {
         name: "library_batch",
         description: "batch",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args as never }),
@@ -59,6 +59,17 @@ describe("Original Agent permission gate", function () {
         effect: "write",
         reversibility: "full",
       }),
+      describeAction: () => [
+        {
+          id: "settings:test",
+          proofDomain: "zotero_state",
+          capability: "zotero.settings",
+          operation: "settings_update",
+          source: "zotero_native",
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        },
+      ],
       createPendingAction: () => ({
         toolName: "library_batch",
         title: "Review batch",
@@ -119,7 +130,7 @@ describe("Original Agent permission gate", function () {
         name: "library_update",
         description: "update",
         inputSchema: { type: "object" },
-        mutability: "write",
+        executionClass: "external_effect",
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args as never }),
@@ -127,6 +138,17 @@ describe("Original Agent permission gate", function () {
         effect: "write",
         reversibility: "full",
       }),
+      describeAction: () => [
+        {
+          id: "settings:test",
+          proofDomain: "zotero_state",
+          capability: "zotero.settings",
+          operation: "settings_update",
+          source: "zotero_native",
+          requestedTargets: [],
+          destinationCollectionIds: [],
+        },
+      ],
       createPendingAction: () => ({
         toolName: "library_update",
         title: "Review update",

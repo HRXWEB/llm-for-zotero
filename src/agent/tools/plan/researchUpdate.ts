@@ -41,7 +41,11 @@ import type {
   ResearchRecallProbe,
   ThemeFinding,
 } from "../../research/types";
-import type { TaskEvidence, VerifiedReadSource } from "../../plans/types";
+import type {
+  TaskEvidence,
+  TrustedReadObservation,
+  VerifiedReadSource,
+} from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
 
 type ResearchUpdateInput = {
@@ -86,17 +90,22 @@ const MAX_PAPERS_PER_UPDATE = 25;
 type PreferredVerifiedRead = Readonly<{
   sourceReadRef: string;
   sources: readonly VerifiedReadSource[];
-  evidenceDepth: "metadata" | "body";
+  observationIds: readonly string[];
+  evidenceDepth: "metadata" | "abstract" | "body";
 }>;
 
-function verifiedReadDepth(sources: readonly VerifiedReadSource[]) {
-  return sources.some(
-    (source) =>
-      Boolean(source.attachmentItemKey) ||
-      source.pageIndex !== undefined ||
-      Boolean(source.sourceFingerprint),
-  )
-    ? "body"
+function verifiedReadDepth(observations: readonly TrustedReadObservation[]) {
+  if (
+    observations.some((entry) =>
+      entry.capabilities.some((capability) =>
+        ["body", "figure", "quote"].includes(capability),
+      ),
+    )
+  ) {
+    return "body";
+  }
+  return observations.some((entry) => entry.capabilities.includes("abstract"))
+    ? "abstract"
     : "metadata";
 }
 
@@ -122,26 +131,44 @@ export function selectPreferredVerifiedReads(
     ) {
       continue;
     }
-    const sources = entry.payload.sources || [];
-    for (const source of sources) {
-      const identity = `${source.libraryID}:${source.itemKey}`;
+    const observations = entry.payload.observations || [];
+    for (const observation of observations) {
+      const identity = `${observation.libraryID}:${observation.itemKey}`;
       if (!corpusIdentities.has(identity)) continue;
-      const matchingSources = sources.filter(
+      const matchingObservations = observations.filter(
         (candidate) =>
-          candidate.libraryID === source.libraryID &&
-          candidate.itemKey === source.itemKey,
+          candidate.libraryID === observation.libraryID &&
+          candidate.itemKey === observation.itemKey,
+      );
+      const matchingSources = matchingObservations.map(
+        ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }) => ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }),
       );
       const candidate = {
         sourceReadRef: entry.reference,
         sources: matchingSources,
-        evidenceDepth: verifiedReadDepth(matchingSources),
+        observationIds: matchingObservations.map(
+          (candidate) => candidate.observationId,
+        ),
+        evidenceDepth: verifiedReadDepth(matchingObservations),
         createdAt: entry.createdAt,
       } as const;
       const current = selected.get(identity);
       if (
         !current ||
-        (current.evidenceDepth === "metadata" &&
-          candidate.evidenceDepth === "body") ||
+        ["metadata", "abstract", "body"].indexOf(candidate.evidenceDepth) >
+          ["metadata", "abstract", "body"].indexOf(current.evidenceDepth) ||
         (current.evidenceDepth === candidate.evidenceDepth &&
           candidate.createdAt >= current.createdAt)
       ) {
@@ -155,6 +182,7 @@ export function selectPreferredVerifiedReads(
       {
         sourceReadRef: entry.sourceReadRef,
         sources: entry.sources,
+        observationIds: entry.observationIds,
         evidenceDepth: entry.evidenceDepth,
       },
     ]),
@@ -289,7 +317,12 @@ async function recomputeJob(params: {
   const evidence = await listResearchEvidence(params.job.researchJobId);
   const bodyKeys = new Set(
     evidence
-      .filter((entry) => ["body", "figure", "quote"].includes(entry.sourceKind))
+      .filter(
+        (entry) =>
+          entry.version === 2 &&
+          Boolean(entry.observationId) &&
+          ["body", "figure", "quote"].includes(entry.sourceKind),
+      )
       .map((entry) => `${entry.libraryID}:${entry.itemKey}`),
   );
   const candidateItems = corpus.filter((entry) =>
@@ -602,7 +635,7 @@ export function createResearchUpdateTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "control",
       requiresConfirmation: false,
     },
     isAvailable: (request) => request.planContext?.phase === "executing",
@@ -659,13 +692,10 @@ export function createResearchUpdateTool(
       const snapshotByKey = new Map(
         snapshot.map((entry) => [`${entry.libraryID}:${entry.itemKey}`, entry]),
       );
-      const taskEvidence = (
-        await Promise.all(
-          (executionLedger?.tasks || []).map((entry) =>
-            listTaskEvidence(plan.executionId, entry.taskId),
-          ),
-        )
-      ).flat();
+      const taskEvidence = await listTaskEvidence(
+        plan.executionId,
+        job.parentTaskId,
+      );
       const verifiedReads = new Map(
         taskEvidence
           .filter(
@@ -677,7 +707,7 @@ export function createResearchUpdateTool(
           .map((entry) => [
             entry.reference!,
             entry.payload?.type === "verified_read"
-              ? entry.payload.sources || []
+              ? entry.payload.observations || []
               : [],
           ]),
       );
@@ -698,8 +728,11 @@ export function createResearchUpdateTool(
         );
         const bodyEvidenceKeys = new Set(
           durableEvidence
-            .filter((entry) =>
-              ["body", "figure", "quote"].includes(entry.sourceKind),
+            .filter(
+              (entry) =>
+                entry.version === 2 &&
+                Boolean(entry.observationId) &&
+                ["body", "figure", "quote"].includes(entry.sourceKind),
             )
             .map((entry) => `${entry.libraryID}:${entry.itemKey}`),
         );
@@ -1114,16 +1147,19 @@ export function createResearchUpdateTool(
                 typeof entry.sourceReadRef === "string"
                   ? entry.sourceReadRef.trim()
                   : "";
-              const readSources = verifiedReads.get(sourceReadRef) || [];
-              const matchingReadSources = readSources.filter(
-                (source) =>
-                  source.libraryID === libraryID && source.itemKey === itemKey,
+              const readObservations = verifiedReads.get(sourceReadRef) || [];
+              const matchingReadObservations = readObservations.filter(
+                (observation) =>
+                  observation.libraryID === libraryID &&
+                  observation.itemKey === itemKey &&
+                  observation.capabilities.includes(sourceKind),
               );
-              if (sourceKind !== "metadata" && !matchingReadSources.length) {
+              if (!matchingReadObservations.length) {
                 throw new Error(
-                  `Evidence ${evidenceKey} is not bound to a verified read of ${identity}`,
+                  `Evidence ${evidenceKey} sourceKind ${sourceKind} was not issued by a trusted observation of ${identity}`,
                 );
               }
+              const trustedObservation = matchingReadObservations[0];
               const fingerprint = ["body", "figure", "quote"].includes(
                 sourceKind,
               )
@@ -1162,10 +1198,10 @@ export function createResearchUpdateTool(
                     `Evidence ${evidenceKey} locator pageIndex is invalid`,
                   );
                 }
-                const trustedLocator = matchingReadSources.find(
-                  (source) =>
-                    source.attachmentItemKey === attachmentItemKey &&
-                    source.pageIndex === pageIndex,
+                const trustedLocator = matchingReadObservations.find(
+                  (observation) =>
+                    observation.attachmentItemKey === attachmentItemKey &&
+                    observation.pageIndex === pageIndex,
                 );
                 if (!trustedLocator) {
                   throw new Error(
@@ -1182,7 +1218,7 @@ export function createResearchUpdateTool(
               }
               const evidenceRef = `${job.researchJobId}:${libraryID}:${itemKey}:${safeId(evidenceKey)}`;
               const record: ResearchEvidenceRecord = {
-                version: 1,
+                version: 2,
                 evidenceRef,
                 researchJobId: job.researchJobId,
                 executionId: job.executionId,
@@ -1191,6 +1227,7 @@ export function createResearchUpdateTool(
                 itemKey,
                 sourceFingerprint: fingerprint,
                 sourceKind,
+                observationId: trustedObservation.observationId,
                 locator,
                 createdAt: Date.now(),
               };
@@ -1518,6 +1555,26 @@ export function createResearchUpdateTool(
         const findings = await listPaperFindings(job.researchJobId);
         const themes = await listThemeFindings(job.researchJobId);
         const allEvidence = await listResearchEvidence(job.researchJobId);
+        if (input.outcome === "partial") {
+          const grant = next.exceptionGrant;
+          const countersMatch =
+            grant?.totalItems === next.totalItems &&
+            grant.screenedItems === next.screenedItems &&
+            grant.candidateItems === next.candidateItems &&
+            grant.deepReadCompleted === next.deepReadCompleted;
+          if (
+            !grant ||
+            grant.status !== "authorized" ||
+            grant.planDigest !== artifact.digest ||
+            grant.executionId !== next.executionId ||
+            grant.researchJobId !== next.researchJobId ||
+            !countersMatch
+          ) {
+            throw new Error(
+              "Partial research finalization requires a current user-authorized ResearchExceptionGrant from the expansion checkpoint",
+            );
+          }
+        }
         if (input.outcome === "complete") {
           const unfinished = allCorpus.filter(
             (entry) =>
@@ -1610,8 +1667,11 @@ export function createResearchUpdateTool(
           if (investigation.requiredEvidenceDepth === "body") {
             const bodyKeys = new Set(
               allEvidence
-                .filter((entry) =>
-                  ["body", "quote", "figure"].includes(entry.sourceKind),
+                .filter(
+                  (entry) =>
+                    entry.version === 2 &&
+                    Boolean(entry.observationId) &&
+                    ["body", "quote", "figure"].includes(entry.sourceKind),
                 )
                 .map((entry) => `${entry.libraryID}:${entry.itemKey}`),
             );
@@ -1662,7 +1722,17 @@ export function createResearchUpdateTool(
                 ? "complete_with_limitations"
                 : "complete";
         next = await recomputeJob({
-          job: next,
+          job:
+            input.outcome === "partial" && next.exceptionGrant
+              ? {
+                  ...next,
+                  exceptionGrant: {
+                    ...next.exceptionGrant,
+                    status: "consumed",
+                    consumedAt: Date.now(),
+                  },
+                }
+              : next,
           conversationKey: context.request.conversationKey,
           activeStage: "hierarchical_synthesis",
           status: input.outcome === "failed" ? "failed" : "completed",
@@ -1679,13 +1749,16 @@ export function createResearchUpdateTool(
           throw new Error("Research coverage requirement is unavailable");
         }
         await planExecutionCoordinator.attachEvidence({
-          version: 2,
+          version: 3,
           evidenceId: `${job.researchJobId}:coverage:${coverageStatus}`,
           executionId: job.executionId,
           taskId: job.parentTaskId,
           kind: "research_coverage",
-          verified: coverageStatus !== "failed",
+          verified:
+            coverageStatus === "complete" ||
+            coverageStatus === "complete_with_limitations",
           requirementId: requirement.requirementId,
+          criterionIds: requirement.criterionIds,
           contractDigest: requirement.contractDigest,
           payload: {
             type: "research_coverage",
@@ -1700,6 +1773,23 @@ export function createResearchUpdateTool(
           summary: `Coverage ${coverageStatus}: screened ${next.screenedItems}/${next.totalItems}; deep-read ${next.deepReadCompleted}/${next.candidateItems}`,
           createdAt: Date.now(),
         });
+        if (coverageStatus === "partial") {
+          let exceptionLedger =
+            await planExecutionCoordinator.requestTransition({
+              executionId: job.executionId,
+              taskId: job.parentTaskId,
+              toStatus: "skipped",
+              requestedBy: "user",
+              reason: next.exceptionGrant?.limitationSummary,
+            });
+          exceptionLedger = await planExecutionCoordinator.startNextTask(
+            job.executionId,
+          );
+          await context.publishPlanEvent?.({
+            type: "plan_execution_updated",
+            ledger: exceptionLedger,
+          });
+        }
       }
 
       await context.publishPlanEvent?.({
