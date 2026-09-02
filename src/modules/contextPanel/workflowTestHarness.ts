@@ -1243,6 +1243,9 @@ async function exerciseDuplicatePanelSetup(
   const initializationGenerationBefore =
     panelRootBefore.dataset.handlersInitialized || "";
   const panelStateSyncBefore = activeContextPanelStateSync.has(panel.body);
+  const turnNavigatorCountBefore = panel.body.querySelectorAll(
+    ".llm-turn-navigator",
+  ).length;
 
   setupHandlers(panel.body, mountedItem);
 
@@ -1256,6 +1259,9 @@ async function exerciseDuplicatePanelSetup(
       panelRootAfter?.dataset.handlersInitialized || "",
     panelStateSyncBefore,
     panelStateSyncAfter: activeContextPanelStateSync.has(panel.body),
+    turnNavigatorCountBefore,
+    turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
+      .length,
   };
 }
 

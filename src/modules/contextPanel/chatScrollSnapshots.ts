@@ -6,8 +6,10 @@ type ChatScrollAnchor = {
   kind: "quote" | "message";
   quoteCitationId?: string;
   citationSyncKey?: string;
+  messageAnchorKey?: string;
   messageRole?: string;
   messageTimestamp?: string;
+  messageIndex?: string;
   viewportOffsetTop: number;
 };
 
@@ -18,7 +20,25 @@ export interface ChatScrollSnapshot {
   anchor?: ChatScrollAnchor;
 }
 
-type ScrollGuardRestoreMode = "absolute" | "relative";
+type ScrollGuardRestoreMode = "absolute" | "relative" | "anchor";
+
+type ActiveChatNavigation = {
+  conversationKey: number;
+  chatBox: HTMLDivElement;
+  snapshot: ChatScrollSnapshot;
+  anchor: ChatScrollAnchor;
+  stableFrames: number;
+  rafId: number | null;
+  timeoutId: number | null;
+  removeInputListeners: () => void;
+};
+
+type RecentChatNavigationSuppression = {
+  conversationKey: number;
+  expiresAt: number;
+  timeoutId: number;
+  removeInputListeners: () => void;
+};
 
 const chatScrollSnapshots = new Map<number, ChatScrollSnapshot>();
 const pendingChatScrollRestores = new Map<
@@ -32,6 +52,18 @@ const pendingChatScrollRestores = new Map<
 const followBottomCatchupRequests = new Map<number, number>();
 const FOLLOW_BOTTOM_CATCHUP_GRACE_MS = 1200;
 const PENDING_RESTORE_TTL_MS = 3000;
+const NAVIGATION_SETTLE_TOLERANCE_PX = 1;
+const NAVIGATION_SETTLE_FRAMES = 2;
+const NAVIGATION_TIMEOUT_MS = 1200;
+const NAVIGATION_SCROLL_EVENT_GRACE_MS = 150;
+
+let activeChatNavigations = new WeakMap<HTMLDivElement, ActiveChatNavigation>();
+let recentChatNavigationSuppressions = new WeakMap<
+  HTMLDivElement,
+  RecentChatNavigationSuppression
+>();
+const liveNavigationBoxes = new Set<HTMLDivElement>();
+const liveNavigationSuppressionBoxes = new Set<HTMLDivElement>();
 
 let scrollUpdatesSuspended = false;
 
@@ -103,15 +135,21 @@ function queryElements(root: Element, selector: string): Element[] {
 }
 
 function getMessageAnchorForElement(element: Element): {
+  messageAnchorKey?: string;
   messageRole?: string;
   messageTimestamp?: string;
+  messageIndex?: string;
 } {
   const wrapper = closestElement(element, ".llm-message-wrapper");
+  const anchorKey = datasetValue(wrapper, "messageAnchorKey");
   const role = datasetValue(wrapper, "messageRole");
   const timestamp = datasetValue(wrapper, "messageTimestamp");
+  const index = datasetValue(wrapper, "messageIndex");
   return {
+    messageAnchorKey: anchorKey || undefined,
     messageRole: role || undefined,
     messageTimestamp: timestamp || undefined,
+    messageIndex: index || undefined,
   };
 }
 
@@ -150,8 +188,7 @@ function buildMessageAnchor(
   if (!rect || !isRectVisibleInViewport(rect, viewport)) return null;
   return {
     kind: "message",
-    messageRole,
-    messageTimestamp,
+    ...getMessageAnchorForElement(element),
     viewportOffsetTop: rect.top - viewport.top,
   };
 }
@@ -227,9 +264,26 @@ function findMessageWrapperForAnchor(
   chatBox: HTMLDivElement,
   anchor: ChatScrollAnchor,
 ): Element | null {
+  const wrappers = queryElements(chatBox, ".llm-message-wrapper");
+  if (anchor.messageAnchorKey) {
+    const keyed = wrappers.find(
+      (element) =>
+        datasetValue(element, "messageAnchorKey") === anchor.messageAnchorKey,
+    );
+    if (keyed) return keyed;
+  }
   if (!anchor.messageRole || !anchor.messageTimestamp) return null;
+  if (anchor.messageIndex) {
+    const indexed = wrappers.find(
+      (element) =>
+        datasetValue(element, "messageRole") === anchor.messageRole &&
+        datasetValue(element, "messageTimestamp") === anchor.messageTimestamp &&
+        datasetValue(element, "messageIndex") === anchor.messageIndex,
+    );
+    if (indexed) return indexed;
+  }
   return (
-    queryElements(chatBox, ".llm-message-wrapper").find(
+    wrappers.find(
       (element) =>
         datasetValue(element, "messageRole") === anchor.messageRole &&
         datasetValue(element, "messageTimestamp") === anchor.messageTimestamp,
@@ -312,6 +366,17 @@ export function buildChatScrollSnapshot(
   };
 }
 
+function buildAnchoredChatScrollSnapshot(
+  chatBox: HTMLDivElement,
+): ChatScrollSnapshot {
+  return {
+    mode: "manual",
+    scrollTop: clampScrollTop(chatBox, chatBox.scrollTop),
+    updatedAt: Date.now(),
+    anchor: findBestVisibleChatAnchor(chatBox),
+  };
+}
+
 export function buildFollowBottomScrollSnapshot(
   chatBox: HTMLDivElement,
 ): ChatScrollSnapshot {
@@ -373,7 +438,319 @@ export function persistChatScrollSnapshotForConversationKey(
   const normalized = normalizeConversationKey(conversationKey);
   if (!normalized) return;
   if (!isChatViewportVisible(chatBox)) return;
+  const activeNavigation = activeChatNavigations.get(chatBox);
+  if (activeNavigation?.conversationKey === normalized) return;
+  const suppression = recentChatNavigationSuppressions.get(chatBox);
+  if (
+    suppression?.conversationKey === normalized &&
+    suppression.expiresAt > Date.now()
+  ) {
+    return;
+  }
   chatScrollSnapshots.set(normalized, buildChatScrollSnapshot(chatBox));
+}
+
+function buildNavigationAnchor(
+  targetElement: Element,
+  viewportOffsetTop: number,
+): ChatScrollAnchor | null {
+  const wrapper = closestElement(targetElement, ".llm-message-wrapper");
+  if (!wrapper) return null;
+  const identity = getMessageAnchorForElement(wrapper);
+  if (!identity.messageRole || !identity.messageTimestamp) return null;
+  return {
+    kind: "message",
+    ...identity,
+    viewportOffsetTop,
+  };
+}
+
+function getNavigationTargetScrollTop(
+  chatBox: HTMLDivElement,
+  anchor: ChatScrollAnchor,
+): number | null {
+  const target = findElementForAnchor(chatBox, anchor);
+  const viewport = getElementRect(chatBox);
+  const targetRect = target ? getElementRect(target) : null;
+  if (!target || !viewport || !targetRect) return null;
+  return clampScrollTop(
+    chatBox,
+    chatBox.scrollTop +
+      targetRect.top -
+      viewport.top -
+      anchor.viewportOffsetTop,
+  );
+}
+
+function getNavigationWindow(chatBox: HTMLDivElement): Window | null {
+  return chatBox.ownerDocument?.defaultView || null;
+}
+
+function requestNavigationFrame(
+  chatBox: HTMLDivElement,
+  callback: FrameRequestCallback,
+): number {
+  const win = getNavigationWindow(chatBox);
+  if (win?.requestAnimationFrame) return win.requestAnimationFrame(callback);
+  return Number(setTimeout(() => callback(Date.now()), 16));
+}
+
+function cancelNavigationFrame(
+  chatBox: HTMLDivElement,
+  frameId: number | null,
+): void {
+  if (frameId === null) return;
+  const win = getNavigationWindow(chatBox);
+  if (win?.cancelAnimationFrame) {
+    win.cancelAnimationFrame(frameId);
+  } else {
+    clearTimeout(frameId);
+  }
+}
+
+function clearNavigationTimeout(
+  chatBox: HTMLDivElement,
+  timeoutId: number | null,
+): void {
+  if (timeoutId === null) return;
+  const win = getNavigationWindow(chatBox);
+  if (win) win.clearTimeout(timeoutId);
+  else clearTimeout(timeoutId);
+}
+
+function setNavigationTimeout(
+  chatBox: HTMLDivElement,
+  callback: () => void,
+  delayMs: number,
+): number {
+  const win = getNavigationWindow(chatBox);
+  return win
+    ? win.setTimeout(callback, delayMs)
+    : Number(setTimeout(callback, delayMs));
+}
+
+function cleanupActiveNavigation(navigation: ActiveChatNavigation): void {
+  cancelNavigationFrame(navigation.chatBox, navigation.rafId);
+  clearNavigationTimeout(navigation.chatBox, navigation.timeoutId);
+  navigation.rafId = null;
+  navigation.timeoutId = null;
+  navigation.removeInputListeners();
+  if (activeChatNavigations.get(navigation.chatBox) === navigation) {
+    activeChatNavigations.delete(navigation.chatBox);
+  }
+  liveNavigationBoxes.delete(navigation.chatBox);
+}
+
+function clearRecentNavigationSuppression(chatBox: HTMLDivElement): void {
+  const suppression = recentChatNavigationSuppressions.get(chatBox);
+  if (!suppression) return;
+  clearNavigationTimeout(chatBox, suppression.timeoutId);
+  suppression.removeInputListeners();
+  recentChatNavigationSuppressions.delete(chatBox);
+  liveNavigationSuppressionBoxes.delete(chatBox);
+}
+
+function startRecentNavigationSuppression(
+  chatBox: HTMLDivElement,
+  conversationKey: number,
+): void {
+  clearRecentNavigationSuppression(chatBox);
+  const clear = () => {
+    if (recentChatNavigationSuppressions.get(chatBox) === suppression) {
+      clearRecentNavigationSuppression(chatBox);
+    }
+  };
+  const suppression: RecentChatNavigationSuppression = {
+    conversationKey,
+    expiresAt: Date.now() + NAVIGATION_SCROLL_EVENT_GRACE_MS,
+    timeoutId: 0,
+    removeInputListeners: installNavigationInputCancellation(chatBox, clear),
+  };
+  suppression.timeoutId = setNavigationTimeout(
+    chatBox,
+    clear,
+    NAVIGATION_SCROLL_EVENT_GRACE_MS,
+  );
+  recentChatNavigationSuppressions.set(chatBox, suppression);
+  liveNavigationSuppressionBoxes.add(chatBox);
+}
+
+function persistNavigationDestination(navigation: ActiveChatNavigation): void {
+  const targetScrollTop = getNavigationTargetScrollTop(
+    navigation.chatBox,
+    navigation.anchor,
+  );
+  if (targetScrollTop !== null) {
+    navigation.chatBox.scrollTop = targetScrollTop;
+  }
+  const finalSnapshot: ChatScrollSnapshot = {
+    mode: "manual",
+    scrollTop: clampScrollTop(
+      navigation.chatBox,
+      targetScrollTop ?? navigation.chatBox.scrollTop,
+    ),
+    updatedAt: Date.now(),
+    anchor: navigation.anchor,
+  };
+  chatScrollSnapshots.set(navigation.conversationKey, finalSnapshot);
+  cleanupActiveNavigation(navigation);
+  startRecentNavigationSuppression(
+    navigation.chatBox,
+    navigation.conversationKey,
+  );
+}
+
+function installNavigationInputCancellation(
+  chatBox: HTMLDivElement,
+  cancel: () => void,
+): () => void {
+  const inputTarget =
+    typeof chatBox.ownerDocument?.addEventListener === "function"
+      ? chatBox.ownerDocument
+      : chatBox;
+  const scrollingKeys = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " ",
+  ]);
+  const onPointerInput = () => cancel();
+  const onKeyDown = (event: Event) => {
+    const key = (event as KeyboardEvent).key;
+    if (scrollingKeys.has(key)) cancel();
+  };
+  inputTarget.addEventListener("wheel", onPointerInput, true);
+  inputTarget.addEventListener("pointerdown", onPointerInput, true);
+  inputTarget.addEventListener("touchstart", onPointerInput, true);
+  inputTarget.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    inputTarget.removeEventListener("wheel", onPointerInput, true);
+    inputTarget.removeEventListener("pointerdown", onPointerInput, true);
+    inputTarget.removeEventListener("touchstart", onPointerInput, true);
+    inputTarget.removeEventListener("keydown", onKeyDown, true);
+  };
+}
+
+export function getActiveChatNavigationSnapshot(
+  chatBox: HTMLDivElement,
+): ChatScrollSnapshot | undefined {
+  return activeChatNavigations.get(chatBox)?.snapshot;
+}
+
+export function isChatNavigationActive(chatBox: HTMLDivElement): boolean {
+  if (activeChatNavigations.has(chatBox)) return true;
+  const suppression = recentChatNavigationSuppressions.get(chatBox);
+  if (!suppression) return false;
+  if (suppression.expiresAt > Date.now()) return true;
+  clearRecentNavigationSuppression(chatBox);
+  return false;
+}
+
+export function cancelChatNavigation(
+  chatBox: HTMLDivElement,
+  persistCurrentPosition = true,
+): void {
+  clearRecentNavigationSuppression(chatBox);
+  const navigation = activeChatNavigations.get(chatBox);
+  if (!navigation) return;
+  cleanupActiveNavigation(navigation);
+  if (persistCurrentPosition && isChatViewportVisible(chatBox)) {
+    chatScrollSnapshots.set(
+      navigation.conversationKey,
+      buildChatScrollSnapshot(chatBox),
+    );
+  }
+}
+
+export function navigateChatToMessage(params: {
+  conversationKey: number;
+  chatBox: HTMLDivElement;
+  targetElement: Element;
+  behavior: ScrollBehavior;
+  viewportOffsetTop?: number;
+}): boolean {
+  const conversationKey = normalizeConversationKey(params.conversationKey);
+  if (!conversationKey || !isChatViewportVisible(params.chatBox)) return false;
+  const viewportOffsetTop = Math.max(0, Number(params.viewportOffsetTop || 0));
+  const anchor = buildNavigationAnchor(params.targetElement, viewportOffsetTop);
+  if (!anchor) return false;
+  const targetScrollTop = getNavigationTargetScrollTop(params.chatBox, anchor);
+  if (targetScrollTop === null) return false;
+
+  cancelChatNavigation(params.chatBox, false);
+  cancelFollowBottomCatchup(conversationKey);
+  const snapshot: ChatScrollSnapshot = {
+    mode: "manual",
+    scrollTop: targetScrollTop,
+    updatedAt: Date.now(),
+    anchor,
+  };
+  chatScrollSnapshots.set(conversationKey, snapshot);
+
+  const cancelFromInput = () => cancelChatNavigation(params.chatBox, true);
+  const navigation: ActiveChatNavigation = {
+    conversationKey,
+    chatBox: params.chatBox,
+    snapshot,
+    anchor,
+    stableFrames: 0,
+    rafId: null,
+    timeoutId: null,
+    removeInputListeners: installNavigationInputCancellation(
+      params.chatBox,
+      cancelFromInput,
+    ),
+  };
+  activeChatNavigations.set(params.chatBox, navigation);
+  liveNavigationBoxes.add(params.chatBox);
+
+  const finish = () => {
+    if (activeChatNavigations.get(params.chatBox) !== navigation) return;
+    persistNavigationDestination(navigation);
+  };
+  if (params.behavior !== "smooth") {
+    params.chatBox.scrollTop = targetScrollTop;
+    finish();
+    return true;
+  }
+
+  const settle = () => {
+    if (activeChatNavigations.get(params.chatBox) !== navigation) return;
+    const currentTarget = getNavigationTargetScrollTop(
+      params.chatBox,
+      navigation.anchor,
+    );
+    if (
+      currentTarget !== null &&
+      Math.abs(params.chatBox.scrollTop - currentTarget) <=
+        NAVIGATION_SETTLE_TOLERANCE_PX
+    ) {
+      navigation.stableFrames += 1;
+    } else {
+      navigation.stableFrames = 0;
+    }
+    if (navigation.stableFrames >= NAVIGATION_SETTLE_FRAMES) {
+      finish();
+      return;
+    }
+    navigation.rafId = requestNavigationFrame(params.chatBox, settle);
+  };
+
+  try {
+    params.chatBox.scrollTo({ top: targetScrollTop, behavior: "smooth" });
+  } catch (_err) {
+    params.chatBox.scrollTop = targetScrollTop;
+  }
+  navigation.timeoutId = setNavigationTimeout(
+    params.chatBox,
+    finish,
+    NAVIGATION_TIMEOUT_MS,
+  );
+  navigation.rafId = requestNavigationFrame(params.chatBox, settle);
+  return true;
 }
 
 export function persistPendingChatScrollRestoreForConversationKey(
@@ -494,12 +871,16 @@ export function withScrollGuard(
   const wasNearBottom = isNearBottom(chatBox);
   const savedScrollTop = chatBox.scrollTop;
   const savedMaxScrollTop = getMaxScrollTop(chatBox);
+  const anchoredSnapshot =
+    restoreMode === "anchor" ? buildAnchoredChatScrollSnapshot(chatBox) : null;
 
   scrollUpdatesSuspended = true;
   try {
     fn();
   } finally {
-    if (wasNearBottom) {
+    if (anchoredSnapshot) {
+      applyChatScrollSnapshot(chatBox, anchoredSnapshot);
+    } else if (wasNearBottom) {
       chatBox.scrollTop = chatBox.scrollHeight;
     } else if (restoreMode === "relative" && savedMaxScrollTop > 0) {
       const nextMaxScrollTop = getMaxScrollTop(chatBox);
@@ -519,8 +900,21 @@ export function withScrollGuard(
 }
 
 export function clearChatScrollSnapshotsForTests(): void {
+  for (const chatBox of liveNavigationBoxes) {
+    cancelChatNavigation(chatBox, false);
+  }
+  liveNavigationBoxes.clear();
+  for (const chatBox of liveNavigationSuppressionBoxes) {
+    clearRecentNavigationSuppression(chatBox);
+  }
+  liveNavigationSuppressionBoxes.clear();
   chatScrollSnapshots.clear();
   pendingChatScrollRestores.clear();
   followBottomCatchupRequests.clear();
+  activeChatNavigations = new WeakMap<HTMLDivElement, ActiveChatNavigation>();
+  recentChatNavigationSuppressions = new WeakMap<
+    HTMLDivElement,
+    RecentChatNavigationSuppression
+  >();
   scrollUpdatesSuspended = false;
 }

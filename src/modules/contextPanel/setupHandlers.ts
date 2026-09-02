@@ -44,6 +44,13 @@ import {
   isAtAutoFollowBottom,
   resolveStreamingScrollFollowAction,
 } from "./scrollFollowPolicy";
+import { isChatNavigationActive } from "./chatScrollSnapshots";
+import {
+  createConversationTurnNavigator,
+  disposeConversationTurnNavigator,
+  SIDEBAR_TURN_NAVIGATOR_MIN_WIDTH_PX,
+  STANDALONE_TURN_NAVIGATOR_MIN_WIDTH_PX,
+} from "./conversationTurnNavigator";
 import {
   clearManualTextareaHeight,
   resizeTextareaToContent,
@@ -768,6 +775,20 @@ export function setupHandlers(
   }
 
   const isStandalonePanel = panelRoot.dataset.standalone === "true";
+  const chatShell = body.querySelector(
+    "#llm-chat-shell",
+  ) as HTMLDivElement | null;
+  if (chatBox && chatShell) {
+    createConversationTurnNavigator({
+      body,
+      chatShell,
+      chatBox,
+      conversationKey: item ? getConversationKey(item) : null,
+      minimumWidthPx: isStandalonePanel
+        ? STANDALONE_TURN_NAVIGATOR_MIN_WIDTH_PX
+        : SIDEBAR_TURN_NAVIGATOR_MIN_WIDTH_PX,
+    });
+  }
 
   const thisGen = String(++setupHandlersGeneration);
   panelRoot.dataset.handlersAttached = thisGen;
@@ -2008,6 +2029,10 @@ export function setupHandlers(
       // scrollTop writes or by layout mutations (e.g. button relayout
       // changing the flex-sized chat area).
       if (isScrollUpdateSuspended()) {
+        captureChatBoxViewportState();
+        return;
+      }
+      if (isChatNavigationActive(chatBox)) {
         captureChatBoxViewportState();
         return;
       }
@@ -8170,6 +8195,7 @@ export function setupHandlers(
     cleanupMineruPaperSourceObservers?.();
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
+    disposeConversationTurnNavigator(body);
     codexDirectController?.dispose();
     codexDirectController = null;
     body.removeEventListener(

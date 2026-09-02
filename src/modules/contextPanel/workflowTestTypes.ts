@@ -74,6 +74,8 @@ export type WorkflowTestDuplicatePanelSetupDiagnostics = {
   initializationGenerationAfter: string;
   panelStateSyncBefore: boolean;
   panelStateSyncAfter: boolean;
+  turnNavigatorCountBefore: number;
+  turnNavigatorCountAfter: number;
 };
 
 export type WorkflowTestDraftRefreshDiagnostics = {

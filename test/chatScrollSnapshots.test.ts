@@ -5,11 +5,19 @@ import { assert } from "chai";
 import { describe, it } from "mocha";
 
 import {
+  applyChatScrollSnapshot,
   clearChatScrollSnapshotsForTests,
+  cancelChatNavigation,
   consumePendingChatScrollRestoreForTests,
+  getActiveChatNavigationSnapshot,
+  getChatScrollSnapshot,
+  hasActiveFollowBottomCatchupRequest,
+  isChatNavigationActive,
+  navigateChatToMessage,
   persistPendingChatScrollRestoreForConversationKey,
   persistPendingChatScrollRestoreForElement,
   persistChatScrollSnapshotForConversationKey,
+  requestFollowBottomCatchup,
   restoreChatScrollSnapshotForConversationKey,
 } from "../src/modules/contextPanel/chatScrollSnapshots";
 
@@ -46,6 +54,8 @@ class FakeElement {
   offsetTop = 0;
   offsetHeight = 0;
   isConnected = true;
+  ownerDocument = { defaultView: null } as unknown as Document;
+  private readonly listeners = new Map<string, Set<EventListener>>();
 
   constructor(className = "") {
     this.className = className;
@@ -63,6 +73,26 @@ class FakeElement {
     child.parentElement = this;
     this.children.push(child);
     return child;
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) || new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  dispatch(type: string, init: Partial<KeyboardEvent> = {}): void {
+    const event = { type, ...init } as Event;
+    for (const listener of this.listeners.get(type) || []) listener(event);
+  }
+
+  scrollTo(options: ScrollToOptions): void {
+    const target = Number(options.top || 0);
+    this.scrollTop = options.behavior === "smooth" ? target / 2 : target;
   }
 
   closest(selector: string): FakeElement | null {
@@ -367,6 +397,251 @@ describe("chat scroll snapshots", function () {
 
     assert.isTrue(restored);
     assert.equal(after.scrollTop, 550);
+  });
+
+  it("prefers stable message keys when duplicate timestamps are rerendered", function () {
+    clearChatScrollSnapshotsForTests();
+    const conversationKey = 440;
+    const before = makeChatBox({
+      scrollTop: 190,
+      scrollHeight: 900,
+      clientHeight: 120,
+    });
+    appendElement(before, "llm-message-wrapper", {
+      offsetTop: 100,
+      offsetHeight: 60,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "2000",
+        messageIndex: "0",
+        messageAnchorKey: "user:2000:0",
+      },
+    });
+    appendElement(before, "llm-message-wrapper", {
+      offsetTop: 200,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "2000",
+        messageIndex: "2",
+        messageAnchorKey: "user:2000:2",
+      },
+    });
+    persistChatScrollSnapshotForConversationKey(
+      conversationKey,
+      before as unknown as HTMLDivElement,
+    );
+
+    const after = makeChatBox({ scrollTop: 0, scrollHeight: 1200 });
+    appendElement(after, "llm-message-wrapper", {
+      offsetTop: 250,
+      offsetHeight: 60,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "2000",
+        messageIndex: "0",
+        messageAnchorKey: "user:2000:0",
+      },
+    });
+    appendElement(after, "llm-message-wrapper", {
+      offsetTop: 700,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "2000",
+        messageIndex: "2",
+        messageAnchorKey: "user:2000:2",
+      },
+    });
+
+    assert.isTrue(
+      restoreChatScrollSnapshotForConversationKey(
+        conversationKey,
+        after as unknown as HTMLDivElement,
+      ),
+    );
+    assert.equal(after.scrollTop, 690);
+  });
+
+  it("owns the destination snapshot throughout a smooth navigation", function () {
+    clearChatScrollSnapshotsForTests();
+    const conversationKey = 441;
+    const chatBox = makeChatBox({
+      scrollTop: 0,
+      scrollHeight: 1000,
+      clientHeight: 100,
+    });
+    const target = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 600,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "3000",
+        messageIndex: "4",
+        messageAnchorKey: "id:99",
+      },
+    });
+    requestFollowBottomCatchup(conversationKey);
+
+    assert.isTrue(
+      navigateChatToMessage({
+        conversationKey,
+        chatBox: chatBox as unknown as HTMLDivElement,
+        targetElement: target as unknown as Element,
+        behavior: "smooth",
+        viewportOffsetTop: 12,
+      }),
+    );
+    assert.isTrue(isChatNavigationActive(chatBox as unknown as HTMLDivElement));
+    assert.isFalse(hasActiveFollowBottomCatchupRequest(conversationKey));
+    assert.equal(
+      getActiveChatNavigationSnapshot(chatBox as never)?.scrollTop,
+      588,
+    );
+
+    persistChatScrollSnapshotForConversationKey(
+      conversationKey,
+      chatBox as unknown as HTMLDivElement,
+    );
+    assert.equal(getChatScrollSnapshot(conversationKey)?.scrollTop, 588);
+
+    cancelChatNavigation(chatBox as unknown as HTMLDivElement, false);
+    assert.isFalse(
+      isChatNavigationActive(chatBox as unknown as HTMLDivElement),
+    );
+  });
+
+  it("cancels smooth navigation on manual scrolling input", function () {
+    clearChatScrollSnapshotsForTests();
+    const conversationKey = 442;
+    const chatBox = makeChatBox({
+      scrollTop: 0,
+      scrollHeight: 1000,
+      clientHeight: 100,
+    });
+    const target = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 600,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "3000",
+        messageIndex: "4",
+      },
+    });
+    navigateChatToMessage({
+      conversationKey,
+      chatBox: chatBox as unknown as HTMLDivElement,
+      targetElement: target as unknown as Element,
+      behavior: "smooth",
+    });
+
+    chatBox.dispatch("wheel");
+
+    assert.isFalse(
+      isChatNavigationActive(chatBox as unknown as HTMLDivElement),
+    );
+    assert.notEqual(getChatScrollSnapshot(conversationKey)?.scrollTop, 600);
+  });
+
+  it("uses an immediate reduced-motion jump and guards its trailing scroll event", function () {
+    clearChatScrollSnapshotsForTests();
+    const conversationKey = 443;
+    const chatBox = makeChatBox({
+      scrollTop: 0,
+      scrollHeight: 1000,
+      clientHeight: 100,
+    });
+    const target = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 600,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "3000",
+        messageIndex: "4",
+        messageAnchorKey: "id:101",
+      },
+    });
+
+    assert.isTrue(
+      navigateChatToMessage({
+        conversationKey,
+        chatBox: chatBox as unknown as HTMLDivElement,
+        targetElement: target as unknown as Element,
+        behavior: "auto",
+        viewportOffsetTop: 12,
+      }),
+    );
+    assert.equal(chatBox.scrollTop, 588);
+    assert.equal(getChatScrollSnapshot(conversationKey)?.scrollTop, 588);
+    assert.isUndefined(
+      getActiveChatNavigationSnapshot(chatBox as unknown as HTMLDivElement),
+    );
+    assert.isTrue(isChatNavigationActive(chatBox as unknown as HTMLDivElement));
+
+    chatBox.scrollTop = 300;
+    persistChatScrollSnapshotForConversationKey(
+      conversationKey,
+      chatBox as unknown as HTMLDivElement,
+    );
+    assert.equal(getChatScrollSnapshot(conversationKey)?.scrollTop, 588);
+    chatBox.dispatch("wheel");
+    assert.isFalse(
+      isChatNavigationActive(chatBox as unknown as HTMLDivElement),
+    );
+    persistChatScrollSnapshotForConversationKey(
+      conversationKey,
+      chatBox as unknown as HTMLDivElement,
+    );
+    assert.equal(getChatScrollSnapshot(conversationKey)?.scrollTop, 300);
+  });
+
+  it("re-resolves a replacement wrapper during an active jump", function () {
+    clearChatScrollSnapshotsForTests();
+    const conversationKey = 444;
+    const chatBox = makeChatBox({
+      scrollTop: 0,
+      scrollHeight: 1200,
+      clientHeight: 100,
+    });
+    const original = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 600,
+      offsetHeight: 80,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "3000",
+        messageIndex: "4",
+        messageAnchorKey: "id:102",
+      },
+    });
+    navigateChatToMessage({
+      conversationKey,
+      chatBox: chatBox as unknown as HTMLDivElement,
+      targetElement: original as unknown as Element,
+      behavior: "smooth",
+      viewportOffsetTop: 12,
+    });
+
+    chatBox.children.splice(chatBox.children.indexOf(original), 1);
+    const replacement = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 800,
+      offsetHeight: 100,
+      dataset: {
+        messageRole: "user",
+        messageTimestamp: "3000",
+        messageIndex: "4",
+        messageAnchorKey: "id:102",
+      },
+    });
+    assert.isOk(replacement);
+    const destination = getActiveChatNavigationSnapshot(
+      chatBox as unknown as HTMLDivElement,
+    );
+    assert.isOk(destination);
+    applyChatScrollSnapshot(chatBox as unknown as HTMLDivElement, destination!);
+
+    assert.equal(chatBox.scrollTop, 788);
+    assert.equal(getChatScrollSnapshot(conversationKey)?.scrollTop, 588);
+    cancelChatNavigation(chatBox as unknown as HTMLDivElement, false);
   });
 
   it("preserves follow-bottom snapshots", function () {

@@ -101,6 +101,8 @@ describe("workflow: panel lifecycle", function () {
         );
         assert.isTrue(duplicate.panelStateSyncBefore);
         assert.isTrue(duplicate.panelStateSyncAfter);
+        assert.equal(duplicate.turnNavigatorCountBefore, 1);
+        assert.equal(duplicate.turnNavigatorCountAfter, 1);
 
         Zotero.Prefs.set(`${PREF_PREFIX}.enableCodexAppServerMode`, true, true);
         await Zotero.Promise.delay(250);

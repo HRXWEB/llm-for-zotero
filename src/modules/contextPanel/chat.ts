@@ -121,6 +121,7 @@ import {
   buildFollowBottomScrollSnapshot,
   cancelFollowBottomCatchup,
   consumePendingChatScrollRestore,
+  getActiveChatNavigationSnapshot,
   getChatScrollSnapshot,
   hasActiveFollowBottomCatchupRequest,
   persistChatScrollSnapshotForConversationKey,
@@ -128,6 +129,7 @@ import {
   setFollowBottomChatScrollSnapshot,
   withScrollGuard,
 } from "./chatScrollSnapshots";
+import { syncConversationTurnNavigator } from "./conversationTurnNavigator";
 import { resizeTextareaToContent } from "./textareaSizing";
 import {
   getActiveReaderForSelectedTab,
@@ -11981,6 +11983,7 @@ export function refreshChat(
       "#llm-token-usage",
     ) as HTMLElement | null;
     if (tokenUsageEl) tokenUsageEl.style.display = "none";
+    syncConversationTurnNavigator(body, [], { conversationKey: null });
     return;
   }
 
@@ -12000,14 +12003,17 @@ export function refreshChat(
     conversationKey,
     body,
   );
+  const activeNavigationSnapshot = getActiveChatNavigationSnapshot(chatBox);
   const cachedSnapshot = getChatScrollSnapshot(conversationKey);
-  const baselineSnapshot = hasActiveFollowBottomCatchupRequest(conversationKey)
-    ? buildFollowBottomScrollSnapshot(chatBox)
-    : pendingRestoreSnapshot
-      ? pendingRestoreSnapshot
-      : cachedSnapshot
-        ? cachedSnapshot
-        : buildChatScrollSnapshot(chatBox);
+  const baselineSnapshot = activeNavigationSnapshot
+    ? activeNavigationSnapshot
+    : hasActiveFollowBottomCatchupRequest(conversationKey)
+      ? buildFollowBottomScrollSnapshot(chatBox)
+      : pendingRestoreSnapshot
+        ? pendingRestoreSnapshot
+        : cachedSnapshot
+          ? cachedSnapshot
+          : buildChatScrollSnapshot(chatBox);
   const rawHistory = chatHistory.get(conversationKey) || [];
   // Turns queued for deletion stay in memory and DB until the undo window
   // closes; they are only hidden from the render.
@@ -12088,6 +12094,7 @@ export function refreshChat(
         if (panelRoot) panelRoot.dataset.startPageActive = "true";
       }
     }
+    syncConversationTurnNavigator(body, [], { conversationKey });
     return;
   }
 
@@ -13456,6 +13463,10 @@ export function refreshChat(
 
   syncFloatingPlanProgress(chatBox);
   syncUserContextAlignmentWidths(body);
+  syncConversationTurnNavigator(body, history, {
+    conversationKey,
+    targetedMessages: useTargetedRerender ? requestedRerenders : undefined,
+  });
 
   applyChatScrollSnapshot(chatBox, baselineSnapshot);
   persistChatScrollSnapshotForConversationKey(conversationKey, chatBox);
