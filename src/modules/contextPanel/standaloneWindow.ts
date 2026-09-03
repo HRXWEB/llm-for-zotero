@@ -12,7 +12,6 @@ import {
   selectedRuntimeModeCache,
 } from "./state";
 import {
-  resolveActiveLibraryID,
   resolveConversationSystemForItem,
   resolveDisplayConversationKind,
   resolveInitialPanelItemState,
@@ -27,6 +26,7 @@ import {
   createPaperPortalItem,
   isGlobalPortalItem,
 } from "./portalScope";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import {
   applyPanelFontScale,
   buildPaperStateKey,

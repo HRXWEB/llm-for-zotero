@@ -661,6 +661,29 @@ export function createQueryLibraryTool(
         reason: "The structured library query reads Zotero records only.",
       }),
     execute: async (input, context) => {
+      if (input.entity === "itemTypes") {
+        // Item-type definitions are global Zotero metadata, not library data.
+        // Fields come back for a named type only. All ~35 types with their
+        // full field lists is a large payload to spend on "what types exist".
+        const result = zoteroGateway.listItemTypes({
+          itemType: input.filters?.itemType || input.text,
+        });
+        return withResultCounts({
+          entity: input.entity,
+          mode: input.mode,
+          results: result.itemTypes,
+        });
+      }
+      if (input.entity === "libraries") {
+        // Library enumeration is the bootstrap path for clients that do not
+        // yet know which explicit libraryID to send.
+        const results = zoteroGateway.listAllLibraries();
+        return withResultCounts({
+          entity: input.entity,
+          mode: input.mode,
+          results,
+        });
+      }
       const libraryID =
         input.libraryID ||
         zoteroGateway.resolveLibraryID({
@@ -737,26 +760,6 @@ export function createQueryLibraryTool(
           entity: input.entity,
           mode: input.mode,
           results: filtered,
-        });
-      }
-      if (input.entity === "itemTypes") {
-        // Fields come back for a named type only. All ~35 types with their
-        // full field lists is a large payload to spend on "what types exist".
-        const result = zoteroGateway.listItemTypes({
-          itemType: input.filters?.itemType || input.text,
-        });
-        return withResultCounts({
-          entity: input.entity,
-          mode: input.mode,
-          results: result.itemTypes,
-        });
-      }
-      if (input.entity === "libraries") {
-        const results = zoteroGateway.listAllLibraries();
-        return withResultCounts({
-          entity: input.entity,
-          mode: input.mode,
-          results,
         });
       }
       if (input.entity === "tags") {

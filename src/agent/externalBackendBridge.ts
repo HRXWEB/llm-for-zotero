@@ -33,7 +33,6 @@ import type { AgentRuntime } from "./runtime";
 import {
   addZoteroMcpToolActivityObserver,
   registerScopedZoteroMcpScope,
-  setActiveZoteroMcpScope,
   updateScopedZoteroMcpScope,
   type ZoteroMcpActiveScope,
   type ZoteroMcpToolActivityEvent,
@@ -3269,7 +3268,6 @@ export function createExternalBackendBridgeRuntime(options: {
         let mcpServers: ClaudeMcpServersConfig | undefined;
         let allowedTools: string[] | undefined;
         let clearScopedMcpScope: () => void = () => undefined;
-        let clearActiveMcpScope: () => void = () => undefined;
         let unregisterMcpToolActivity: () => void = () => undefined;
         let scopedMcpToken = "";
         try {
@@ -3283,7 +3281,6 @@ export function createExternalBackendBridgeRuntime(options: {
             const scopedMcp = registerScopedZoteroMcpScope(mcpScope);
             scopedMcpToken = scopedMcp.token;
             clearScopedMcpScope = scopedMcp.clear;
-            clearActiveMcpScope = setActiveZoteroMcpScope(mcpScope);
             unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
               (event) => {
                 const sameConversation =
@@ -3647,7 +3644,6 @@ export function createExternalBackendBridgeRuntime(options: {
           throw new Error(message);
         } finally {
           unregisterMcpToolActivity();
-          clearActiveMcpScope();
           clearScopedMcpScope();
         }
       } finally {

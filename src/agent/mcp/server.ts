@@ -66,6 +66,7 @@ import type {
   VerifiedReadSource,
 } from "../plans/types";
 import { createTrustedReadObservations } from "../plans/readObservation";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -296,7 +297,6 @@ const conversationScopeTokens = new Map<
   string,
   { token: string; instanceID?: string }
 >();
-let activeZoteroMcpScope: ZoteroMcpActiveScope | null = null;
 let registeredMcpDeps: McpServerDeps | null = null;
 const mcpReadDedupeCache = new Map<
   string,
@@ -931,20 +931,6 @@ export function releaseConversationScopeToken(params: {
   clearMcpReadDedupeCacheForScopeToken(entry.token);
 }
 
-export function setActiveZoteroMcpScope(
-  scope: ZoteroMcpActiveScope,
-): () => void {
-  const normalized = normalizeActiveScope(scope);
-  activeZoteroMcpScope = normalized;
-  return () => {
-    if (activeZoteroMcpScope === normalized) activeZoteroMcpScope = null;
-  };
-}
-
-export function getActiveZoteroMcpScope(): ZoteroMcpActiveScope | null {
-  return activeZoteroMcpScope ? { ...activeZoteroMcpScope } : null;
-}
-
 function getHeader(
   headers: Record<string, string> | undefined,
   name: string,
@@ -990,6 +976,9 @@ function clearMcpReadDedupeCacheForScopeToken(scopeToken: string): void {
 function buildMcpReadDedupeKey(params: {
   toolName: string;
   toolArgs: unknown;
+  libraryID: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
   headers?: Record<string, string>;
 }): string | null {
   if (!MCP_READ_DEDUPE_TOOL_NAMES.has(params.toolName)) return null;
@@ -997,7 +986,14 @@ function buildMcpReadDedupeKey(params: {
   if (!scopeToken) return null;
   pruneExpiredScopedMcpScopes();
   if (!scopedZoteroMcpScopes.has(scopeToken)) return null;
-  return `${mcpReadDedupeScopePrefix(scopeToken)}${params.toolName}:${stableStringify(params.toolArgs || {})}`;
+  return `${mcpReadDedupeScopePrefix(scopeToken)}${params.toolName}:${stableStringify(
+    {
+      libraryID: params.libraryID,
+      activeItemId: params.activeItemId,
+      activeContextItemId: params.activeContextItemId,
+      arguments: params.toolArgs || {},
+    },
+  )}`;
 }
 
 function cloneMcpResultWithDuplicateMarker(
@@ -1403,13 +1399,71 @@ function extractMcpScopeArgs(rawArgs: unknown): {
   };
 }
 
+type ResolvedMcpCallScope = {
+  scopeArgs: ReturnType<typeof extractMcpScopeArgs>;
+  scope: ZoteroMcpActiveScope | null;
+  libraryID: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
+};
+
+function resolveLibraryRetrieveScopeID(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+): number | undefined {
+  if (toolName !== "library_retrieve") return undefined;
+  const retrievalScope = normalizeRecord(toolArgs.scope);
+  return normalizePositiveInt(
+    retrievalScope.libraryID ?? retrievalScope.libraryId,
+  );
+}
+
+function resolveMcpCallScope(params: {
+  toolName: string;
+  rawArgs: unknown;
+  headers?: Record<string, string>;
+}): ResolvedMcpCallScope {
+  const scopeArgs = extractMcpScopeArgs(params.rawArgs);
+  const scope = resolveScopedMcpScope(params.headers);
+  const retrievalLibraryID = resolveLibraryRetrieveScopeID(
+    params.toolName,
+    scopeArgs.toolArgs,
+  );
+  if (
+    scopeArgs.libraryID &&
+    retrievalLibraryID &&
+    scopeArgs.libraryID !== retrievalLibraryID
+  ) {
+    throw new Error(
+      `Conflicting Zotero library IDs: top-level libraryID=${scopeArgs.libraryID} but library_retrieve scope.libraryID=${retrievalLibraryID}.`,
+    );
+  }
+  return {
+    scopeArgs,
+    scope,
+    libraryID:
+      scopeArgs.libraryID ||
+      retrievalLibraryID ||
+      normalizePositiveInt(scope?.libraryID) ||
+      resolveActiveLibraryID() ||
+      0,
+    activeItemId:
+      scopeArgs.activeItemId ||
+      scope?.activeItemId ||
+      scope?.paperItemID ||
+      undefined,
+    activeContextItemId:
+      scopeArgs.activeContextItemId || scope?.activeContextItemId || undefined,
+  };
+}
+
 function decorateMcpToolDescription(
   toolName: string,
   description: string,
   mutability: "read" | "write",
 ): string {
   const scopeGuidance =
-    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'full' only for explicit exhaustive full-text requests with a coverage receipt, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
+    "Zotero MCP scope: omit libraryID to use the exact turn-scoped chat library when a scope header is present, or the library currently selected in Zotero for a standalone MCP client. Omit activeItemId and activeContextItemId to use the current turn-scoped chat item when available. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'full' only for explicit exhaustive full-text requests with a coverage receipt, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
   const writeGuidance =
     toolName === "zotero_script"
       ? "The native runtime permission profile authorizes zotero_script before Zotero applies its scope, facade, and recovery checks. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
@@ -1438,7 +1492,7 @@ function decorateMcpToolSchema(inputSchema: object): object {
       libraryID: {
         type: "number",
         description:
-          "Optional Zotero library ID. Omit to use the active library for the current Codex Zotero chat.",
+          "Optional Zotero library ID. Omit to use the exact turn-scoped chat library when available, otherwise the library currently selected in Zotero.",
       },
       activeItemId: {
         type: "number",
@@ -1513,36 +1567,17 @@ function resolveScopedMcpScope(
   headers: Record<string, string> | undefined,
 ): ZoteroMcpActiveScope | null {
   const token = getHeader(headers, ZOTERO_MCP_SCOPE_HEADER).trim();
-  if (!token) {
-    if (hasRawPdfScope(activeZoteroMcpScope)) {
-      throw new Error(
-        "Raw PDF MCP access requires the exact current-turn scope token.",
-      );
-    }
-    return activeZoteroMcpScope;
-  }
+  if (!token) return null;
   pruneExpiredScopedMcpScopes();
   const entry = scopedZoteroMcpScopes.get(token);
   if (entry) {
     // A valid token identifies one conversation, and every turn of that
-    // conversation re-registers its own scope under the token. The process-wide
-    // active scope may belong to an overlapping turn from another conversation
-    // on the same profile and must never replace it.
+    // conversation re-registers its own scope under the token.
     return entry.scope;
   }
   throw new Error(
     "Zotero MCP scope token is invalid or expired. Start a new Codex turn from Zotero so tools bind to the current profile and library.",
   );
-}
-
-function resolveMcpToolActivityScope(
-  headers: Record<string, string> | undefined,
-): ZoteroMcpActiveScope | null {
-  try {
-    return resolveScopedMcpScope(headers);
-  } catch {
-    return null;
-  }
 }
 
 function formatMcpToolActivityRequestId(
@@ -1577,9 +1612,9 @@ function buildMcpToolActivityEvent(params: {
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
   mutability?: "read" | "write";
-  headers?: Record<string, string>;
+  scope: ZoteroMcpActiveScope | null;
+  libraryID: number;
 }): ZoteroMcpToolActivityEvent {
-  const scope = resolveMcpToolActivityScope(params.headers);
   return {
     requestId: formatMcpToolActivityRequestId(params.id),
     phase: params.phase,
@@ -1595,28 +1630,20 @@ function buildMcpToolActivityEvent(params: {
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
     readObservations: params.readObservations,
-    profileSignature: scope?.profileSignature,
-    conversationKey: scope?.conversationKey,
-    libraryID: scope?.libraryID,
-    kind: scope?.kind,
+    profileSignature: params.scope?.profileSignature,
+    conversationKey: params.scope?.conversationKey,
+    libraryID: params.libraryID || undefined,
+    kind: params.scope?.kind,
     timestamp: Date.now(),
   };
 }
 
 function createToolContext(
   rawArgs: unknown,
-  headers?: Record<string, string>,
+  callScope: ResolvedMcpCallScope,
   zoteroGateway?: ZoteroGateway,
 ): AgentToolContext {
-  const scopeArgs = extractMcpScopeArgs(rawArgs);
-  const scope = resolveScopedMcpScope(headers);
-  const activeItemId =
-    scopeArgs.activeItemId ||
-    scope?.activeItemId ||
-    scope?.paperItemID ||
-    undefined;
-  const activeContextItemId =
-    scopeArgs.activeContextItemId || scope?.activeContextItemId || undefined;
+  const { scope, libraryID, activeItemId, activeContextItemId } = callScope;
   const itemLookupId = activeItemId || activeContextItemId;
   const item = itemLookupId
     ? (
@@ -1661,7 +1688,7 @@ function createToolContext(
       scope?.userText ||
       "",
     activeItemId,
-    libraryID: scopeArgs.libraryID || scope?.libraryID || 0,
+    libraryID,
     conversationKind: scope?.kind,
     model: scope?.model,
     apiBase: scope?.codexPath,
@@ -1900,7 +1927,12 @@ async function handleToolsCall(
 ): Promise<McpToolCallResult> {
   const { name, arguments: rawArgs } = params;
 
-  const scopeArgs = extractMcpScopeArgs(rawArgs);
+  const callScope = resolveMcpCallScope({
+    toolName: name,
+    rawArgs,
+    headers,
+  });
+  const { scopeArgs, scope } = callScope;
   const toolLabel = getMcpToolPresentationLabel(deps, name);
   emitZoteroMcpToolActivity(
     buildMcpToolActivityEvent({
@@ -1909,7 +1941,8 @@ async function handleToolsCall(
       toolName: name,
       toolLabel,
       args: scopeArgs.toolArgs,
-      headers,
+      scope,
+      libraryID: callScope.libraryID,
     }),
   );
 
@@ -1938,7 +1971,8 @@ async function handleToolsCall(
         mutability:
           tool?.spec.executionClass === "external_effect" ? "write" : "read",
         quoteCitations: result.quoteCitations,
-        headers,
+        scope,
+        libraryID: callScope.libraryID,
       }),
     );
   };
@@ -1957,7 +1991,6 @@ async function handleToolsCall(
     };
   }
 
-  const scope = resolveScopedMcpScope(headers);
   const scopeConversationKey = scope?.conversationKey || 0;
   const scopeGeneration = scopeConversationKey
     ? Number.isFinite(scope?.conversationGeneration)
@@ -2023,6 +2056,9 @@ async function handleToolsCall(
         ? buildMcpReadDedupeKey({
             toolName: name,
             toolArgs: scopeArgs.toolArgs,
+            libraryID: callScope.libraryID,
+            activeItemId: callScope.activeItemId,
+            activeContextItemId: callScope.activeContextItemId,
             headers,
           })
         : null;
@@ -2061,7 +2097,11 @@ async function handleToolsCall(
       return cachedReadResult.result;
     }
 
-    const toolContext = createToolContext(rawArgs, headers, deps.zoteroGateway);
+    const toolContext = createToolContext(
+      rawArgs,
+      callScope,
+      deps.zoteroGateway,
+    );
     await restoreResearchMutationAuthority(toolContext, deps.toolRegistry);
     const prepared = await deps.toolRegistry.prepareExecution(
       {

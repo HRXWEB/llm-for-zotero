@@ -353,11 +353,11 @@ import {
   resolveConversationBaseItem,
   resolvePaperChatSourceItem,
   resolveInitialPanelItemState,
-  resolveActiveLibraryID,
   resolvePreferredConversationSystem,
   resolveNoteFocusSystemSwitch,
   resolveShortcutMode,
 } from "./portalScope";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import {
   RUNTIME_CONVERSATION_SYSTEMS,
   resolveRuntimeSystemToggleTarget,

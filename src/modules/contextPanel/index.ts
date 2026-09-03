@@ -99,11 +99,11 @@ import {
 } from "./readerTextInclusion";
 import {
   resolveInitialPanelItemState,
-  resolveActiveLibraryID,
   resolveConversationSystemForItem,
   resolveDisplayConversationKind,
   resolveShortcutMode,
 } from "./portalScope";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { getLockedGlobalConversationKey } from "./prefHelpers";
 import { getEditableSelectionFromDocument } from "./noteSelection";
 import {

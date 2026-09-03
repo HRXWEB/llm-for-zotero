@@ -30,7 +30,6 @@ import {
   getZoteroMcpDirectPdfToolNames,
   registerScopedZoteroMcpScope,
   resolveConversationScopeToken,
-  setActiveZoteroMcpScope,
   updateScopedZoteroMcpScope,
   type ZoteroMcpActiveScope,
   type ZoteroMcpToolActivityEvent,
@@ -2745,9 +2744,6 @@ export async function runCodexAppServerNativeTurn(params: {
       let mcpReady = !mcpEnabled;
       let mcpWarning = "";
       let mcpStatus: CodexNativeMcpSetupStatus | undefined;
-      const clearMcpScope = mcpEnabled
-        ? setActiveZoteroMcpScope(scopedMcpScope)
-        : () => undefined;
       let unregisterGuardianReviews: () => void = () => undefined;
       try {
         const reasoningParams = resolveCodexAppServerReasoningParams(
@@ -3397,7 +3393,6 @@ export async function runCodexAppServerNativeTurn(params: {
         // the same conversation-stable token and registers its own scope under
         // it, so the header Codex captured at thread creation stays valid.
         scopedMcp?.clear();
-        clearMcpScope();
         unregisterApprovalHandlers();
       }
     });

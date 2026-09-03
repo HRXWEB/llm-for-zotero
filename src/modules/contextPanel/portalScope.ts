@@ -6,6 +6,7 @@ import {
 } from "./constants";
 import { isSupportedContextAttachment } from "./contextAttachmentSupport";
 import { normalizePositiveInt } from "./normalizers";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import {
   buildPaperStateKey,
   getLastUsedUpstreamConversationMode,
@@ -80,32 +81,6 @@ import {
   resolveNoteEditingTitle,
   resolvePreferredNoteFocusSystem,
 } from "./noteEditing";
-
-export function resolveActiveLibraryID(): number | null {
-  try {
-    const pane = Zotero.getActiveZoteroPane?.() as
-      | {
-          getSelectedLibraryID?: () => unknown;
-          getSelectedItems?: () => Zotero.Item[];
-        }
-      | undefined;
-    const selectedLibraryID = normalizePositiveInt(
-      pane?.getSelectedLibraryID?.(),
-    );
-    if (selectedLibraryID) return selectedLibraryID;
-    const selectedItems = pane?.getSelectedItems?.() || [];
-    const firstItemLibrary = normalizePositiveInt(selectedItems[0]?.libraryID);
-    if (firstItemLibrary) return firstItemLibrary;
-  } catch (_err) {
-    void _err;
-  }
-
-  const userLibraryID = normalizePositiveInt(
-    (Zotero as unknown as { Libraries?: { userLibraryID?: unknown } }).Libraries
-      ?.userLibraryID,
-  );
-  return userLibraryID;
-}
 
 export function createGlobalPortalItem(
   libraryID: number,

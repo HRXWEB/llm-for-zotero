@@ -1,6 +1,10 @@
 import { assert } from "chai";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
+import {
+  getOrCreateZoteroMcpBearerToken,
+  ZOTERO_MCP_ENDPOINT_PATH,
+} from "../src/agent/mcp/server";
 import { replayLibraryInverse } from "../test/helpers/replayLibraryInverse";
 
 declare const Zotero: any;
@@ -90,6 +94,44 @@ describe("library operations against real Zotero", function () {
         /* best effort */
       }
     }
+  });
+
+  describe("MCP active library resolution", function () {
+    it("reads the selected Zotero library when libraryID is omitted", async function () {
+      const collection = await makeCollection("McpScopeProbe");
+      const EndpointClass = Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];
+      assert.isFunction(EndpointClass);
+
+      const [status, , body] = await new EndpointClass().init({
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${getOrCreateZoteroMcpBearerToken()}`,
+        },
+        data: {
+          jsonrpc: "2.0",
+          id: 423,
+          method: "tools/call",
+          params: {
+            name: "library_search",
+            arguments: {
+              entity: "collections",
+              mode: "list",
+              view: "tree",
+            },
+          },
+        },
+      });
+      const payload = JSON.parse(body);
+      const content = JSON.parse(payload.result.content[0].text);
+
+      assert.equal(status, 200);
+      assert.equal(content.ok, true);
+      assert.include(
+        JSON.stringify(content.result),
+        collection.name,
+        "the headerless MCP call must read native state from the selected library",
+      );
+    });
   });
 
   // ── Stage 0a/0b ───────────────────────────────────────────────────────────

@@ -326,6 +326,29 @@ describe("primitive agent tools", function () {
     assert.equal((result as { limited: boolean }).limited, true);
   });
 
+  it("query_library lists libraries without requiring an active library", async function () {
+    const tool = createQueryLibraryTool({
+      resolveLibraryID: () => 0,
+      listAllLibraries: () => [
+        { libraryID: 1, name: "My Library", editable: true },
+        { libraryID: 4, name: "Lab Group", editable: false },
+      ],
+    } as never);
+    const validated = tool.validate({ entity: "libraries", mode: "list" });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+
+    const result = (await tool.execute(validated.value, {
+      ...baseContext,
+      request: { ...baseContext.request, libraryID: 0 },
+    })) as { results: Array<{ libraryID: number }> };
+
+    assert.deepEqual(
+      result.results.map((library) => library.libraryID),
+      [1, 4],
+    );
+  });
+
   it("query_library related mode resolves the active paper from reader context", async function () {
     let receivedReferenceItemId = 0;
     const tool = createQueryLibraryTool({

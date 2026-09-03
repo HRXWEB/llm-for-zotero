@@ -12,7 +12,7 @@ import {
   unregisterReaderSelectionTracking,
   openStandaloneChat,
 } from "./modules/contextPanel";
-import { resolveActiveLibraryID } from "./modules/contextPanel/portalScope";
+import { resolveActiveLibraryID } from "./utils/zoteroLibraryScope";
 import { zoteroChangeDispatcher } from "./services/zoteroChangeDispatcher";
 import { registerZoteroItemContextMenu } from "./modules/contextPanel/zoteroItemContextMenu";
 import { initChatStore } from "./utils/chatStore";
