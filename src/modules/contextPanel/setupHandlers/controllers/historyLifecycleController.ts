@@ -182,6 +182,13 @@ import {
   type ConversationRenameIdentity,
 } from "../../conversationRenameEligibility";
 import { primeHistoryNavigationMode } from "../../historyNavigationModeSync";
+import {
+  canCommitPanelConversation,
+  capturePanelOperationLease,
+  isPanelHostCompatibleWithPaper,
+  isPanelOperationLeaseCurrent,
+  requireCurrentPanelOwnership,
+} from "../../panelHostOwnership";
 
 type HistorySearchIndexFallbackStatus = Pick<
   ConversationSearchIndexResult,
@@ -265,9 +272,9 @@ export type HistoryLifecycleControllerDeps = {
   topToast: HTMLElement | null;
   modeChipBtn: HTMLButtonElement | null;
   getItem: () => Zotero.Item | null;
-  setItem: (item: Zotero.Item | null) => void;
+  setItem: (item: Zotero.Item | null) => boolean | void;
   getBasePaperItem: () => Zotero.Item | null;
-  setBasePaperItem: (item: Zotero.Item | null) => void;
+  setBasePaperItem: (item: Zotero.Item | null) => boolean | void;
   getConversationSystem: () => ConversationSystem;
   isClaudeConversationSystem: () => boolean;
   isCodexConversationSystem: () => boolean;
@@ -345,14 +352,32 @@ export function createHistoryLifecycleController(
     item = deps.getItem();
     basePaperItem = deps.getBasePaperItem();
   };
-  const setCurrentItem = (nextItem: Zotero.Item | null) => {
+  const setCurrentItem = (nextItem: Zotero.Item | null): boolean => {
+    if (deps.setItem(nextItem) === false) return false;
     item = nextItem;
-    deps.setItem(nextItem);
+    return true;
   };
-  const setBasePaperItem = (nextItem: Zotero.Item | null) => {
+  const setBasePaperItem = (nextItem: Zotero.Item | null): boolean => {
+    if (deps.setBasePaperItem(nextItem) === false) return false;
     basePaperItem = nextItem;
-    deps.setBasePaperItem(nextItem);
+    return true;
   };
+  const captureOwnedPanelOperation = (operation: string) => {
+    if (!item || !requireCurrentPanelOwnership(deps.body, item, operation)) {
+      return null;
+    }
+    const lease = capturePanelOperationLease(deps.body);
+    return lease ? { item, lease } : null;
+  };
+  const isOwnedPanelOperationCurrent = (
+    ownership: ReturnType<typeof captureOwnedPanelOperation>,
+    operation: string,
+  ): boolean =>
+    Boolean(
+      ownership &&
+      isPanelOperationLeaseCurrent(ownership.lease) &&
+      requireCurrentPanelOwnership(deps.body, ownership.item, operation),
+    );
   const getForkEligibilityStatusMessage = (
     reason?: ConversationForkEligibilityReason,
   ): string => {
@@ -2176,7 +2201,14 @@ export function createHistoryLifecycleController(
   const switchGlobalConversation = async (
     nextConversationKey: number,
   ): Promise<boolean> => {
-    if (!item) return false;
+    if (
+      !item ||
+      !requireCurrentPanelOwnership(body, null, "switch-global-conversation")
+    ) {
+      return false;
+    }
+    const hostLease = capturePanelOperationLease(body);
+    if (!hostLease) return false;
     const noteFocusItem = isNoteSession() ? item : null;
     persistDraftInputForCurrentConversation();
     const libraryID = getCurrentLibraryID();
@@ -2210,6 +2242,16 @@ export function createHistoryLifecycleController(
       kind: "global",
     });
     if (
+      !isPanelOperationLeaseCurrent(hostLease) ||
+      !requireCurrentPanelOwnership(
+        body,
+        null,
+        "switch-global-conversation-commit",
+      )
+    ) {
+      return false;
+    }
+    if (
       !ensured ||
       ensured.kind !== "global" ||
       ensured.libraryID !== libraryID
@@ -2231,8 +2273,18 @@ export function createHistoryLifecycleController(
         : system === "codex"
           ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
           : createGlobalPortalItem(libraryID, normalizedConversationKey);
+    if (
+      !canCommitPanelConversation(
+        body,
+        nextItem,
+        "switch-global-conversation-commit",
+        hostLease,
+      )
+    ) {
+      return false;
+    }
     if (!noteFocusItem) {
-      setCurrentItem(nextItem as any);
+      if (!setCurrentItem(nextItem as any)) return false;
     }
     if (system === "claude_code") {
       rememberClaudeConversationSelection({
@@ -2277,6 +2329,7 @@ export function createHistoryLifecycleController(
     closeHistoryNewMenu();
     closeHistoryMenu();
     await ensureConversationLoaded(item as Zotero.Item);
+    if (!isPanelOperationLeaseCurrent(hostLease)) return false;
     invalidateHistorySearchDocument(normalizedConversationKey);
     restoreDraftInputForCurrentConversation();
     refreshChatPreservingScroll();
@@ -2294,12 +2347,21 @@ export function createHistoryLifecycleController(
       allowedCatalogPaperItemID?: number;
     },
   ): Promise<boolean> => {
-    if (!item) return false;
+    if (
+      !item ||
+      !requireCurrentPanelOwnership(body, null, "switch-paper-conversation")
+    ) {
+      return false;
+    }
     const noteFocusItem = isNoteSession() ? item : null;
-    persistDraftInputForCurrentConversation();
     const paperItem = options?.paperItem || resolveCurrentPaperBaseItem();
     if (!paperItem) return false;
-    setBasePaperItem(paperItem);
+    if (!isPanelHostCompatibleWithPaper(body, paperItem)) {
+      return false;
+    }
+    const hostLease = capturePanelOperationLease(body);
+    if (!hostLease) return false;
+    persistDraftInputForCurrentConversation();
     const libraryID = getCurrentLibraryID();
     if (!libraryID) return false;
     const paperItemID = Number(paperItem.id || 0);
@@ -2394,6 +2456,18 @@ export function createHistoryLifecycleController(
     }
     if (!targetSummary) return false;
 
+    if (
+      !isPanelOperationLeaseCurrent(hostLease) ||
+      !requireCurrentPanelOwnership(
+        body,
+        null,
+        "switch-paper-conversation-commit",
+      )
+    ) {
+      return false;
+    }
+    if (!setBasePaperItem(paperItem)) return false;
+
     const resolvedConversationKey = Math.floor(targetSummary.conversationKey);
     if (
       pendingDeletionStore.isConversationPendingDeletion(
@@ -2411,16 +2485,37 @@ export function createHistoryLifecycleController(
     forgetRecentlyDeletedConversation(resolvedConversationKey);
     if (!noteFocusItem) {
       if (system === "claude_code") {
-        setCurrentItem(
-          createClaudePaperPortalItem(
-            paperItem,
-            resolvedConversationKey,
-          ) as any,
-        );
+        const nextItem = createClaudePaperPortalItem(
+          paperItem,
+          resolvedConversationKey,
+        ) as any;
+        if (
+          !canCommitPanelConversation(
+            body,
+            nextItem,
+            "switch-paper-conversation-commit",
+            hostLease,
+          ) ||
+          !setCurrentItem(nextItem)
+        ) {
+          return false;
+        }
       } else if (system === "codex") {
-        setCurrentItem(
-          createCodexPaperPortalItem(paperItem, resolvedConversationKey) as any,
-        );
+        const nextItem = createCodexPaperPortalItem(
+          paperItem,
+          resolvedConversationKey,
+        ) as any;
+        if (
+          !canCommitPanelConversation(
+            body,
+            nextItem,
+            "switch-paper-conversation-commit",
+            hostLease,
+          ) ||
+          !setCurrentItem(nextItem)
+        ) {
+          return false;
+        }
       } else {
         const nextItem =
           resolvedConversationKey === paperItemID
@@ -2430,7 +2525,17 @@ export function createHistoryLifecycleController(
                 resolvedConversationKey,
                 targetSummary.sessionVersion || 1,
               );
-        setCurrentItem(nextItem as any);
+        if (
+          !canCommitPanelConversation(
+            body,
+            nextItem,
+            "switch-paper-conversation-commit",
+            hostLease,
+          ) ||
+          !setCurrentItem(nextItem as any)
+        ) {
+          return false;
+        }
       }
     }
     if (system === "claude_code") {
@@ -2492,6 +2597,7 @@ export function createHistoryLifecycleController(
     } else {
       await ensureConversationLoaded(item as Zotero.Item);
     }
+    if (!isPanelOperationLeaseCurrent(hostLease)) return false;
     setActiveEditSession(null);
     inlineEditCleanup?.();
     setInlineEditCleanup(null);
@@ -2581,6 +2687,23 @@ export function createHistoryLifecycleController(
           }
           return;
         }
+        const navigationDecision = resolvePaperHistoryNavigationDecision({
+          entryPaperItemID: paperItem.id,
+          currentPaperItemID: normalizeHistoryPaperItemID(
+            resolveCurrentPaperBaseItem()?.id,
+          ),
+        });
+        if (navigationDecision === "select-target-paper") {
+          loaded = await maybeSelectPaperHistoryTarget({
+            decision: navigationDecision,
+            paperItemID: paperItem.id,
+            getPane: () =>
+              Zotero.getActiveZoteroPane?.() as
+                | HistoryPaperPaneSelector
+                | undefined,
+          });
+          return;
+        }
         loaded = await switchPaperConversation(sourceConversationKey, {
           paperItem,
           allowedCatalogPaperItemID: paperItemID,
@@ -2650,6 +2773,15 @@ export function createHistoryLifecycleController(
   const switchToHistoryEntry = async (
     entry: ConversationHistoryEntry,
   ): Promise<boolean> => {
+    syncStateFromDeps();
+    if (
+      !item ||
+      !requireCurrentPanelOwnership(body, item, "history-navigation")
+    ) {
+      return false;
+    }
+    const sourceLease = capturePanelOperationLease(body);
+    if (!sourceLease) return false;
     if (entry.kind === "paper") {
       if (isOrphanHistoryEntry(entry)) {
         if (status) {
@@ -2705,7 +2837,13 @@ export function createHistoryLifecycleController(
             }
             return false;
           }
+          // Selection transfers responsibility to B's Zotero lifecycle.
+          // The source controller belongs to A and must never mount B after
+          // the asynchronous selection completes.
+          loaded = true;
+          return true;
         }
+        if (!isPanelOperationLeaseCurrent(sourceLease)) return false;
         loaded = await switchPaperConversation(entry.conversationKey, {
           paperItem,
           allowedCatalogPaperItemID:
@@ -2756,6 +2894,8 @@ export function createHistoryLifecycleController(
       if (status) setStatus(status, t("No forkable turn found"), "error");
       return;
     }
+    const ownership = captureOwnedPanelOperation("fork-conversation");
+    if (!ownership) return;
     const activeSystem = getConversationSystem();
     const initialEligibility = evaluateConversationForkEligibility({
       system: activeSystem,
@@ -2782,6 +2922,11 @@ export function createHistoryLifecycleController(
         "fork-overlap",
       );
       if (!finalized) return;
+      if (
+        !isOwnedPanelOperationCurrent(ownership, "fork-conversation-finalize")
+      ) {
+        return;
+      }
     }
 
     const sourceHistory = chatHistory.get(sourceConversationKey) || [];
@@ -2842,6 +2987,9 @@ export function createHistoryLifecycleController(
     let result: Awaited<
       ReturnType<typeof conversationRepository.forkConversation>
     > | null = null;
+    if (!isOwnedPanelOperationCurrent(ownership, "fork-conversation-commit")) {
+      return;
+    }
     try {
       result = await conversationRepository.forkConversation({
         system: activeSystem,
@@ -2856,6 +3004,9 @@ export function createHistoryLifecycleController(
     }
     if (!result?.entry?.conversationKey) {
       if (status) setStatus(status, t("Failed to fork conversation"), "error");
+      return;
+    }
+    if (!isOwnedPanelOperationCurrent(ownership, "fork-conversation-result")) {
       return;
     }
 
@@ -2956,6 +3107,8 @@ export function createHistoryLifecycleController(
     assistantMessageID?: number;
   }) => {
     if (!item) return;
+    const ownership = captureOwnedPanelOperation("delete-turn");
+    if (!ownership) return;
     if (isRequestPending(target.conversationKey)) {
       if (status) {
         setStatus(status, t("Cannot delete while generating"), "ready");
@@ -2968,7 +3121,11 @@ export function createHistoryLifecycleController(
       return;
     }
     await ensureConversationLoaded(item as Zotero.Item);
-    if (!item || getConversationKey(item) !== target.conversationKey) {
+    if (
+      !isOwnedPanelOperationCurrent(ownership, "delete-turn-load") ||
+      !item ||
+      getConversationKey(item) !== target.conversationKey
+    ) {
       if (status) setStatus(status, t("Delete target changed"), "error");
       return;
     }
@@ -2989,6 +3146,9 @@ export function createHistoryLifecycleController(
         resolveDisplayConversationKind(item) === "paper" ? "paper" : "global",
       conversationKey: target.conversationKey,
     });
+    if (!isOwnedPanelOperationCurrent(ownership, "delete-turn-commit")) {
+      return;
+    }
     const turnDeletionInput = {
       conversationKey: target.conversationKey,
       system: getConversationSystem(),
@@ -3012,6 +3172,9 @@ export function createHistoryLifecycleController(
       if (status) {
         setStatus(status, t("Failed to queue deletion. Check logs."), "error");
       }
+      return;
+    }
+    if (!isOwnedPanelOperationCurrent(ownership, "delete-turn-result")) {
       return;
     }
     invalidateHistorySearchDocument(target.conversationKey);
@@ -3090,6 +3253,8 @@ export function createHistoryLifecycleController(
   const renameHistoryEntry = async (
     entry: ConversationHistoryEntry,
   ): Promise<void> => {
+    const ownership = captureOwnedPanelOperation("rename-conversation");
+    if (!ownership) return;
     if (isOrphanHistoryEntry(entry)) {
       if (status) {
         setStatus(status, t("This chat's source item was deleted"), "warning");
@@ -3118,6 +3283,11 @@ export function createHistoryLifecycleController(
     );
     const nextTitle = await promptConversationRename(entry);
     if (!nextTitle) return;
+    if (
+      !isOwnedPanelOperationCurrent(ownership, "rename-conversation-dialog")
+    ) {
+      return;
+    }
     try {
       let currentEntry = findHistoryEntryByKey(
         target.kind,
@@ -3141,6 +3311,11 @@ export function createHistoryLifecycleController(
         return;
       }
       const summary = await conversationRepository.getCatalogEntry(target);
+      if (
+        !isOwnedPanelOperationCurrent(ownership, "rename-conversation-commit")
+      ) {
+        return;
+      }
       currentEntry = findHistoryEntryByKey(target.kind, target.conversationKey);
       if (
         !summary ||
@@ -3166,6 +3341,11 @@ export function createHistoryLifecycleController(
         expectedGeneration: renameGeneration,
         title: nextTitle,
       });
+      if (
+        !isOwnedPanelOperationCurrent(ownership, "rename-conversation-result")
+      ) {
+        return;
+      }
       invalidateHistorySearchDocument(target.conversationKey);
       await refreshGlobalHistoryHeader();
       if (status) setStatus(status, t("Conversation renamed"), "ready");
@@ -3224,6 +3404,8 @@ export function createHistoryLifecycleController(
     conversationSystem: ConversationSystem = getConversationSystem(),
   ): Promise<boolean> => {
     if (!item) return false;
+    const ownership = captureOwnedPanelOperation("delete-conversation");
+    if (!ownership) return false;
     if (!entry.deletable) return false;
     if (rejectConversationDeletionWhileGenerating(entry.conversationKey)) {
       return false;
@@ -3232,6 +3414,9 @@ export function createHistoryLifecycleController(
       entry,
       conversationSystem,
     );
+    if (!isOwnedPanelOperationCurrent(ownership, "delete-conversation-load")) {
+      return false;
+    }
     if (
       rejectConversationDeletionWhileGenerating(targetEntry.conversationKey)
     ) {
@@ -3268,6 +3453,7 @@ export function createHistoryLifecycleController(
     // No await may separate this final check from queueConversationDeletion:
     // that call freezes writes synchronously at the durable intent boundary.
     if (
+      !isOwnedPanelOperationCurrent(ownership, "delete-conversation-commit") ||
       rejectConversationDeletionWhileGenerating(targetEntry.conversationKey)
     ) {
       return false;
@@ -3292,6 +3478,11 @@ export function createHistoryLifecycleController(
       }
       await refreshGlobalHistoryHeader();
       return false;
+    }
+    if (
+      !isOwnedPanelOperationCurrent(ownership, "delete-conversation-result")
+    ) {
+      return true;
     }
 
     // The intent is durable now.  Only after the write-ahead row exists may
@@ -3334,6 +3525,8 @@ export function createHistoryLifecycleController(
     syncStateFromDeps();
     const targetItem = item;
     if (!targetItem) return false;
+    const ownership = captureOwnedPanelOperation("delete-current-conversation");
+    if (!ownership) return false;
 
     const conversationSystem = getConversationSystem();
     const conversationKey = Math.floor(Number(getConversationKey(targetItem)));
@@ -3357,6 +3550,14 @@ export function createHistoryLifecycleController(
       kind,
       conversationKey,
     });
+    if (
+      !isOwnedPanelOperationCurrent(
+        ownership,
+        "delete-current-conversation-load",
+      )
+    ) {
+      return false;
+    }
     if (!summary || summary.kind !== kind) {
       if (status) {
         setStatus(status, t("No saved conversation to delete"), "warning");
@@ -3395,6 +3596,8 @@ export function createHistoryLifecycleController(
     const { excludeConversationKey, forceFresh } =
       normalizeCreateConversationOptions(options);
     if (!item) return false;
+    const ownership = captureOwnedPanelOperation("new-global-conversation");
+    if (!ownership) return false;
     closeHistoryNewMenu();
     const libraryID = getCurrentLibraryID();
     if (!libraryID) {
@@ -3447,6 +3650,11 @@ export function createHistoryLifecycleController(
       excludeConversationKey,
       limit: GLOBAL_HISTORY_LIMIT,
     });
+    if (
+      !isOwnedPanelOperationCurrent(ownership, "new-global-conversation-load")
+    ) {
+      return false;
+    }
     targetConversationKey = freshDraft.conversationKey;
     reuseReason =
       freshDraft.source === "current"
@@ -3466,6 +3674,23 @@ export function createHistoryLifecycleController(
       return false;
     }
 
+    ztoolkit.log("LLM: + conversation action", {
+      libraryID,
+      targetConversationKey,
+      action: reuseReason ? "reuse" : "create",
+      reason: reuseReason || "new",
+    });
+    if (reuseReason) {
+      await touchEmptyDraftActivity(targetConversationKey, "global");
+      if (
+        !isOwnedPanelOperationCurrent(
+          ownership,
+          "new-global-conversation-commit",
+        )
+      ) {
+        return false;
+      }
+    }
     if (system === "claude_code") {
       activeClaudeGlobalConversationByLibrary.set(
         buildClaudeLibraryStateKey(libraryID),
@@ -3483,16 +3708,6 @@ export function createHistoryLifecycleController(
         libraryID,
         targetConversationKey,
       );
-    }
-
-    ztoolkit.log("LLM: + conversation action", {
-      libraryID,
-      targetConversationKey,
-      action: reuseReason ? "reuse" : "create",
-      reason: reuseReason || "new",
-    });
-    if (reuseReason) {
-      await touchEmptyDraftActivity(targetConversationKey, "global");
     }
     if (forceFresh) {
       clearTransientComposeStateForItem(targetConversationKey);
@@ -3517,6 +3732,8 @@ export function createHistoryLifecycleController(
     const { excludeConversationKey, forceFresh } =
       normalizeCreateConversationOptions(options);
     if (!item) return false;
+    const ownership = captureOwnedPanelOperation("new-paper-conversation");
+    if (!ownership) return false;
     closeHistoryNewMenu();
     const paperItem = resolveCurrentPaperBaseItem();
     if (!paperItem) {
@@ -3548,6 +3765,11 @@ export function createHistoryLifecycleController(
       currentConversationKey: currentKey,
       excludeConversationKey,
     });
+    if (
+      !isOwnedPanelOperationCurrent(ownership, "new-paper-conversation-load")
+    ) {
+      return false;
+    }
     targetConversationKey = freshDraft.conversationKey;
     reuseReason =
       freshDraft.source === "current"
@@ -3575,6 +3797,14 @@ export function createHistoryLifecycleController(
 
     if (reuseReason) {
       await touchEmptyDraftActivity(targetConversationKey, "paper");
+      if (
+        !isOwnedPanelOperationCurrent(
+          ownership,
+          "new-paper-conversation-commit",
+        )
+      ) {
+        return false;
+      }
     }
     if (forceFresh) {
       clearTransientComposeStateForItem(targetConversationKey);
@@ -3599,6 +3829,10 @@ export function createHistoryLifecycleController(
   // local history list or claim a draft the user created.
   const ensureWebChatSessionPaperConversation = async (): Promise<boolean> => {
     if (!item) return false;
+    const ownership = captureOwnedPanelOperation(
+      "restore-webchat-conversation",
+    );
+    if (!ownership) return false;
     closeHistoryNewMenu();
     const paperItem = resolveCurrentPaperBaseItem();
     if (!paperItem) {
@@ -3620,6 +3854,14 @@ export function createHistoryLifecycleController(
       libraryID,
       paperItemID,
     });
+    if (
+      !isOwnedPanelOperationCurrent(
+        ownership,
+        "restore-webchat-conversation-load",
+      )
+    ) {
+      return false;
+    }
     if (!session?.conversationKey) {
       if (status) setStatus(status, t("Failed to create paper chat"), "error");
       return false;

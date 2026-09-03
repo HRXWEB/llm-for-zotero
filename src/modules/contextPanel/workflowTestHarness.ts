@@ -52,6 +52,7 @@ import type {
   WorkflowTestHistorySearchResult,
   WorkflowTestSeededTurn,
   WorkflowTestConversationPersistenceSnapshot,
+  WorkflowTestCrossPaperHistoryIsolationResult,
   WorkflowTestStaleAgentTraceIsolationResult,
 } from "./workflowTestTypes";
 import { setFooterPermissionCatalogLoadersForTests } from "./footerPermissionControl";
@@ -118,6 +119,7 @@ import { getReaderContextPanelForTab } from "./readerPopupPanelRouting";
 import type { ConversationSystem } from "../../shared/types";
 import { clearPaperRestoreTargetsForWorkflowTests } from "../../shared/paperConversationRestore";
 import { relayGetStateSnapshot } from "../../webchat/relayServer";
+import { bindEmbeddedPanelHost, bindTestPanelHost } from "./panelHostOwnership";
 import {
   activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
@@ -1060,6 +1062,7 @@ async function exerciseStaleAgentTracePanelIsolation(input: {
     }
 
     disposeSetupHandlers(body);
+    bindTestPanelHost(body, paperBItem);
     buildUI(body, paperBItem);
     activeContextPanels.set(body, () => paperBItem);
     activeContextPanelRawItems.set(body, paperBItem);
@@ -1146,6 +1149,258 @@ async function exerciseStaleAgentTracePanelIsolation(input: {
       await Zotero.Promise.delay(0);
     }
     setAgentRunTraceLoaderForTests();
+  }
+}
+
+async function exerciseCrossPaperHistoryReturnIsolation(input: {
+  panelAId: string;
+  panelBId: string;
+  paperAItemId: number;
+  paperAAttachmentItemId: number;
+  paperBItemId: number;
+  paperAMarker: string;
+  paperBMarker: string;
+  promptMarker: string;
+  selectedText: string;
+  activation?: "pointer" | "keyboard" | "history-row";
+  delaySelection?: boolean;
+}): Promise<WorkflowTestCrossPaperHistoryIsolationResult> {
+  assertWorkflowTestEnabled();
+  const panelA = getPanel(input.panelAId);
+  const panelB = getPanel(input.panelBId);
+  await seedPanelStoredUserMessage(input.panelAId, input.paperAMarker);
+  await seedPanelStoredUserMessage(input.panelBId, input.paperBMarker);
+
+  const paperAItem = activeContextPanels.get(panelA.body)?.() || panelA.item;
+  const paperBItem = activeContextPanels.get(panelB.body)?.() || panelB.item;
+  const paperAConversationKey = getConversationKey(paperAItem);
+  const paperBConversationKey = getConversationKey(paperBItem);
+  const paperBRowsBefore = await getWorkflowConversationPersistenceSnapshot(
+    "upstream",
+    paperBConversationKey,
+  );
+
+  const reader = await openWorkflowPdfReader(input.paperAAttachmentItemId, 0);
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  let restoreSelectItems: (() => void) | null = null;
+  let foreignContentObserver: MutationObserver | null = null;
+  try {
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const readerPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+      : null;
+    const rawReaderItem = Zotero.Items.get(input.paperAAttachmentItemId);
+    if (!readerPanel || !rawReaderItem) {
+      throw new Error("Workflow paper A reader context is unavailable");
+    }
+    readerPanel.appendChild(panelA.body);
+    bindEmbeddedPanelHost(panelA.body, rawReaderItem, "reader");
+
+    const chatBox = panelA.body.querySelector(
+      "#llm-chat-box",
+    ) as HTMLElement | null;
+    if (!chatBox) throw new Error("Workflow paper A chat surface is missing");
+    let foreignMutationObserved = false;
+    const MutationObserverCtor =
+      panelA.body.ownerDocument.defaultView?.MutationObserver;
+    foreignContentObserver = MutationObserverCtor
+      ? new MutationObserverCtor((records) => {
+          for (const record of records) {
+            for (const node of Array.from(record.addedNodes)) {
+              if ((node?.textContent || "").includes(input.paperBMarker)) {
+                foreignMutationObserved = true;
+              }
+            }
+          }
+          if ((chatBox.textContent || "").includes(input.paperBMarker)) {
+            foreignMutationObserved = true;
+          }
+        })
+      : null;
+    foreignContentObserver?.observe(chatBox, {
+      childList: true,
+      subtree: true,
+    });
+
+    const pane = Zotero.getActiveZoteroPane?.() as
+      | {
+          getSelectedItems?: () => Zotero.Item[];
+          selectItems?: (
+            ids: number[],
+            options?: { selectInLibrary?: boolean },
+          ) => Promise<unknown> | unknown;
+        }
+      | undefined;
+    let releaseDelayedSelection: (() => void) | null = null;
+    let delayedSelectionStarted = false;
+    if (input.delaySelection && typeof pane?.selectItems === "function") {
+      const originalSelectItems = pane.selectItems;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releaseDelayedSelection = release;
+      pane.selectItems = async (ids, options) => {
+        delayedSelectionStarted = true;
+        await gate;
+        return await originalSelectItems.call(pane, ids, options);
+      };
+      restoreSelectItems = () => {
+        pane.selectItems = originalSelectItems;
+      };
+    }
+
+    await openPanelHistoryMenu(input.panelAId);
+    const targetConversationKey =
+      input.activation === "history-row"
+        ? paperAConversationKey
+        : paperBConversationKey;
+    const resultSelector =
+      input.activation === "history-row"
+        ? `.llm-history-item[data-conversation-key="${targetConversationKey}"]`
+        : `.llm-standalone-search-item[data-conversation-key="${targetConversationKey}"]`;
+    if (input.activation !== "history-row") {
+      dispatchWorkflowClick(
+        panelA.body,
+        ".llm-history-menu-search-trigger",
+        "History search trigger",
+      );
+      const searchInput = panelA.body.querySelector(
+        ".llm-standalone-search-input",
+      ) as HTMLInputElement | null;
+      if (!searchInput) {
+        throw new Error("History search input was not rendered");
+      }
+      searchInput.value = input.paperBMarker;
+      const InputEventCtor =
+        panelA.body.ownerDocument.defaultView?.Event || Event;
+      searchInput.dispatchEvent(new InputEventCtor("input", { bubbles: true }));
+    }
+
+    const searchDeadline = Date.now() + 8000;
+    let resultRow = panelA.body.querySelector(
+      resultSelector,
+    ) as HTMLElement | null;
+    while (!resultRow && Date.now() < searchDeadline) {
+      await Zotero.Promise.delay(50);
+      resultRow = panelA.body.querySelector(
+        resultSelector,
+      ) as HTMLElement | null;
+    }
+    if (!resultRow) {
+      throw new Error("Paper B was not rendered in conversation history");
+    }
+    if (input.activation === "keyboard") {
+      const KeyboardEventCtor =
+        panelA.body.ownerDocument.defaultView?.KeyboardEvent || KeyboardEvent;
+      resultRow.dispatchEvent(
+        new KeyboardEventCtor("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Enter",
+        }),
+      );
+    } else {
+      resultRow.click();
+    }
+
+    if (input.delaySelection) {
+      const delayedDeadline = Date.now() + 3000;
+      while (!delayedSelectionStarted && Date.now() < delayedDeadline) {
+        await Zotero.Promise.delay(20);
+      }
+      const tabs = (
+        Zotero as unknown as {
+          Tabs?: { select?: (tabID: string) => Promise<unknown> | unknown };
+        }
+      ).Tabs;
+      if (reader.tabID && typeof tabs?.select === "function") {
+        await tabs.select(reader.tabID);
+      }
+      releaseDelayedSelection?.();
+    }
+
+    const shouldNavigateToPaperB = input.activation !== "history-row";
+    const selectedDeadline = Date.now() + 8000;
+    let selectedLibraryItemID = Number(pane?.getSelectedItems?.()[0]?.id || 0);
+    while (
+      shouldNavigateToPaperB &&
+      selectedLibraryItemID !== input.paperBItemId &&
+      Date.now() < selectedDeadline
+    ) {
+      await Zotero.Promise.delay(50);
+      selectedLibraryItemID = Number(pane?.getSelectedItems?.()[0]?.id || 0);
+    }
+    if (
+      shouldNavigateToPaperB &&
+      selectedLibraryItemID !== input.paperBItemId
+    ) {
+      throw new Error("History navigation did not select paper B in Zotero");
+    }
+
+    const tabs = (
+      Zotero as unknown as {
+        Tabs?: { select?: (tabID: string) => Promise<unknown> | unknown };
+      }
+    ).Tabs;
+    if (reader.tabID && typeof tabs?.select === "function") {
+      await tabs.select(reader.tabID);
+    }
+    await Zotero.Promise.delay(150);
+    foreignContentObserver?.disconnect();
+
+    const diagnostics = await getDiagnostics(input.panelAId);
+    const request = await ask(input.panelAId, input.promptMarker);
+    const popupAction = await dispatchWorkflowReaderAddTextPopup({
+      reader,
+      pageIndex: 0,
+      selectedText: input.selectedText,
+    });
+    popupHost = popupAction.popupHost;
+    selectionDoc = popupAction.selectionDoc;
+    await waitForSelectedContext({
+      conversationKey: paperAConversationKey,
+      selectedText: input.selectedText,
+      pageIndex: 0,
+    });
+
+    const paperBRowsAfter = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperBConversationKey,
+    );
+    return {
+      paperAConversationKey,
+      paperBConversationKey,
+      selectedLibraryItemID,
+      foreignMutationObserved,
+      panelAConversationKey: Number(diagnostics.panelConversationKey || 0),
+      panelABasePaperItemID: Number(
+        (panelA.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+          .basePaperItemId || 0,
+      ),
+      panelARawContextItemID: Number(
+        (panelA.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+          .rawContextItemId || 0,
+      ),
+      panelAMessageText: diagnostics.messageText || "",
+      requestConversationKey: getConversationKey(request.item),
+      requestItemID: Number(request.item.id || 0),
+      addTextStoredForA: getSelectedTextContextEntries(
+        paperAConversationKey,
+      ).some((context) => context.text === input.selectedText),
+      addTextStoredForB: getSelectedTextContextEntries(
+        paperBConversationKey,
+      ).some((context) => context.text === input.selectedText),
+      paperBMessageRowsBefore: paperBRowsBefore.messageRows,
+      paperBMessageRowsAfter: paperBRowsAfter.messageRows,
+    };
+  } finally {
+    foreignContentObserver?.disconnect();
+    restoreSelectItems?.();
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    await closeWorkflowReader(reader);
   }
 }
 
@@ -4104,6 +4359,7 @@ export function installWorkflowTestHarness(targetAddon: {
     setWorkflowProviderSession,
     getWorkflowConversationPersistenceSnapshot,
     exerciseStaleAgentTracePanelIsolation,
+    exerciseCrossPaperHistoryReturnIsolation,
     createStandaloneAttachmentFixture,
     createItemNoteFixture,
     createStandaloneNoteFixture,

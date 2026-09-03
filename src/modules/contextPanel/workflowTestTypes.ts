@@ -361,6 +361,23 @@ export type WorkflowTestStaleAgentTraceIsolationResult = {
   paperBMessageRowsAfterPaperBAppend: number;
 };
 
+export type WorkflowTestCrossPaperHistoryIsolationResult = {
+  paperAConversationKey: number;
+  paperBConversationKey: number;
+  selectedLibraryItemID: number;
+  foreignMutationObserved: boolean;
+  panelAConversationKey: number;
+  panelABasePaperItemID: number;
+  panelARawContextItemID: number;
+  panelAMessageText: string;
+  requestConversationKey: number;
+  requestItemID: number;
+  addTextStoredForA: boolean;
+  addTextStoredForB: boolean;
+  paperBMessageRowsBefore: number;
+  paperBMessageRowsAfter: number;
+};
+
 export type WorkflowTestApi = {
   reset: () => Promise<void>;
   createPaperWithPdfFixture: (input: {
@@ -386,6 +403,19 @@ export type WorkflowTestApi = {
     paperBAppendMarker: string;
     runId: string;
   }) => Promise<WorkflowTestStaleAgentTraceIsolationResult>;
+  exerciseCrossPaperHistoryReturnIsolation: (input: {
+    panelAId: string;
+    panelBId: string;
+    paperAItemId: number;
+    paperAAttachmentItemId: number;
+    paperBItemId: number;
+    paperAMarker: string;
+    paperBMarker: string;
+    promptMarker: string;
+    selectedText: string;
+    activation?: "pointer" | "keyboard" | "history-row";
+    delaySelection?: boolean;
+  }) => Promise<WorkflowTestCrossPaperHistoryIsolationResult>;
   createStandaloneAttachmentFixture: (input: {
     title: string;
     filename: string;

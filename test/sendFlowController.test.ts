@@ -758,6 +758,54 @@ describe("sendFlowController", function () {
     };
   }
 
+  it("preserves the draft and produces no effects when panel ownership is poisoned", async function () {
+    const { controller, inputBox, getCounts, getDraftValue } = createBaseDeps({
+      requireCurrentOwnership: () => false,
+    });
+
+    await controller.doSend();
+
+    assert.equal(inputBox.value, "ask question");
+    assert.equal(getDraftValue(), "ask question");
+    assert.deepInclude(getCounts(), {
+      sendCalled: 0,
+      editCalled: 0,
+      retainImageCalled: 0,
+      retainPaperStateCalled: 0,
+      consumePaperModeStateCalled: 0,
+      retainFileCalled: 0,
+      retainTextCalled: 0,
+      persistDraftInputCalls: 0,
+      composerDraftClearedCalls: 0,
+    });
+  });
+
+  it("restores the draft when ownership changes during asynchronous preparation", async function () {
+    let resolveContext: ((value: ResolvedContextSource | null) => void) | null =
+      null;
+    const contextReady = new Promise<ResolvedContextSource | null>(
+      (resolve) => {
+        resolveContext = resolve;
+      },
+    );
+    let owned = true;
+    const { controller, inputBox, getCounts, getDraftValue } = createBaseDeps({
+      requireCurrentOwnership: () => owned,
+      resolveContextSource: () => contextReady,
+    });
+
+    const send = controller.doSend();
+    assert.equal(inputBox.value, "");
+    owned = false;
+    resolveContext?.(null);
+    await send;
+
+    assert.equal(getCounts().sendCalled, 0);
+    assert.equal(getCounts().editCalled, 0);
+    assert.equal(inputBox.value, "ask question");
+    assert.equal(getDraftValue(), "ask question");
+  });
+
   it("uses retain-pinned callbacks for normal send flow", async function () {
     const { controller, inputBox, getCounts } = createBaseDeps();
     await controller.doSend();

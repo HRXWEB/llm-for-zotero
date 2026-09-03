@@ -899,6 +899,40 @@ describe("menu action controller note routing", function () {
     ]);
   });
 
+  it("blocks programmatic response actions when panel ownership is poisoned", async function () {
+    const body = new FakeElement();
+    const item = { id: 42, libraryID: 1 } as unknown as Zotero.Item;
+    const deletions: unknown[] = [];
+    const statuses: Array<{ message: string; level: string }> = [];
+    const target: ResponseActionTarget = {
+      item,
+      contentText: "Foreign response",
+      modelName: "Codex",
+      conversationKey: 9,
+      userTimestamp: 100,
+      assistantTimestamp: 200,
+    };
+
+    await runResponseMenuAction(
+      {
+        body,
+        getItem: () => item,
+        getConversationKey: () => 9,
+        captureOwnership: () => null,
+        queueTurnDeletion: async (queuedTarget: unknown) => {
+          deletions.push(queuedTarget);
+        },
+        logError: () => {},
+      } as any,
+      "delete",
+      target,
+      (message, level) => statuses.push({ message, level }),
+    );
+
+    assert.deepEqual(deletions, []);
+    assert.deepEqual(statuses, []);
+  });
+
   it("keeps footer response actions scoped to their owning panel body", async function () {
     const bodyA = new FakeElement();
     const bodyB = new FakeElement();

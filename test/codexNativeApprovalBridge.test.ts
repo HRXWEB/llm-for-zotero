@@ -116,4 +116,49 @@ describe("Codex native approval bridge", function () {
       "approval UI was unavailable",
     );
   });
+
+  it("denies without rendering when panel ownership is already stale", async function () {
+    const statuses = recordStatuses();
+    let rendered = false;
+
+    const response = await resolveCodexNativeApprovalWithOptionalReviewCard({
+      body,
+      request: commandRequest,
+      setStatusSafely: statuses.setStatusSafely,
+      isCurrent: () => false,
+      showActionCard: async () => {
+        rendered = true;
+        return { approved: true };
+      },
+    });
+
+    assert.deepEqual(response, { decision: "decline" });
+    assert.isFalse(rendered);
+    assert.deepEqual(statuses.entries, []);
+  });
+
+  it("denies an approval resolved after panel ownership changes", async function () {
+    const statuses = recordStatuses();
+    let current = true;
+    let resolvedTrace: AgentConfirmationResolution | undefined;
+
+    const response = await resolveCodexNativeApprovalWithOptionalReviewCard({
+      body,
+      request: commandRequest,
+      setStatusSafely: statuses.setStatusSafely,
+      isCurrent: () => current,
+      trace: {
+        noteMcpConfirmationResolved: (_requestId, resolution) => {
+          resolvedTrace = resolution;
+        },
+      },
+      showActionCard: async () => {
+        current = false;
+        return { approved: true };
+      },
+    });
+
+    assert.deepEqual(response, { decision: "decline" });
+    assert.isUndefined(resolvedTrace);
+  });
 });

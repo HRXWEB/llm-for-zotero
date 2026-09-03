@@ -8012,15 +8012,23 @@ label.llm-search-results-item:hover {
   background: var(--llm-quote-card-surface);
 }
 
-.llm-quote-card[data-quote-status="not-source"],
-.llm-quote-card[data-quote-status="unverified"] {
+.llm-quote-card[data-quote-status="not-source"] {
   --llm-quote-card-rail: #f59e0b;
   background: var(--llm-quote-card-surface);
+}
+
+.llm-quote-card[data-quote-status="unresolved"] {
+  --llm-quote-card-rail: var(--fill-tertiary);
+  background: var(--llm-quote-card-surface);
+}
+
+.llm-quote-card[data-quote-interactive="false"] {
   cursor: default;
 }
 
 .llm-quote-card[data-quote-status="not-source"] .llm-quote-card-content,
-.llm-quote-card[data-quote-status="unverified"] .llm-quote-card-content {
+.llm-quote-card[data-quote-status="unresolved"][data-quote-interactive="false"]
+  .llm-quote-card-content {
   padding-bottom: 8px;
 }
 
@@ -8087,8 +8095,8 @@ label.llm-search-results-item:hover {
 
 .llm-quote-card[data-quote-status="not-source"] .llm-quote-card-preview,
 .llm-quote-card[data-quote-status="not-source"] .llm-quote-card-body,
-.llm-quote-card[data-quote-status="unverified"] .llm-quote-card-preview,
-.llm-quote-card[data-quote-status="unverified"] .llm-quote-card-body {
+.llm-quote-card[data-quote-status="unresolved"] .llm-quote-card-preview,
+.llm-quote-card[data-quote-status="unresolved"] .llm-quote-card-body {
   font-style: normal;
 }
 

@@ -172,6 +172,14 @@ import {
 } from "../../shared/generatedImages";
 import { isEmbeddableGeneratedImage } from "./generatedImageAssets";
 import { copyTextToClipboard } from "./clipboard";
+import {
+  capturePanelOperationLease,
+  evaluatePanelOwnership,
+  isPanelOperationLeaseCurrent,
+  type PanelOperationLease,
+  renderPanelOwnershipBlocked,
+  requireCurrentPanelOwnership,
+} from "./panelHostOwnership";
 import { renderAssistantGeneratedImagesInto } from "./generatedImageRender";
 export { copyTextToClipboard } from "./clipboard";
 export {
@@ -1413,6 +1421,17 @@ export function appendUserMessageCopyAction(params: {
     if (typeof event.stopImmediatePropagation === "function") {
       event.stopImmediatePropagation();
     }
+    const currentItem = activeContextPanels.get(params.body)?.() || null;
+    if (
+      currentItem &&
+      !requireCurrentPanelOwnership(
+        params.body,
+        currentItem,
+        "copy-user-message",
+      )
+    ) {
+      return;
+    }
     await copyTextToClipboard(params.body, params.message.text || "");
     const status = params.body.querySelector(
       "#llm-status",
@@ -2370,6 +2389,15 @@ export async function ensureConversationLoaded(
   // not target the retired key captured during the first render.
   for (const [body, getItem] of activeContextPanels) {
     if (getItem() !== item) continue;
+    if (
+      !requireCurrentPanelOwnership(
+        body,
+        item,
+        "provision-conversation-identity",
+      )
+    ) {
+      continue;
+    }
     const root = body.querySelector("#llm-main") as HTMLElement | null;
     if (root) root.dataset.itemId = String(conversationKey);
   }
@@ -2773,6 +2801,13 @@ export async function copyRenderedMarkdownToClipboard(
   markdownText: string,
   quoteCitations?: QuoteCitation[],
 ): Promise<void> {
+  const currentItem = activeContextPanels.get(body)?.() || null;
+  if (
+    currentItem &&
+    !requireCurrentPanelOwnership(body, currentItem, "copy-response")
+  ) {
+    return;
+  }
   const payload = buildRenderedMarkdownClipboardPayload(
     markdownText,
     quoteCitations,
@@ -3090,8 +3125,12 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
     action: AgentPendingAction,
   ) => Promise<AgentConfirmationResolution>;
   nextRequestId?: () => string;
+  isCurrent?: () => boolean;
 }): Promise<unknown> {
   const defaultDecision = resolveCodexNativeApprovalRequest(params.request);
+  if (params.isCurrent && !params.isCurrent()) {
+    return defaultDecision.response;
+  }
   if (defaultDecision.approved) {
     params.setStatusSafely("Codex approved Zotero MCP access", "sending");
     return defaultDecision.response;
@@ -3120,6 +3159,9 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
     params.setStatusSafely("Codex is waiting for your approval", "sending");
     params.trace?.noteMcpConfirmationRequired?.(requestId, action);
     const resolution = await showActionCard(params.body, requestId, action);
+    if (params.isCurrent && !params.isCurrent()) {
+      return defaultDecision.response;
+    }
     params.trace?.noteMcpConfirmationResolved?.(requestId, resolution);
     return buildCodexNativeApprovalResponseFromResolution(
       params.request,
@@ -3240,10 +3282,43 @@ function setRequestUIBusy(
 function notifyProviderDispatch(
   body: Element,
   ui: PanelRequestUI,
+  item: Zotero.Item,
+  ownershipLease?: PanelOperationLease | null,
   callback?: () => void,
-): void {
+): boolean {
+  if (ownershipLease && !isPanelOperationLeaseCurrent(ownershipLease)) {
+    return false;
+  }
+  if (!requireCurrentPanelOwnership(body, item, "provider-dispatch")) {
+    return false;
+  }
   if (ui.inputBox) ui.inputBox.disabled = isPanelWebChatMode(body);
   callback?.();
+  return true;
+}
+
+function createOwnershipFencedProviderDispatch(params: {
+  body: Element;
+  item: Zotero.Item;
+  lease: PanelOperationLease;
+  callback?: () => void;
+}): () => void {
+  return () => {
+    if (
+      !isPanelOperationLeaseCurrent(params.lease) ||
+      !requireCurrentPanelOwnership(
+        params.body,
+        params.item,
+        "agent-provider-dispatch",
+      )
+    ) {
+      getAbortController(getConversationKey(params.item))?.abort();
+      const error = new Error("Panel ownership changed before dispatch");
+      error.name = "AbortError";
+      throw error;
+    }
+    params.callback?.();
+  };
 }
 
 function getPanelBodyConversationKey(
@@ -3270,9 +3345,29 @@ export function isPanelConversationCurrent(
   body: Element,
   item: Zotero.Item,
 ): boolean {
+  const ownershipVerdict = evaluatePanelOwnership(body, item);
+  const ownershipRoot = body.querySelector("#llm-main") as HTMLElement | null;
+  if (ownershipVerdict !== "match") {
+    if (
+      ownershipVerdict === "host-mismatch" ||
+      (ownershipVerdict === "unresolved" &&
+        Boolean(ownershipRoot?.dataset.handlersInitialized))
+    ) {
+      renderPanelOwnershipBlocked(
+        body,
+        "render-conversation",
+        ownershipVerdict,
+      );
+    }
+    if (
+      ownershipVerdict !== "unresolved" ||
+      Boolean(ownershipRoot?.dataset.handlersInitialized)
+    ) {
+      return false;
+    }
+  }
   const conversationKey = getConversationKey(item);
-  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
-  const displayedKey = Number(panelRoot?.dataset.itemId || 0);
+  const displayedKey = Number(ownershipRoot?.dataset.itemId || 0);
   if (
     Number.isFinite(displayedKey) &&
     displayedKey > 0 &&
@@ -3356,6 +3451,9 @@ export function beginPanelRequest(
   requestId: number;
   signal: AbortSignal;
 } | null {
+  if (!requireCurrentPanelOwnership(body, item, "begin-request")) {
+    return null;
+  }
   const conversationKey = getConversationKey(item);
   const requestId = nextRequestId();
   const AbortControllerCtor = getAbortControllerCtor();
@@ -3383,8 +3481,19 @@ export function finishPanelRequest(
   requestId: number,
 ): boolean {
   if (!finishRequest(conversationKey, requestId)) return false;
-  syncRequestUIForConversation(conversationKey, body, item);
-  restoreRequestUIIdle(body, conversationKey, requestId);
+  const panelIsCurrent = requireCurrentPanelOwnership(
+    body,
+    item,
+    "finish-request",
+  );
+  syncRequestUIForConversation(
+    conversationKey,
+    panelIsCurrent ? body : null,
+    panelIsCurrent ? item : null,
+  );
+  if (panelIsCurrent) {
+    restoreRequestUIIdle(body, conversationKey, requestId);
+  }
   return true;
 }
 
@@ -3623,6 +3732,7 @@ type CodexNativeTurnCallbacks = Pick<
  */
 function buildCodexNativeTurnCallbacks(ctx: {
   body: Element;
+  item: Zotero.Item;
   assistantMessage: Message;
   codexActivityTrace: ReturnType<
     typeof createCodexNativeActivityTraceController
@@ -3863,6 +3973,8 @@ function buildCodexNativeTurnCallbacks(ctx: {
         request,
         trace: codexActivityTrace,
         setStatusSafely,
+        isCurrent: () =>
+          requireCurrentPanelOwnership(body, ctx.item, "agent-confirmation"),
       });
     },
   };
@@ -5037,7 +5149,7 @@ const MAX_QUOTE_VALIDATION_DECISION_ENTRIES = 1000;
 const MAX_QUOTE_VALIDATION_DECISION_BYTES = 4 * 1024 * 1024;
 const MAX_QUOTE_SOURCE_INDEX_ENTRIES = 64;
 const MAX_QUOTE_SOURCE_INDEX_BYTES = 2 * 1024 * 1024;
-const QUOTE_VALIDATION_POLICY_VERSION = 8;
+const QUOTE_VALIDATION_POLICY_VERSION = 9;
 type QuoteValidationDecision = ReturnType<
   typeof finalizeAssistantQuoteCitations
 >;
@@ -5346,7 +5458,8 @@ async function applyAssistantMessageQuoteGate(
             entry.status,
             entry.status === "matched"
               ? entry.certificate.documentFingerprint
-              : entry.status === "absent"
+              : entry.status === "absent" ||
+                  entry.status === "literal-not-found"
                 ? entry.documentFingerprint
                 : entry.reason,
             entry.status === "matched" ? entry.certificate.pageIndex : "",
@@ -5471,11 +5584,11 @@ async function collectLivePdfQuoteSecondaryEvidence(params: {
         status: "matched",
         certificate: verification.certificate,
       });
-    } else if (verification.status === "absent") {
+    } else if (verification.status === "literal-not-found") {
       out.push({
         quoteKey: request.quoteKey,
         contextItemId: request.contextItemId,
-        status: "absent",
+        status: "literal-not-found",
         documentFingerprint: verification.documentFingerprint,
       });
     } else {
@@ -8278,6 +8391,13 @@ export async function retryLatestAssistantResponse(
   requestId?: number,
   onProviderDispatch?: () => void,
 ) {
+  const ownershipLease = capturePanelOperationLease(body);
+  if (
+    !ownershipLease ||
+    !requireCurrentPanelOwnership(body, item, "retry-response")
+  ) {
+    return;
+  }
   const ui = getPanelRequestUI(body);
   const initialConversationKey = getConversationKey(item);
   let thisRequestId: number;
@@ -8313,7 +8433,9 @@ export async function retryLatestAssistantResponse(
   const requestIsActive = () =>
     isRequestOwner(conversationKey, thisRequestId) &&
     getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted;
+    !getAbortController(conversationKey)?.signal.aborted &&
+    isPanelOperationLeaseCurrent(ownershipLease) &&
+    requireCurrentPanelOwnership(body, item, "retry-response-continuation");
   const releaseRequest = () => {
     if (!finishPanelRequest(body, item, conversationKey, thisRequestId)) {
       return false;
@@ -8873,7 +8995,16 @@ export async function retryLatestAssistantResponse(
         )
       : null;
     if (stopRetryPreparation()) return;
-    notifyProviderDispatch(body, ui, onProviderDispatch);
+    if (
+      !notifyProviderDispatch(
+        body,
+        ui,
+        item,
+        ownershipLease,
+        onProviderDispatch,
+      )
+    )
+      return;
     const answer = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
@@ -8909,6 +9040,7 @@ export async function retryLatestAssistantResponse(
             }),
             ...buildCodexNativeTurnCallbacks({
               body,
+              item,
               assistantMessage,
               codexActivityTrace,
               flushResponseStream,
@@ -10214,12 +10346,20 @@ function buildAgentEngineDeps(
   currentItem?: Zotero.Item,
   conversationSystem?: ConversationSystem,
   conversationGeneration?: number,
+  panelBody?: Element,
+  ownershipLease?: PanelOperationLease | null,
 ): AgentEngineDeps {
   const getEffectiveConversationSystem = (): ConversationSystem =>
     conversationSystem ||
     (currentItem
       ? resolveEffectiveConversationSystem({ item: currentItem })
       : "upstream");
+  const canCommitAgentEffect = (operation: string): boolean =>
+    !currentItem ||
+    !panelBody ||
+    (Boolean(ownershipLease) &&
+      isPanelOperationLeaseCurrent(ownershipLease) &&
+      requireCurrentPanelOwnership(panelBody, currentItem, operation));
   return {
     conversationGeneration,
     chatHistory,
@@ -10248,8 +10388,14 @@ function buildAgentEngineDeps(
     },
     getPanelRequestUI,
     setRequestUIBusy,
-    restoreRequestUIIdle,
-    scheduleQueuedInputDrain,
+    restoreRequestUIIdle: (body, conversationKey, requestId) => {
+      if (!canCommitAgentEffect("agent-request-finish")) return;
+      restoreRequestUIIdle(body, conversationKey, requestId);
+    },
+    scheduleQueuedInputDrain: (body, scope) => {
+      if (!canCommitAgentEffect("agent-queue-drain")) return;
+      scheduleQueuedInputDrain(body, scope);
+    },
     createPanelUpdateHelpers,
     ensureConversationLoaded,
     getConversationKey,
@@ -10306,6 +10452,7 @@ function buildAgentEngineDeps(
     },
     appendReasoningPart,
     persistConversationMessage: async (conversationKey, message) => {
+      if (!canCommitAgentEffect("agent-persistence")) return;
       const guardedMessage = {
         ...message,
         conversationGeneration:
@@ -10335,6 +10482,7 @@ function buildAgentEngineDeps(
       );
     },
     updateStoredLatestUserMessage: async (conversationKey, data) => {
+      if (!canCommitAgentEffect("agent-user-persistence")) return;
       const guardedData = {
         ...data,
         conversationGeneration:
@@ -10366,6 +10514,7 @@ function buildAgentEngineDeps(
       );
     },
     updateStoredLatestAssistantMessage: async (conversationKey, data) => {
+      if (!canCommitAgentEffect("agent-assistant-persistence")) return;
       const guardedData = {
         ...data,
         conversationGeneration:
@@ -10436,6 +10585,14 @@ async function retryLatestAgentResponse(
   onProviderDispatch?: () => void,
   activePaperContextOverride?: PaperContextRef,
 ): Promise<true> {
+  const ownershipLease = capturePanelOperationLease(body);
+  const isOwnershipCurrent = (operation: string) =>
+    Boolean(
+      ownershipLease &&
+      isPanelOperationLeaseCurrent(ownershipLease) &&
+      requireCurrentPanelOwnership(body, item, operation),
+    );
+  if (!isOwnershipCurrent("retry-agent-response")) return true;
   const conversationSystem = resolveEffectiveConversationSystem({
     item,
     authMode,
@@ -10454,7 +10611,15 @@ async function retryLatestAgentResponse(
       ),
     );
   }
+  if (!isOwnershipCurrent("retry-agent-response-load")) return true;
   await initAgentSubsystem();
+  if (!isOwnershipCurrent("retry-agent-response-runtime")) return true;
+  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
+    body,
+    item,
+    lease: ownershipLease!,
+    callback: onProviderDispatch,
+  });
   await retryAgentTurn(
     body,
     item,
@@ -10472,9 +10637,11 @@ async function retryLatestAgentResponse(
       item,
       conversationSystem,
       getConversationWriteGeneration(getConversationKey(item)),
+      body,
+      ownershipLease,
     ),
     requestId,
-    onProviderDispatch,
+    guardedProviderDispatch,
     activePaperContextOverride,
   );
   return true;
@@ -10522,6 +10689,14 @@ async function sendAgentQuestion(opts: {
   conversationSystem?: ConversationSystem;
   planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 }): Promise<void> {
+  const ownershipLease = capturePanelOperationLease(opts.body);
+  const isOwnershipCurrent = (operation: string) =>
+    Boolean(
+      ownershipLease &&
+      isPanelOperationLeaseCurrent(ownershipLease) &&
+      requireCurrentPanelOwnership(opts.body, opts.item, operation),
+    );
+  if (!isOwnershipCurrent("send-agent-question")) return;
   const conversationKey = getConversationKey(opts.item);
   if (
     opts.requestId !== undefined &&
@@ -10536,6 +10711,7 @@ async function sendAgentQuestion(opts: {
     conversationKey,
     conversationSystem: opts.conversationSystem,
   });
+  if (!isOwnershipCurrent("send-agent-question-scope")) return;
   if (!safeConversationScope) {
     const ui = getPanelRequestUI(opts.body);
     const helpers = createPanelUpdateHelpers(
@@ -10551,6 +10727,7 @@ async function sendAgentQuestion(opts: {
     return;
   }
   await initAgentSubsystem();
+  if (!isOwnershipCurrent("send-agent-question-runtime")) return;
   if (
     opts.requestId !== undefined &&
     (!isRequestOwner(conversationKey, opts.requestId) ||
@@ -10559,12 +10736,20 @@ async function sendAgentQuestion(opts: {
   ) {
     return;
   }
+  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
+    body: opts.body,
+    item: opts.item,
+    lease: ownershipLease!,
+    callback: opts.onProviderDispatch,
+  });
   await sendAgentTurn(
-    opts,
+    { ...opts, onProviderDispatch: guardedProviderDispatch },
     buildAgentEngineDeps(
       opts.item,
       opts.conversationSystem,
       getConversationWriteGeneration(getConversationKey(opts.item)),
+      opts.body,
+      ownershipLease,
     ),
   );
 }
@@ -10602,6 +10787,13 @@ export async function sendQuestion(
     agentRunId,
     skipAgentDispatch = false,
   } = opts;
+  const ownershipLease = capturePanelOperationLease(body);
+  if (
+    !ownershipLease ||
+    !requireCurrentPanelOwnership(body, item, "send-question")
+  ) {
+    return;
+  }
   const initialConversationKey = getConversationKey(item);
   const claimedHere = opts.requestId === undefined;
   let thisRequestId: number;
@@ -10616,7 +10808,9 @@ export async function sendQuestion(
   const requestIsActive = (conversationKey: number) =>
     isRequestOwner(conversationKey, thisRequestId) &&
     getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted;
+    !getAbortController(conversationKey)?.signal.aborted &&
+    isPanelOperationLeaseCurrent(ownershipLease) &&
+    requireCurrentPanelOwnership(body, item, "send-question-continuation");
   const finishBeforeDispatch = () => {
     if (!claimedHere) return false;
     const currentConversationKey = getConversationKey(item);
@@ -10959,7 +11153,17 @@ export async function sendQuestion(
     };
 
     try {
-      notifyProviderDispatch(body, ui, opts.onProviderDispatch);
+      if (
+        !notifyProviderDispatch(
+          body,
+          ui,
+          item,
+          ownershipLease,
+          opts.onProviderDispatch,
+        )
+      ) {
+        return;
+      }
       await compactCodexAppServerConversation({
         conversationKey,
         codexPath: getEffectiveCodexAppServerBinaryPath(
@@ -11339,7 +11543,18 @@ export async function sendQuestion(
       // [webchat] Send PDF only when the caller explicitly requests it via chip state.
       // Always use dynamic port for the embedded relay server
       const { getRelayBaseUrl } = await import("../../webchat/relayServer");
-      notifyProviderDispatch(body, ui, opts.onProviderDispatch);
+      if (
+        !notifyProviderDispatch(
+          body,
+          ui,
+          item,
+          ownershipLease,
+          opts.onProviderDispatch,
+        )
+      ) {
+        reportWebChatSendOutcome("cancelled");
+        return;
+      }
       const answer = await sendWebChatQuestion({
         item,
         question,
@@ -11669,7 +11884,17 @@ export async function sendQuestion(
           })
         : undefined;
     if (await stopInactiveRequest()) return;
-    notifyProviderDispatch(body, ui, opts.onProviderDispatch);
+    if (
+      !notifyProviderDispatch(
+        body,
+        ui,
+        item,
+        ownershipLease,
+        opts.onProviderDispatch,
+      )
+    ) {
+      return;
+    }
     const answer = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
@@ -11707,6 +11932,7 @@ export async function sendQuestion(
             }),
             ...buildCodexNativeTurnCallbacks({
               body,
+              item,
               assistantMessage,
               codexActivityTrace,
               flushResponseStream,

@@ -201,6 +201,16 @@ import {
   notifyWorkflowTestSendSettled,
 } from "./workflowTestHooks";
 import {
+  bindStandalonePanelHost,
+  bindTestPanelHost,
+  canCommitPanelConversation,
+  capturePanelOperationLease,
+  getPanelHostBinding,
+  isPanelHostCompatibleWithPaper,
+  isPanelOperationLeaseCurrent,
+  requireCurrentPanelOwnership,
+} from "./panelHostOwnership";
+import {
   getActiveContextAttachmentFromTabs,
   addSelectedTextContext,
   appendSelectedTextContextForItem,
@@ -651,6 +661,13 @@ export function setupHandlers(
   });
   const rawPanelItem =
     activeContextPanelRawItems.get(body) || initialItem || null;
+  if (__env__ !== "production" && !getPanelHostBinding(body)) {
+    if (existingPanelRoot?.dataset.standalone === "true") {
+      bindStandalonePanelHost(body, rawPanelItem);
+    } else {
+      bindTestPanelHost(body, rawPanelItem);
+    }
+  }
   const resolveLiveRawPanelItem = (): Zotero.Item | null => {
     if (activeContextPanelRawItems.has(body)) {
       return activeContextPanelRawItems.get(body) || null;
@@ -797,6 +814,30 @@ export function setupHandlers(
     : "";
 
   activeContextPanels.set(body, () => item);
+  const ownershipProtectedEventTypes = [
+    "pointerdown",
+    "mousedown",
+    "click",
+    "command",
+    "keydown",
+    "input",
+    "change",
+    "paste",
+    "drop",
+  ] as const;
+  const enforcePanelOwnershipForEvent = (event: Event) => {
+    if (!item) return;
+    const target = event.target as Node | null;
+    if (target !== body && target && !panelRoot.contains(target)) return;
+    if (requireCurrentPanelOwnership(body, item, `panel-${event.type}`)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const eventType of ownershipProtectedEventTypes) {
+    body.addEventListener(eventType, enforcePanelOwnershipForEvent, true);
+  }
   let isWebChatModeActive = () => panelRoot.dataset.webchatMode === "true";
   const getQueuedFollowUpThreadKey = (): string | null =>
     buildQueuedFollowUpThreadKey({
@@ -1380,7 +1421,14 @@ export function setupHandlers(
     nextSystem: ConversationSystem,
     options?: { forceFresh?: boolean },
   ) => {
-    if (!item) return;
+    if (
+      !item ||
+      !requireCurrentPanelOwnership(body, item, "switch-provider-system")
+    ) {
+      return;
+    }
+    const ownershipLease = capturePanelOperationLease(body);
+    if (!ownershipLease) return;
     const noteSession = resolveCurrentNoteSession();
     if (noteSession) {
       const resolvedNextSystem = resolveNoteFocusSystemSwitch({
@@ -1472,8 +1520,23 @@ export function setupHandlers(
       const resolvedState = resolveInitialPanelItemState(rawBaseItem, {
         conversationSystem: nextSystem,
       });
-      item = resolvedState.item || item;
-      basePaperItem = resolvedState.basePaperItem || basePaperItem;
+      const nextItem = resolvedState.item || item;
+      const nextBasePaperItem = resolvedState.basePaperItem || basePaperItem;
+      if (
+        !isPanelOperationLeaseCurrent(ownershipLease) ||
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "switch-provider-system-commit",
+          ownershipLease,
+        ) ||
+        (nextBasePaperItem &&
+          !isPanelHostCompatibleWithPaper(body, nextBasePaperItem))
+      ) {
+        return;
+      }
+      item = nextItem;
+      basePaperItem = nextBasePaperItem;
       syncConversationIdentity();
       await createAndSwitchPaperConversation(true);
       return;
@@ -1483,13 +1546,29 @@ export function setupHandlers(
     const resolvedState = resolveInitialPanelItemState(rawBaseItem, {
       conversationSystem: nextSystem,
     });
-    item = resolvedState.item || item;
-    basePaperItem = resolvedState.basePaperItem || basePaperItem;
+    const nextItem = resolvedState.item || item;
+    const nextBasePaperItem = resolvedState.basePaperItem || basePaperItem;
+    if (
+      !isPanelOperationLeaseCurrent(ownershipLease) ||
+      !canCommitPanelConversation(
+        body,
+        nextItem,
+        "switch-provider-system-commit",
+        ownershipLease,
+      ) ||
+      (nextBasePaperItem &&
+        !isPanelHostCompatibleWithPaper(body, nextBasePaperItem))
+    ) {
+      return;
+    }
+    item = nextItem;
+    basePaperItem = nextBasePaperItem;
     syncConversationIdentity();
     if (nextSystem === "claude_code") {
       warmClaudeModeCaches();
     }
     await ensureConversationLoaded(item as Zotero.Item);
+    if (!isPanelOperationLeaseCurrent(ownershipLease)) return;
     await renderShortcuts(
       body,
       item as Zotero.Item,
@@ -1540,10 +1619,7 @@ export function setupHandlers(
     const noteSession = resolveCurrentNoteSession();
     if (noteSession?.noteKind === "item") {
       const parentItem = resolveCurrentNoteParentItem();
-      if (parentItem) {
-        basePaperItem = parentItem;
-        return parentItem;
-      }
+      if (parentItem) return parentItem;
     }
     if (noteSession) {
       return null;
@@ -1555,11 +1631,7 @@ export function setupHandlers(
       cachedBasePaperItem: resolvePaperChatBaseItem(basePaperItem),
       currentItemBaseItem: resolvePaperChatBaseItem(item),
     });
-    if (resolvedBaseItem) {
-      basePaperItem = resolvedBaseItem;
-      return resolvedBaseItem;
-    }
-    return null;
+    return resolvedBaseItem || null;
   };
 
   // Compute conversation key early so all closures can reference it.
@@ -1577,6 +1649,12 @@ export function setupHandlers(
   const getTextContextConversationKey = (): number | null =>
     item ? getConversationKey(item) : null;
   const syncConversationIdentity = () => {
+    if (
+      item &&
+      !canCommitPanelConversation(body, item, "sync-conversation-identity")
+    ) {
+      return;
+    }
     conversationKey = item ? getConversationKey(item) : null;
     activeContextPanels.set(body, () => item);
     void retainClaudeRuntimeForBody(body, item);
@@ -2241,6 +2319,22 @@ export function setupHandlers(
     ensureConversationLoaded,
     getConversationKey,
     getHistory: (conversationKey) => chatHistory.get(conversationKey) || [],
+    captureOwnership: (operation, targetConversationKey) => {
+      const ownedItem = item;
+      if (
+        !ownedItem ||
+        !requireCurrentPanelOwnership(body, ownedItem, operation) ||
+        (targetConversationKey &&
+          getConversationKey(ownedItem) !== targetConversationKey)
+      ) {
+        return null;
+      }
+      const lease = capturePanelOperationLease(body);
+      if (!lease) return null;
+      return () =>
+        isPanelOperationLeaseCurrent(lease) &&
+        requireCurrentPanelOwnership(body, ownedItem, `${operation}-commit`);
+    },
     resolveActiveNoteSession,
     closeResponseMenu,
     closePromptMenu,
@@ -4753,11 +4847,26 @@ export function setupHandlers(
     modeChipBtn,
     getItem: () => item,
     setItem: (nextItem) => {
+      if (
+        nextItem &&
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "commit-conversation-identity",
+        )
+      ) {
+        return false;
+      }
       item = nextItem as any;
+      return true;
     },
     getBasePaperItem: () => basePaperItem,
     setBasePaperItem: (nextItem) => {
+      if (nextItem && !isPanelHostCompatibleWithPaper(body, nextItem)) {
+        return false;
+      }
       basePaperItem = nextItem;
+      return true;
     },
     getConversationSystem,
     isClaudeConversationSystem,
@@ -6568,6 +6677,16 @@ export function setupHandlers(
   const { processIncomingFiles } = createFileIntakeController({
     body,
     getItem: () => item,
+    captureOwnership: (ownedItem, operation) => {
+      if (!requireCurrentPanelOwnership(body, ownedItem, operation)) {
+        return null;
+      }
+      const lease = capturePanelOperationLease(body);
+      if (!lease) return null;
+      return () =>
+        isPanelOperationLeaseCurrent(lease) &&
+        requireCurrentPanelOwnership(body, ownedItem, `${operation}-commit`);
+    },
     getCurrentModel: () => getSelectedModelInfo().currentModel,
     getCurrentPdfSupport: () => {
       const profile = getSelectedProfile();
@@ -6984,6 +7103,8 @@ export function setupHandlers(
     body,
     inputBox,
     getItem: () => item,
+    requireCurrentOwnership: (candidateItem, operation) =>
+      requireCurrentPanelOwnership(body, candidateItem, operation),
     beginRequest: beginPanelRequest,
     isRequestOwner,
     finishRequest: finishPanelRequest,
@@ -7523,7 +7644,12 @@ export function setupHandlers(
     runtimeModeBtn.addEventListener("click", (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
-      if (!item) return;
+      if (
+        !item ||
+        !requireCurrentPanelOwnership(body, item, "switch-runtime-mode")
+      ) {
+        return;
+      }
       const nextMode: ChatRuntimeMode =
         getCurrentRuntimeMode() === "agent" ? "chat" : "agent";
       setCurrentRuntimeMode(nextMode);
@@ -7547,9 +7673,17 @@ export function setupHandlers(
     planModeChip.addEventListener("click", (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
-      if (!item) return;
+      if (
+        !item ||
+        !requireCurrentPanelOwnership(body, item, "cancel-agent-plan")
+      ) {
+        return;
+      }
+      const ownershipLease = capturePanelOperationLease(body);
+      const ownershipItem = item;
+      if (!ownershipLease) return;
       void (async () => {
-        const key = getConversationKey(item!);
+        const key = getConversationKey(ownershipItem);
         const state = getComposePlanState(key);
         if (!state) return;
         if (state.submitted) {
@@ -7565,14 +7699,45 @@ export function setupHandlers(
             },
           );
           if (!confirmed) return;
+          if (
+            !isPanelOperationLeaseCurrent(ownershipLease) ||
+            !requireCurrentPanelOwnership(
+              body,
+              ownershipItem,
+              "cancel-agent-plan-commit",
+            )
+          ) {
+            return;
+          }
           getAbortController(key)?.abort();
           await import("../../agent/plans/coordinator").then(
-            ({ planExecutionCoordinator }) =>
-              planExecutionCoordinator.cancelArtifact({
+            ({ planExecutionCoordinator }) => {
+              if (
+                !isPanelOperationLeaseCurrent(ownershipLease) ||
+                !requireCurrentPanelOwnership(
+                  body,
+                  ownershipItem,
+                  "cancel-agent-plan-artifact",
+                )
+              ) {
+                return;
+              }
+              return planExecutionCoordinator.cancelArtifact({
                 planId: state.planId,
                 revision: state.revision,
-              }),
+              });
+            },
           );
+          if (
+            !isPanelOperationLeaseCurrent(ownershipLease) ||
+            !requireCurrentPanelOwnership(
+              body,
+              ownershipItem,
+              "cancel-agent-plan-result",
+            )
+          ) {
+            return;
+          }
         }
         disableComposePlanMode(key);
         syncPlanModeChip();
@@ -8039,6 +8204,12 @@ export function setupHandlers(
   const cancelActiveAgentAction = (options?: {
     requireVisibleReviewCard?: boolean;
   }): boolean => {
+    if (
+      !item ||
+      !requireCurrentPanelOwnership(body, item, "cancel-active-request")
+    ) {
+      return false;
+    }
     const cancelledReviewRequestIds = cancelVisiblePendingConfirmationCards(
       chatBox || body,
       (requestId, resolution) =>
@@ -8207,6 +8378,9 @@ export function setupHandlers(
       handleQuoteValidationUserActivity,
       true,
     );
+    for (const eventType of ownershipProtectedEventTypes) {
+      body.removeEventListener(eventType, enforcePanelOwnershipForEvent, true);
+    }
     unregisterQueuedFollowUpBody(registeredQueuedFollowUpThreadKey, body);
     queuedFollowUpBody.__llmQueuedFollowUpRegisteredThreadKey = null;
     activeContextPanelStateSync.delete(body);

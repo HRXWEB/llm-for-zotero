@@ -2263,7 +2263,7 @@ describe("quoteCitations", function () {
     assert.notInclude(rendered, "the model’s goodness-of-fit, measured by");
   });
 
-  it("anchors the largest unique prose span when PDF math cannot be completely aligned", function () {
+  it("keeps a unique prose span unresolved when PDF math cannot be completely aligned", function () {
     const displayQuote =
       "Recall that the readout weights $w$ are proportional to $y_{*0}^\\top y_0$ through Hebbian plasticity.";
     const sourceQuote =
@@ -2282,31 +2282,16 @@ describe("quoteCitations", function () {
           },
         ],
       }),
+      quoteSourceReview: { sourceEvidenceComplete: true },
     });
 
-    assert.include(finalized.markdown, "[[quote:");
-    assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0].quoteText, displayQuote);
-    assert.equal(
-      finalized.quoteCitations[0].sourceMatchText,
-      "Recall that the readout weights w are proportional to y*0",
-    );
-    assert.equal(finalized.quoteCitations[0].sourceMatchKind, "raw-prefix");
-    assert.equal(finalized.quoteCitations[0].pageHintIndex, 4);
-    const display = replaceQuoteCitationPlaceholdersForMarkdown(
-      finalized.markdown,
-      finalized.quoteCitations,
-    );
-    assert.include(display, displayQuote);
-    assert.notInclude(display, "y*0|\\mathbf");
-
-    const html = renderMarkdown(display);
-    assert.include(html, "math-inline");
-    assert.include(html, "katex");
-    assert.notInclude(html, "y*0|\\mathbf");
+    assert.isEmpty(finalized.quoteCitations);
+    assert.include(finalized.markdown, displayQuote);
+    assert.include(finalized.markdown, "Zaid & Schaffer");
+    assert.notInclude(finalized.markdown, "Not a source quote");
   });
 
-  it("anchors the database propensity-function quote by its unique searchable prose prefix", function () {
+  it("keeps an OCR-damaged propensity function neutral despite its unique prose prefix", function () {
     const displayQuote =
       "We modeled the propensity function to be weight-dependent $\\rho(w)=\\tanh(10w)$ based on experimental observations.";
     const pdfText =
@@ -2327,16 +2312,9 @@ describe("quoteCitations", function () {
       }),
     });
 
-    assert.lengthOf(finalized.quoteCitations, 1);
-    assert.include(finalized.markdown, "[[quote:");
+    assert.isEmpty(finalized.quoteCitations);
+    assert.include(finalized.markdown, displayQuote);
     assert.notInclude(finalized.markdown, "Not a source quote");
-    assert.equal(finalized.quoteCitations[0].quoteText, displayQuote);
-    assert.equal(
-      finalized.quoteCitations[0].sourceMatchText,
-      "We modeled the propensity function to be weight-dependent",
-    );
-    assert.equal(finalized.quoteCitations[0].sourceMatchKind, "raw-prefix");
-    assert.equal(finalized.quoteCitations[0].pageHintIndex, 9);
   });
 
   it("does not verify CJK text with unsupported model prefixes and suffixes", function () {
@@ -2753,7 +2731,7 @@ describe("quoteCitations", function () {
     assert.lengthOf(finalized.quoteCitations, 0);
   });
 
-  it("defers a unique near-complete source location instead of declaring it absent", function () {
+  it("rejects a unique near-complete source location with a changed prose word", function () {
     const source =
       "The population response remained stable across every repeated recording session despite substantial changes in individual neuronal tuning patterns.";
     const quote = source.replace("patterns", "preferences");
@@ -2777,8 +2755,7 @@ describe("quoteCitations", function () {
       },
     });
 
-    assert.equal(finalized.markdown, markdown);
-    assert.notInclude(finalized.markdown, "Not a source quote");
+    assert.equal(finalized.markdown, `> ${quote}\n>\n> Not a source quote`);
     assert.isEmpty(finalized.quoteCitations);
   });
 
@@ -2934,7 +2911,7 @@ describe("quoteCitations", function () {
     assert.equal(finalized.quoteCitations[0]?.pageHintIndex, 2);
   });
 
-  it("rejects a strong Worker partial after complete PDF.js text confirms absence", function () {
+  it("rejects a clean-prose partial after a complete literal PDF.js miss", function () {
     const source =
       "The population response remained stable across every repeated recording session despite substantial changes in individual neuronal tuning patterns.";
     const quote = source.replace("patterns", "preferences");
@@ -2956,7 +2933,7 @@ describe("quoteCitations", function () {
         {
           quoteKey: buildQuoteSecondaryEvidenceKey(quote),
           contextItemId: 81,
-          status: "absent",
+          status: "literal-not-found",
           documentFingerprint: "viewer-document",
         },
       ],
@@ -3058,11 +3035,102 @@ describe("quoteCitations", function () {
       quoteSourceReview: {
         sourceEvidenceComplete: true,
       },
+      secondaryEvidence: [
+        {
+          quoteKey: buildQuoteSecondaryEvidenceKey(quote),
+          contextItemId: 2505,
+          status: "literal-not-found",
+          documentFingerprint: "bauer-viewer",
+        },
+      ],
     });
 
     assert.equal(finalized.markdown, markdown);
     assert.notInclude(finalized.markdown, "Not a source quote");
     assert.isEmpty(finalized.quoteCitations);
+  });
+
+  it("verifies the LwF quote through joined or split PDF text scripts", function () {
+    const quote =
+      "In Learning without Forgetting (LwF) [30], the model is copied before task $t$ is learned. The copied model produces fixed logits $z^{\\text{old}}$ on the new-task data, and the updated model produces $z^{\\text{new}}$.";
+
+    for (const [index, sourceText] of [
+      "In Learning without Forgetting (LwF) [30], the model is copied before task t is learned. The copied model produces fixed logits zold on the new-task data, and the updated model produces znew.",
+      "In Learning without Forgetting (LwF) [30], the model is copied before task t is learned. The copied model produces fixed logits z old on the new-task data, and the updated model produces z new.",
+    ].entries()) {
+      const finalized = finalizeAssistantQuoteCitations({
+        markdown: `> ${quote}\n>\n> (Si and Qin, 2026)`,
+        sourceIndex: buildQuoteSourceIndex({
+          sourceTexts: [
+            {
+              sourceText,
+              sourceLabel: "(Si and Qin, 2026)",
+              sourceMatchSource: "pdf-page-text",
+              sourceFingerprint: `pdf-page-${index}`,
+              contextItemId: 3943,
+              itemId: 3942,
+              pageHintIndex: 9,
+              pageHintLabel: "10",
+            },
+          ],
+        }),
+        secondaryEvidence: [
+          {
+            quoteKey: buildQuoteSecondaryEvidenceKey(quote),
+            contextItemId: 3943,
+            status: "absent",
+            documentFingerprint: `pdf-js-${index}`,
+          },
+        ],
+        quoteSourceReview: { sourceEvidenceComplete: true },
+      });
+
+      assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
+      assert.notInclude(finalized.markdown, "Not a source quote");
+      assert.lengthOf(finalized.quoteCitations, 1);
+      assert.equal(finalized.quoteCitations[0]?.pageHintLabel, "10");
+      assert.equal(
+        finalized.quoteCitations[0]?.sourceMatchKind,
+        "normalized-span",
+      );
+    }
+  });
+
+  it("rejects semantic mutations while allowing no word-level quote fuzziness", function () {
+    const source =
+      "The lower estimate $\\mathbf{x}^{2} \\leq 30$ did increase after training.";
+    const mutations = [
+      source.replace("lower", "upper"),
+      source.replace("x", "y"),
+      source.replace("^{2}", "^{3}"),
+      source.replace("\\leq", "\\geq"),
+      source.replace("30", "3"),
+      source.replace("did increase", "did not increase"),
+      `${source} This tail was invented.`,
+      "A frozen teacher supplies unchanging predictions on the new task data.",
+    ];
+
+    for (const quote of mutations) {
+      const finalized = finalizeAssistantQuoteCitations({
+        markdown: `> ${quote}\n>\n> (Example et al., 2026)`,
+        sourceIndex: buildQuoteSourceIndex({
+          sourceTexts: [
+            {
+              sourceText: source,
+              sourceLabel: "(Example et al., 2026)",
+              sourceMatchSource: "pdf-page-text",
+              contextItemId: 81,
+              itemId: 80,
+              pageHintIndex: 2,
+            },
+          ],
+        }),
+        quoteSourceReview: { sourceEvidenceComplete: true },
+      });
+
+      assert.include(finalized.markdown, "Not a source quote", quote);
+      assert.isEmpty(finalized.quoteCitations, quote);
+    }
   });
 
   it("pairs exact MinerU math with a unique literal PDF locator", function () {
@@ -3550,7 +3618,7 @@ describe("quoteCitations", function () {
     );
   });
 
-  it("authenticates the Climer methods quote after removing its same-line citation", function () {
+  it("keeps the Climer methods quote unresolved when PDF extraction loses an operator", function () {
     const displayedQuote =
       "Mice received $4 \\mu \\mathrm { l }$ water reward $2 / 3 ( 2 . 2 5 \\mathsf { m } )$ of the way along the $3 { \\cdot } \\mathsf { m }$ virtual track.";
     const sourceText =
@@ -3573,16 +3641,10 @@ describe("quoteCitations", function () {
       quoteSourceReview: { sourceEvidenceComplete: true },
     });
 
-    assert.match(finalized.markdown, /\[\[quote:Q_[a-z0-9]+\]\]/);
+    assert.include(finalized.markdown, displayedQuote);
+    assert.include(finalized.markdown, "Climer et al., 2025");
     assert.notInclude(finalized.markdown, "Not a source quote");
-    assert.lengthOf(finalized.quoteCitations, 1);
-    assert.equal(finalized.quoteCitations[0]?.quoteText, displayedQuote);
-    assert.equal(finalized.quoteCitations[0]?.pageHintIndex, 9);
-    assert.equal(finalized.quoteCitations[0]?.pageHintLabel, "10");
-    assert.equal(
-      finalized.quoteCitations[0]?.sourceMatchKind,
-      "normalized-span",
-    );
+    assert.isEmpty(finalized.quoteCitations);
   });
 
   it("uses canonical same-line quote parsing during cooperative validation", async function () {

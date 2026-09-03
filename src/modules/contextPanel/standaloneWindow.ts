@@ -55,6 +55,13 @@ import {
 import { renderShortcuts } from "./shortcuts";
 import { createElement, HTML_NS } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
+import {
+  bindStandalonePanelHost,
+  canLifecycleCommitPanelConversation,
+  capturePanelOperationLease,
+  clearPanelHostBinding,
+  isPanelOperationLeaseCurrent,
+} from "./panelHostOwnership";
 import type { ConversationSystem } from "../../shared/types";
 import type { ChatRuntimeMode } from "./types";
 import {
@@ -330,6 +337,17 @@ function restoreEmbeddedPanelsAfterStandaloneClose(
     const resolved = resolveInitialPanelItemState(rawItem, {
       conversationSystem: resolveConversationSystemForItem(rawItem),
     });
+    const hostLease = capturePanelOperationLease(body as Element);
+    if (
+      !canLifecycleCommitPanelConversation(
+        body as Element,
+        resolved.item,
+        "restore-embedded-panel",
+        hostLease,
+      )
+    ) {
+      continue;
+    }
     buildUI(body as Element, resolved.item);
     activeContextPanels.set(body, () => resolved.item);
     activeContextPanelRawItems.set(body as Element, rawItem);
@@ -337,11 +355,13 @@ function restoreEmbeddedPanelsAfterStandaloneClose(
     void (async () => {
       try {
         if (resolved.item) await ensureConversationLoaded(resolved.item);
+        if (!isPanelOperationLeaseCurrent(hostLease)) return;
         await renderShortcuts(
           body as Element,
           resolved.item,
           resolveShortcutMode(resolved.item),
         );
+        if (!isPanelOperationLeaseCurrent(hostLease)) return;
         refreshChat(body as Element, resolved.item);
       } catch (err) {
         ztoolkit.log("LLM: side panel restore failed", err);
@@ -1875,6 +1895,7 @@ export function openStandaloneChat(options?: {
           ) as HTMLElement | null;
           if (llmMain) llmMain.dataset.standalone = "true";
 
+          bindStandalonePanelHost(contentArea, mountedItem);
           activeContextPanels.set(contentArea, () => activeItem);
           activeContextPanelRawItems.set(contentArea, rawItemForPanel);
           void retainClaudeRuntimeForBody(contentArea, mountedItem);
@@ -4356,6 +4377,7 @@ export function openStandaloneChat(options?: {
     const contentArea = root?.querySelector(".llm-standalone-content");
     if (contentArea) {
       disposeSetupHandlers(contentArea);
+      clearPanelHostBinding(contentArea);
       void releaseClaudeRuntimeForBody(contentArea as Element);
       activeContextPanels.delete(contentArea);
       activeContextPanelRawItems.delete(contentArea);

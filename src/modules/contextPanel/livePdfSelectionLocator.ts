@@ -11,6 +11,7 @@ import {
   type QuoteTextSearchQueryKind,
 } from "./quoteTextSearch";
 import {
+  assessAcademicQuoteAlignment,
   buildQuoteTextIndex,
   findQuoteSourceSpansAllowingLayoutArtifacts,
   type QuoteTextIndex,
@@ -87,7 +88,7 @@ export type LivePdfQuoteCertificate = {
 
 export type LivePdfQuoteVerification =
   | { status: "matched"; certificate: LivePdfQuoteCertificate }
-  | { status: "absent"; documentFingerprint: string }
+  | { status: "literal-not-found"; documentFingerprint: string }
   | { status: "defer"; reason: string };
 
 export type ExactQuoteJumpQueryAttempt = {
@@ -1403,12 +1404,15 @@ const hiddenQuoteLocationCache = new Map<
 >();
 const livePdfQuoteVerificationCache = new Map<
   string,
-  Extract<LivePdfQuoteVerification, { status: "matched" | "absent" }>
+  Extract<LivePdfQuoteVerification, { status: "matched" | "literal-not-found" }>
 >();
 
 function cacheLivePdfQuoteVerification(
   key: string,
-  value: Extract<LivePdfQuoteVerification, { status: "matched" | "absent" }>,
+  value: Extract<
+    LivePdfQuoteVerification,
+    { status: "matched" | "literal-not-found" }
+  >,
 ): void {
   livePdfQuoteVerificationCache.delete(key);
   livePdfQuoteVerificationCache.set(key, value);
@@ -2191,6 +2195,7 @@ function resolveInlineMathQuoteInCompletePdfPages(
     sourceMatchText: string;
   };
   const candidates = new Map<string, Candidate>();
+  let proseCandidateCount = 0;
 
   for (let pageOrdinal = 0; pageOrdinal < pages.length; pageOrdinal += 1) {
     const spansBySegment = proseSegments.map((segment) =>
@@ -2227,6 +2232,13 @@ function resolveInlineMathQuoteInCompletePdfPages(
         quoteText,
       ).trim();
       if (!sourceMatchText) continue;
+      proseCandidateCount += 1;
+      if (
+        !assessAcademicQuoteAlignment(sourceMatchText, quoteText)
+          .allMeaningfulTokensSupported
+      ) {
+        continue;
+      }
       const key = `${pageOrdinal}\u241f${first.sourceStart}\u241f${last.sourceEnd}`;
       candidates.set(key, {
         pageOrdinal,
@@ -2237,7 +2249,11 @@ function resolveInlineMathQuoteInCompletePdfPages(
     }
   }
 
-  if (!candidates.size) return { status: "not-found" };
+  if (!candidates.size) {
+    return proseCandidateCount > 1
+      ? { status: "ambiguous" }
+      : { status: "not-found" };
+  }
   if (candidates.size !== 1) return { status: "ambiguous" };
 
   const candidate = Array.from(candidates.values())[0];
@@ -2267,9 +2283,11 @@ function resolveInlineMathQuoteInCompletePdfPages(
 /**
  * Verify a quote only against the loaded PDF.js document. The default path is
  * deliberately stricter than navigation: partial anchors are never accepted,
- * and a negative or unique verdict requires searchable text for every page.
- * The opt-in inline-math mode supplies only a locator for wording that an
- * independent context-text source has already verified in full.
+ * and a unique verdict requires searchable text for every page.
+ * A literal search miss is reported separately so extraction-sensitive text
+ * cannot be mistaken for a proven semantic absence.
+ * The opt-in inline-math mode aligns ordered prose and accepts its bounded PDF
+ * span only when the typed academic alignment accounts for every hard atom.
  */
 export async function verifyCompleteQuoteInLivePdfJs(
   reader: any,
@@ -2413,12 +2431,15 @@ export async function verifyCompleteQuoteInLivePdfJs(
       }
       if (options?.yieldToMain) await options.yieldToMain();
     }
-    const absent: Extract<LivePdfQuoteVerification, { status: "absent" }> = {
-      status: "absent",
+    const literalNotFound: Extract<
+      LivePdfQuoteVerification,
+      { status: "literal-not-found" }
+    > = {
+      status: "literal-not-found",
       documentFingerprint,
     };
-    cacheLivePdfQuoteVerification(verificationCacheKey, absent);
-    return absent;
+    cacheLivePdfQuoteVerification(verificationCacheKey, literalNotFound);
+    return literalNotFound;
   }
   if (locations.length !== 1) {
     return {
@@ -2445,7 +2466,8 @@ export async function verifyCompleteQuoteInLivePdfJs(
       pageIndex: location.page.pageIndex,
       pageLabel: location.page.pageLabel,
       sourceMatchText,
-      sourceMatchKind: "exact",
+      sourceMatchKind:
+        sourceMatchText === cleanQuote ? "exact" : "normalized-span",
       sourceMatchPageOccurrence: location.span.occurrenceIndex,
     },
   };

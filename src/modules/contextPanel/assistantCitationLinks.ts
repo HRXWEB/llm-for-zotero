@@ -3894,7 +3894,7 @@ async function resolveAndNavigateAssistantCitation(params: {
     }
   } finally {
     endNavigationActivity();
-    if (hasQuoteText && !quoteJumpSucceeded) {
+    if (hasQuoteText) {
       const EventConstructor =
         params.body.ownerDocument?.defaultView?.Event || null;
       if (EventConstructor) {
@@ -4317,7 +4317,7 @@ type QuoteCardPointerPoint = {
   clientY: number;
 };
 
-type QuoteCardStatus = "verified" | "unverified" | "not-source";
+type QuoteCardStatus = "verified" | "unresolved" | "not-source";
 
 function isMouseEventLike(event: Event): event is MouseEvent {
   const mouseEvent = event as MouseEvent;
@@ -4449,15 +4449,22 @@ function createQuoteCardElement(params: {
   citationContent?: Node;
   quoteContent?: DocumentFragment | null;
   status?: QuoteCardStatus;
+  interactive?: boolean;
 }): HTMLElement {
   const status = params.status || "verified";
-  const interactive = status === "verified";
+  const interactive = params.interactive ?? status === "verified";
   const wrapper = params.ownerDoc.createElement("div");
   wrapper.className = params.quoteCitationId
     ? "llm-quote-card llm-quote-citation-anchor"
     : "llm-quote-card";
   wrapper.dataset.quoteStatus = status;
+  wrapper.dataset.quoteInteractive = interactive ? "true" : "false";
   wrapper.dataset.expanded = interactive ? "false" : "true";
+  if (status === "unresolved") {
+    wrapper.title = params.citationContent
+      ? "Source match incomplete; click to search the paper."
+      : "Source match incomplete.";
+  }
   if (params.quoteCitationId) {
     wrapper.dataset.quoteCitationId = params.quoteCitationId;
   }
@@ -4475,6 +4482,12 @@ function createQuoteCardElement(params: {
 
   wrapper.appendChild(content);
   if (params.citationContent) {
+    if (status === "unresolved" && params.citationContent.nodeType === 1) {
+      (params.citationContent as Element).setAttribute(
+        "aria-label",
+        "Source match incomplete; click to search the paper.",
+      );
+    }
     const citation = params.ownerDoc.createElement("span");
     citation.className = "llm-quote-card-citation";
     citation.appendChild(params.citationContent);
@@ -4509,7 +4522,7 @@ function createQuoteCardElement(params: {
   content.append(preview, body);
 
   const setExpanded = (expanded: boolean) => {
-    if (wrapper.dataset.quoteStatus !== "verified") {
+    if (wrapper.dataset.quoteInteractive !== "true") {
       wrapper.dataset.expanded = "true";
       content.removeAttribute("aria-expanded");
       return;
@@ -4535,7 +4548,7 @@ function createQuoteCardElement(params: {
   let quoteCardPointerStart: QuoteCardPointerPoint | null = null;
   let shouldSuppressQuoteCardToggle = false;
   wrapper.addEventListener("mousedown", (event: Event) => {
-    if (wrapper.dataset.quoteStatus !== "verified") return;
+    if (wrapper.dataset.quoteInteractive !== "true") return;
     if (!isMouseEventLike(event)) return;
     quoteCardPointerStart = {
       clientX: event.clientX,
@@ -4546,7 +4559,7 @@ function createQuoteCardElement(params: {
     }
   });
   wrapper.addEventListener("mouseup", (event: Event) => {
-    if (wrapper.dataset.quoteStatus !== "verified") return;
+    if (wrapper.dataset.quoteInteractive !== "true") return;
     if (!isMouseEventLike(event)) return;
     if (
       event.button !== 0 ||
@@ -4558,11 +4571,11 @@ function createQuoteCardElement(params: {
     }
   });
   wrapper.addEventListener("contextmenu", () => {
-    if (wrapper.dataset.quoteStatus !== "verified") return;
+    if (wrapper.dataset.quoteInteractive !== "true") return;
     shouldSuppressQuoteCardToggle = true;
   });
   wrapper.addEventListener("click", (event: Event) => {
-    if (wrapper.dataset.quoteStatus !== "verified") return;
+    if (wrapper.dataset.quoteInteractive !== "true") return;
     if (shouldIgnoreToggle(event.target)) return;
     if (shouldSuppressQuoteCardToggle) {
       shouldSuppressQuoteCardToggle = false;
@@ -4576,7 +4589,7 @@ function createQuoteCardElement(params: {
     toggleExpanded();
   });
   content.addEventListener("keydown", (event: KeyboardEvent) => {
-    if (wrapper.dataset.quoteStatus !== "verified") return;
+    if (wrapper.dataset.quoteInteractive !== "true") return;
     if (event.key !== "Enter" && event.key !== " ") return;
     if (shouldIgnoreToggle(event.target)) return;
     event.preventDefault();
@@ -4607,6 +4620,8 @@ function createFallbackQuoteCardElement(params: {
     quoteText: params.quoteText,
     citationContent,
     quoteContent: params.quoteContent,
+    status: "unresolved",
+    interactive: Boolean(params.citationContent || params.citationLabel),
   });
 }
 
@@ -4626,7 +4641,8 @@ function createQuoteCitationAnchorElement(params: {
       ownerDoc: params.ownerDoc,
       quoteText: displayText,
       quoteCitationId: params.quoteCitation.id,
-      status: "unverified",
+      status: "unresolved",
+      interactive: false,
     });
   }
   const lookupText = resolveQuoteCitationLookupText(params.quoteCitation);
@@ -4677,7 +4693,8 @@ function createQuoteRenderOccurrenceElement(params: {
         quoteCitationId: trustedCitation.id,
         quoteOccurrenceId: params.occurrence.occurrenceId,
         quoteContent: params.quoteContent,
-        status: "unverified",
+        status: "unresolved",
+        interactive: false,
       });
     }
     const lookupText = resolveQuoteCitationLookupText(trustedCitation);
@@ -4728,7 +4745,8 @@ function createQuoteRenderOccurrenceElement(params: {
       quoteText: params.occurrence.displayText,
       quoteOccurrenceId: params.occurrence.occurrenceId,
       quoteContent: params.quoteContent,
-      status: "unverified",
+      status: "unresolved",
+      interactive: false,
     });
   }
   const citationContent: Node = createCitationButton({
@@ -4754,7 +4772,8 @@ function createQuoteRenderOccurrenceElement(params: {
     quoteOccurrenceId: params.occurrence.occurrenceId,
     citationContent,
     quoteContent: params.quoteContent,
-    status: "verified",
+    status: "unresolved",
+    interactive: true,
   });
 }
 
@@ -5267,7 +5286,7 @@ export function decorateAssistantCitationLinks(params: {
   for (const [blockquoteIndex, blockquote] of blockquotes.entries()) {
     if (
       blockquote.closest(
-        ".llm-quote-citation-anchor, [data-quote-status='not-source'], [data-quote-status='unverified']",
+        ".llm-quote-citation-anchor, [data-quote-status='not-source'], [data-quote-status='unresolved']",
       )
     ) {
       continue;

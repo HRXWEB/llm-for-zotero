@@ -515,7 +515,51 @@ describe("livePdfSelectionLocator", function () {
     }
   });
 
-  it("locates an exact MinerU inline-math quote through unique PDF prose", async function () {
+  it("strictly verifies the LwF quote through joined and split PDF.js scripts", async function () {
+    clearPageTextCache();
+    const restore = installPdfWorkerStub(async () => null);
+    const quote =
+      "In Learning without Forgetting (LwF) [30], the model is copied before task $t$ is learned. The copied model produces fixed logits $z^{\\text{old}}$ on the new-task data, and the updated model produces $z^{\\text{new}}$.";
+
+    try {
+      for (const [index, sourceMath] of [
+        ["zold", "znew"],
+        ["z old", "z new"],
+      ].entries()) {
+        const pdfText = `In Learning without Forgetting (LwF) [30], the model is copied before task t is learned. The copied model produces fixed logits ${sourceMath[0]} on the new-task data, and the updated model produces ${sourceMath[1]}.`;
+        const reader = {
+          _item: { id: 6190 + index },
+          itemID: 6190 + index,
+          _window: {
+            PDFViewerApplication: {
+              pdfDocument: {
+                numPages: 1,
+                fingerprints: [`lwf-${index}`],
+                getPage: async () => ({
+                  getTextContent: async () => ({ items: [{ str: pdfText }] }),
+                }),
+              },
+            },
+          },
+        };
+
+        const result = await verifyCompleteQuoteInLivePdfJs(
+          reader,
+          6190 + index,
+          quote,
+        );
+        assert.equal(result.status, "matched", JSON.stringify(result));
+        if (result.status === "matched") {
+          assert.equal(result.certificate.pageIndex, 0);
+          assert.equal(result.certificate.sourceMatchKind, "normalized-span");
+        }
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps an incompletely extracted MinerU inline-math locator unresolved", async function () {
     clearPageTextCache();
     const restore = installPdfWorkerStub(async () => null);
     const quote =
@@ -549,7 +593,7 @@ describe("livePdfSelectionLocator", function () {
 
     try {
       const strict = await verifyCompleteQuoteInLivePdfJs(reader, 6127, quote);
-      assert.equal(strict.status, "absent");
+      assert.equal(strict.status, "literal-not-found");
 
       const located = await verifyCompleteQuoteInLivePdfJs(
         reader,
@@ -557,12 +601,7 @@ describe("livePdfSelectionLocator", function () {
         quote,
         { allowInlineMathLocator: true },
       );
-      assert.equal(located.status, "matched");
-      if (located.status !== "matched") return;
-      assert.equal(located.certificate.pageIndex, 1);
-      assert.equal(located.certificate.sourceMatchText, pdfText);
-      assert.equal(located.certificate.sourceMatchKind, "normalized-span");
-      assert.equal(located.certificate.sourceMatchPageOccurrence, 0);
+      assert.equal(located.status, "literal-not-found");
     } finally {
       restore();
     }
@@ -601,7 +640,7 @@ describe("livePdfSelectionLocator", function () {
         { allowInlineMathLocator: true },
       );
 
-      assert.equal(result.status, "absent");
+      assert.equal(result.status, "literal-not-found");
     } finally {
       restore();
     }
@@ -648,7 +687,7 @@ describe("livePdfSelectionLocator", function () {
     }
   });
 
-  it("rejects malformed, display, and prose-poor math locator quotes", async function () {
+  it("returns literal misses for malformed, display, and prose-poor math locators", async function () {
     clearPageTextCache();
     const restore = installPdfWorkerStub(async () => null);
     const reader = {
@@ -681,14 +720,14 @@ describe("livePdfSelectionLocator", function () {
           quote,
           { allowInlineMathLocator: true },
         );
-        assert.equal(result.status, "absent", quote);
+        assert.equal(result.status, "literal-not-found", quote);
       }
     } finally {
       restore();
     }
   });
 
-  it("returns absent when complete PDF.js text rejects a strong fabricated quote", async function () {
+  it("returns a literal miss when PDF.js rejects a fabricated quote", async function () {
     clearPageTextCache();
     const restore = installPdfWorkerStub(async () => null);
     const reader = {
@@ -720,7 +759,7 @@ describe("livePdfSelectionLocator", function () {
         "The measured population response remained stable across every fabricated recording session.",
       );
 
-      assert.equal(result.status, "absent");
+      assert.equal(result.status, "literal-not-found");
     } finally {
       restore();
     }
@@ -1839,7 +1878,54 @@ describe("page-native scrollToExactQuoteInReader", function () {
     }
   });
 
-  it("uses a normalized inline-math certificate as a literal PDF locator", async function () {
+  it("jumps to the real LwF text-item layout when the period is fused to the next sentence", async function () {
+    const quote =
+      "In Learning without Forgetting (LwF) [30], the model is copied before task $t$ is learned. The copied model produces fixed logits $z^{\\text{old}}$ on the new-task data, and the updated model produces $z^{\\text{new}}$.";
+    const fixture = createExactFindControllerReader({
+      pageItems: [
+        [
+          { str: "In" },
+          { str: " " },
+          { str: "Learning without Forgetting" },
+          { str: " " },
+          { str: "(LwF) [" },
+          { str: " " },
+          { str: "30" },
+          { str: "], the model is copied before task" },
+          { str: " " },
+          { str: "t" },
+          { str: " " },
+          { str: "is learned. The", hasEOL: true },
+          { str: "copied model produces fixed logits" },
+          { str: " " },
+          { str: "z" },
+          { str: "old" },
+          { str: " " },
+          {
+            str: "on the new-task data, and the updated model produces",
+          },
+          { str: "", hasEOL: true },
+          { str: "z" },
+          { str: "new" },
+          {
+            str: ".We adapt LwF to our single-head task-incremental setting.",
+            hasEOL: true,
+          },
+        ],
+      ],
+      targetPageIndex: 0,
+    });
+
+    const jump = await scrollToExactQuoteInReader(fixture.reader, quote, {
+      expectedPageIndex: 0,
+    });
+
+    assert.isTrue(jump.matched, JSON.stringify(jump));
+    assert.include(jump.queryUsed || "", "fixed logits zold");
+    assert.match(jump.queryUsed || "", /produces znew\.$/);
+  });
+
+  it("does not certify a PDF locator that lost meaningful inline-math atoms", async function () {
     clearPageTextCache();
     const restore = installPdfWorkerStub(async () => null);
     const quote =
@@ -1861,29 +1947,7 @@ describe("page-native scrollToExactQuoteInReader", function () {
         quote,
         { allowInlineMathLocator: true },
       );
-      assert.equal(
-        verification.status,
-        "matched",
-        JSON.stringify(verification),
-      );
-      if (verification.status !== "matched") return;
-      assert.equal(verification.certificate.sourceMatchKind, "normalized-span");
-
-      const jump = await scrollToExactQuoteInReader(
-        fixture.reader,
-        verification.certificate.sourceMatchText,
-        {
-          expectedPageIndex: verification.certificate.pageIndex,
-          sourceFingerprint: `pdfjs:${verification.certificate.documentFingerprint}`,
-          sourceMatchPageOccurrence:
-            verification.certificate.sourceMatchPageOccurrence,
-          verifiedFullSpan: false,
-        },
-      );
-
-      assert.isTrue(jump.matched, JSON.stringify(jump));
-      assert.equal(jump.queryUsed, pdfText);
-      assert.equal(jump.highlightCoverage, 1);
+      assert.equal(verification.status, "literal-not-found");
     } finally {
       restore();
     }

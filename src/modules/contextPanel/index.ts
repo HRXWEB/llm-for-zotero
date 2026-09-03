@@ -120,6 +120,14 @@ import {
   retainClaudeRuntimeForBody,
   releaseClaudeRuntimeForBody,
 } from "../../claudeCode/runtimeRetention";
+import {
+  bindEmbeddedPanelHost,
+  canLifecycleCommitPanelConversation,
+  capturePanelOperationLease,
+  evaluatePanelOwnership,
+  isPanelOperationLeaseCurrent,
+  renderPanelOwnershipBlocked,
+} from "./panelHostOwnership";
 
 export { openStandaloneChat } from "./standaloneWindow";
 import {
@@ -246,12 +254,57 @@ export function registerReaderContextPanel() {
   // Generation counter: incremented on every onAsyncRender call so stale
   // (superseded) renders can bail out at each await point.
   let renderGeneration = 0;
-  let lastItemChangeSignature = "";
+  const lastItemChangeSignatures = new WeakMap<Element, string>();
   const setupEmbeddedPanelHandlers = (
     body: Element,
     rawItem: Zotero.Item | null | undefined,
   ) => {
     setupHandlers(body, rawItem);
+  };
+  const rebuildEmbeddedPanelForHost = (
+    body: Element,
+    rawItem: Zotero.Item | null | undefined,
+    resolvedState: { item: Zotero.Item | null },
+  ) => {
+    const hostLease = capturePanelOperationLease(body);
+    if (
+      !canLifecycleCommitPanelConversation(
+        body,
+        resolvedState.item,
+        "embedded-rebuild",
+        hostLease,
+      )
+    ) {
+      renderPanelOwnershipBlocked(body, "embedded-rebuild", "unresolved");
+      return;
+    }
+    clearCompletedPanelLifecycleSignature(body);
+    persistPendingChatScrollRestoreFromBody(body);
+    buildUI(body, resolvedState.item);
+    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+    writePanelContextDataset(panelRoot, rawItem || resolvedState.item);
+    activeContextPanels.set(body, () => resolvedState.item);
+    activeContextPanelRawItems.set(body, rawItem || null);
+    void retainClaudeRuntimeForBody(body, resolvedState.item);
+    setupEmbeddedPanelHandlers(body, rawItem);
+    const chatRenderCycle = beginChatRenderCycle(body);
+    setPanelRenderClaim(body, {
+      kind: "sync-rendered",
+      itemKey: getPanelItemIdKey(rawItem || null),
+      cycle: chatRenderCycle,
+    });
+    void (async () => {
+      try {
+        if (resolvedState.item)
+          await ensureConversationLoaded(resolvedState.item);
+        if (isStandaloneWindowActive()) return;
+        if (!isPanelOperationLeaseCurrent(hostLease)) return;
+        if (!claimDeferredChatRender(body, chatRenderCycle)) return;
+        refreshChat(body, resolvedState.item);
+      } catch (err) {
+        ztoolkit.log("LLM: embedded panel reconciliation failed", err);
+      }
+    })();
   };
   Zotero.ItemPaneManager.registerSection({
     paneID: PANE_ID,
@@ -268,32 +321,55 @@ export function registerReaderContextPanel() {
       setEnabled(true);
       ztoolkit.log(`LLM: panel init tabType=${tabType}`);
     },
-    onItemChange: ({ setEnabled, tabType, item }) => {
+    onItemChange: ({ body, setEnabled, tabType, item }) => {
       setEnabled(true);
+      bindEmbeddedPanelHost(body, item || null, tabType);
+      const resolvedState = resolveInitialPanelItemState(item);
+      const mountedVerdict = evaluatePanelOwnership(body, resolvedState.item);
+      if (
+        mountedVerdict === "host-mismatch" ||
+        (mountedVerdict === "unresolved" && isPanelBodyInitialized(body))
+      ) {
+        renderPanelOwnershipBlocked(body, "onItemChange", mountedVerdict);
+        if (!isStandaloneWindowActive()) {
+          rebuildEmbeddedPanelForHost(body, item || null, resolvedState);
+        }
+      }
       const selectedTabId = refreshLastKnownSelectedTabId();
       const itemChangeSignature = [
         tabType || "",
         selectedTabId ?? "",
         getPanelItemIdKey(item || null),
       ].join("|");
-      if (itemChangeSignature === lastItemChangeSignature) {
+      if (itemChangeSignature === lastItemChangeSignatures.get(body)) {
         return true;
       }
-      lastItemChangeSignature = itemChangeSignature;
+      lastItemChangeSignatures.set(body, itemChangeSignature);
       if (isStandaloneWindowActive()) {
         notifyStandaloneItemChanged(item || null);
       }
       return true;
     },
-    onRender: ({ body, item }) => {
+    onRender: ({ body, item, tabType }) => {
+      bindEmbeddedPanelHost(body, item || null, tabType);
+      const lifecycleLease = capturePanelOperationLease(body);
       // When standalone window is open, show placeholder instead of full UI
       if (isStandaloneWindowActive()) {
         clearCompletedPanelLifecycleSignature(body);
         void releaseClaudeRuntimeForBody(body);
         renderStandalonePlaceholder(body);
         const resolvedState = resolveInitialPanelItemState(item);
-        activeContextPanels.set(body, () => resolvedState.item);
-        activeContextPanelRawItems.set(body, item || null);
+        if (
+          canLifecycleCommitPanelConversation(
+            body,
+            resolvedState.item,
+            "standalone-placeholder-commit",
+            lifecycleLease,
+          )
+        ) {
+          activeContextPanels.set(body, () => resolvedState.item);
+          activeContextPanelRawItems.set(body, item || null);
+        }
         setPanelRenderClaim(body, {
           kind: "sync-rendered",
           itemKey: getPanelItemIdKey(item || null),
@@ -311,7 +387,8 @@ export function registerReaderContextPanel() {
         const needsFullRender =
           !activeContextPanels.has(body) ||
           !panelRoot ||
-          !isPanelRootInitialized(panelRoot);
+          !isPanelRootInitialized(panelRoot) ||
+          Boolean(panelRoot.dataset.ownershipBlocked);
 
         const resolvedState = resolveInitialPanelItemState(item);
         const expectedSystem =
@@ -396,50 +473,22 @@ export function registerReaderContextPanel() {
           contextOwnerChanged ||
           systemChanged
         ) {
-          clearCompletedPanelLifecycleSignature(body);
-          persistPendingChatScrollRestoreFromBody(body);
-          // Build UI synchronously so panel data attributes (basePaperItemId,
-          // conversationKind, etc.) are immediately correct.  The reader popup
-          // "Add Text" path reads these attributes to decide paper-mismatch —
-          // if we defer buildUI, the stale panel from the previous tab wins.
-          buildUI(body, resolvedState.item);
-          const nextPanelRoot = body.querySelector(
-            "#llm-main",
-          ) as HTMLElement | null;
-          writePanelContextDataset(nextPanelRoot, rawContextItem);
-          activeContextPanels.set(body, () => resolvedState.item);
-          activeContextPanelRawItems.set(body, item || null);
-          void retainClaudeRuntimeForBody(body, resolvedState.item);
-          // Attach handlers synchronously so buttons are
-          // immediately interactive — don't gate on ensureConversationLoaded.
-          setupEmbeddedPanelHandlers(body, item);
-          // Defer conversation loading and chat rendering. The render claim is
-          // shared with onAsyncRender so the conversation is only built once
-          // per cycle, and skipped entirely if a newer cycle supersedes this.
-          const chatRenderCycle = beginChatRenderCycle(body);
-          // Tell onAsyncRender it can skip the duplicate buildUI +
-          // setupHandlers. The claim carries this item and cycle, so a stale
-          // async render for a previously shown item can neither consume it
-          // nor steal the render.
-          setPanelRenderClaim(body, {
-            kind: "sync-rendered",
-            itemKey: getPanelItemIdKey(item || null),
-            cycle: chatRenderCycle,
-          });
-          void (async () => {
-            try {
-              if (resolvedState.item)
-                await ensureConversationLoaded(resolvedState.item);
-              if (isStandaloneWindowActive()) return;
-              if (!claimDeferredChatRender(body, chatRenderCycle)) return;
-              refreshChat(body, resolvedState.item);
-            } catch (err) {
-              ztoolkit.log("LLM: onRender async setup failed", err);
-            }
-          })();
+          // Build and attach synchronously so host identity is corrected even
+          // when Zotero reveals a reused pane without a useful async render.
+          rebuildEmbeddedPanelForHost(body, item, resolvedState);
         } else {
           // Same item — keep item reference current so delegated handlers
           // (e.g. Add Text) always resolve the active item.
+          if (
+            !canLifecycleCommitPanelConversation(
+              body,
+              resolvedState.item,
+              "onRender-current-item-commit",
+              lifecycleLease,
+            )
+          ) {
+            return;
+          }
           activeContextPanels.set(body, () => resolvedState.item);
           activeContextPanelRawItems.set(body, item || null);
           writePanelContextDataset(panelRoot, rawContextItem);
@@ -496,6 +545,14 @@ export function registerReaderContextPanel() {
       );
       if (renderClaim.outcome === "stale") return;
 
+      const hostLease = capturePanelOperationLease(body);
+      if (!hostLease) {
+        if (isPanelBodyInitialized(body)) {
+          renderPanelOwnershipBlocked(body, "onAsyncRender", "unresolved");
+        }
+        return;
+      }
+
       const thisGeneration = ++renderGeneration;
       // If onRender already did the synchronous buildUI + setupHandlers for
       // this render cycle, skip the duplicate work.  We still run the
@@ -510,6 +567,16 @@ export function registerReaderContextPanel() {
       const contextRefreshOnly =
         renderClaim.outcome === "context-refresh" &&
         Boolean(body.querySelector("#llm-main"));
+      if (
+        !canLifecycleCommitPanelConversation(
+          body,
+          resolvedItem,
+          "onAsyncRender-commit",
+          hostLease,
+        )
+      ) {
+        return;
+      }
       if (contextRefreshOnly) {
         activeContextPanels.set(body, () => resolvedItem);
         activeContextPanelRawItems.set(body, item || null);
@@ -528,6 +595,7 @@ export function registerReaderContextPanel() {
       // or if the standalone window was opened during the await.
       if (renderGeneration !== thisGeneration) return;
       if (isStandaloneWindowActive()) return;
+      if (!isPanelOperationLeaseCurrent(hostLease)) return;
       await renderShortcuts(
         body,
         resolvedItem,
@@ -535,6 +603,7 @@ export function registerReaderContextPanel() {
       );
       if (renderGeneration !== thisGeneration) return;
       if (isStandaloneWindowActive()) return;
+      if (!isPanelOperationLeaseCurrent(hostLease)) return;
       if (!syncAlreadyRendered && !contextRefreshOnly) {
         setupEmbeddedPanelHandlers(body, item);
       }

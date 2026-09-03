@@ -309,7 +309,7 @@ async function resolveVerifiedQuotes(params: {
     );
     if (verification.status !== "matched") {
       throw new Error(
-        `Quote ${quoteId} failed strict PDF.js verification: ${verification.status === "defer" ? verification.reason : "the wording was absent"}`,
+        `Quote ${quoteId} failed strict PDF.js verification: ${verification.status === "defer" ? verification.reason : "the literal wording was not found"}`,
       );
     }
     if (
