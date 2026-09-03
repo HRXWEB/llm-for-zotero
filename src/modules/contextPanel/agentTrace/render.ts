@@ -1,5 +1,6 @@
 import { getAgentRuntime } from "../../../agent";
 import type {
+  AgentPendingChoiceValue,
   AgentPendingAction,
   AgentPendingField,
   AgentRunEventRecord,
@@ -11,6 +12,7 @@ import type {
   AgentTraceRequestSummary,
   AgentToolPresentationSummary,
 } from "../../../agent/types";
+import { applyStableAnimationPhase } from "../stableAnimationPhase";
 import type { Message, PaperContextRef } from "../types";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
 import { sanitizeText } from "../textUtils";
@@ -1634,6 +1636,7 @@ function isDeferredActionField(field: AgentPendingField): boolean {
     field.type === "textarea" ||
     field.type === "text" ||
     field.type === "select" ||
+    field.type === "choice" ||
     field.type === "assignment_table" ||
     field.type === "tag_assignment_table"
   );
@@ -1740,10 +1743,389 @@ function getPaperResultMinSelection(
   );
 }
 
+function isPlanningQuestionAction(action: AgentPendingAction): boolean {
+  return (
+    action.toolName === "request_user_input" &&
+    action.mode === "review" &&
+    action.fields.length > 0 &&
+    action.fields.every((field) => field.type === "choice")
+  );
+}
+
+const PLANNING_QUESTION_AUTO_ADVANCE_MS = 480;
+const PLANNING_QUESTION_TRANSITION_MS = 360;
+
+function renderPlanningQuestionCard(
+  doc: Document,
+  pending: { requestId: string; action: AgentPendingAction },
+): HTMLDivElement {
+  const fields = pending.action.fields.filter(
+    (field): field is Extract<AgentPendingField, { type: "choice" }> =>
+      field.type === "choice",
+  );
+  const normalizedActions = normalizePendingActions(pending.action);
+  const card = doc.createElement("div");
+  card.className = "llm-agent-hitl-card llm-planning-question-card";
+  card.dataset.requestId = pending.requestId;
+  card.dataset.planningQuestionCard = "true";
+
+  const header = doc.createElement("div");
+  header.className = "llm-agent-hitl-header llm-planning-question-eyebrow";
+  header.textContent = "Review required";
+  const title = doc.createElement("div");
+  title.className = "llm-agent-hitl-title llm-planning-question-title";
+  title.textContent = pending.action.title;
+  card.append(header, title);
+
+  const viewport = doc.createElement("div");
+  viewport.className = "llm-planning-question-viewport";
+  viewport.setAttribute("aria-live", "polite");
+  const track = doc.createElement("div");
+  track.className = "llm-planning-question-track";
+  viewport.appendChild(track);
+  card.appendChild(viewport);
+
+  const answers = new Map<string, AgentPendingChoiceValue>();
+  const customTexts = new Map<string, string>();
+  for (const field of fields) {
+    if (field.value?.kind === "option") {
+      answers.set(field.id, { ...field.value });
+    } else if (field.value?.kind === "custom" && field.value.text.trim()) {
+      const text = field.value.text.trim();
+      answers.set(field.id, { kind: "custom", text });
+      customTexts.set(field.id, text);
+    }
+  }
+
+  type QuestionPanel = {
+    element: HTMLDivElement;
+    prompt: HTMLDivElement;
+    optionButtons: HTMLButtonElement[];
+    customInput: HTMLInputElement | null;
+  };
+  const panels: QuestionPanel[] = [];
+  const allButtons: HTMLButtonElement[] = [];
+  let activeIndex = 0;
+  let mountedAllPanels = false;
+  let advanceTimer: ReturnType<typeof setTimeout> | null = null;
+  let counterTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const hasAnswer = (index: number) => answers.has(fields[index].id);
+  const clearAdvanceTimer = () => {
+    if (advanceTimer) clearTimeout(advanceTimer);
+    advanceTimer = null;
+  };
+
+  const createQuestionPanel = (
+    field: (typeof fields)[number],
+    questionIndex: number,
+  ): QuestionPanel => {
+    const panel = doc.createElement("div");
+    panel.className = "llm-planning-question-panel";
+    panel.dataset.questionIndex = `${questionIndex}`;
+
+    const prompt = doc.createElement("div");
+    prompt.className = "llm-planning-question-prompt";
+    prompt.textContent = field.label;
+    prompt.tabIndex = -1;
+    panel.appendChild(prompt);
+
+    const options = doc.createElement("div");
+    options.className = "llm-planning-question-options";
+    options.setAttribute("role", "radiogroup");
+    options.setAttribute("aria-label", field.label);
+    const optionButtons: HTMLButtonElement[] = [];
+    let customInput: HTMLInputElement | null = null;
+    let customRow: HTMLLabelElement | null = null;
+
+    const syncSelection = () => {
+      const answer = answers.get(field.id);
+      for (const button of optionButtons) {
+        const selected =
+          answer?.kind === "option" &&
+          answer.optionId === button.dataset.optionId;
+        button.classList.toggle(
+          "llm-planning-question-option-selected",
+          selected,
+        );
+        button.setAttribute("aria-checked", selected ? "true" : "false");
+      }
+      if (customInput && answer?.kind !== "custom") {
+        customInput.value = customTexts.get(field.id) || "";
+      }
+      customRow?.classList.toggle(
+        "llm-planning-question-custom-selected",
+        answer?.kind === "custom",
+      );
+    };
+
+    for (const option of field.options) {
+      const button = doc.createElement("button");
+      button.type = "button";
+      button.className = "llm-planning-question-option";
+      button.dataset.optionId = option.id;
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", "false");
+
+      const marker = doc.createElement("span");
+      marker.className = "llm-planning-question-option-marker";
+      marker.setAttribute("aria-hidden", "true");
+      const markerDot = doc.createElement("span");
+      markerDot.className = "llm-planning-question-option-marker-dot";
+      marker.appendChild(markerDot);
+
+      const copy = doc.createElement("span");
+      copy.className = "llm-planning-question-option-copy";
+      const label = doc.createElement("span");
+      label.className = "llm-planning-question-option-label";
+      label.textContent = option.label;
+      copy.appendChild(label);
+      if (option.description) {
+        const description = doc.createElement("span");
+        description.className = "llm-planning-question-option-description";
+        description.textContent = option.description;
+        copy.appendChild(description);
+      }
+      button.append(marker, copy);
+      button.addEventListener("click", () => {
+        answers.set(field.id, { kind: "option", optionId: option.id });
+        customTexts.delete(field.id);
+        if (customInput) customInput.value = "";
+        syncSelection();
+        syncControls();
+        clearAdvanceTimer();
+        if (questionIndex < fields.length - 1) {
+          advanceTimer = setTimeout(() => {
+            if (activeIndex === questionIndex) showQuestion(questionIndex + 1);
+          }, PLANNING_QUESTION_AUTO_ADVANCE_MS);
+        }
+      });
+      optionButtons.push(button);
+      allButtons.push(button);
+      options.appendChild(button);
+    }
+
+    if (field.allowCustom) {
+      customRow = doc.createElement("label");
+      customRow.className = "llm-planning-question-custom";
+      const customMarker = doc.createElement("span");
+      customMarker.className = "llm-planning-question-custom-marker";
+      customMarker.setAttribute("aria-hidden", "true");
+      customInput = doc.createElement("input");
+      customInput.type = "text";
+      customInput.className = "llm-planning-question-custom-input";
+      customInput.placeholder = field.customPlaceholder || "Something else…";
+      customInput.setAttribute("aria-label", `${field.label}: custom answer`);
+      customInput.value = customTexts.get(field.id) || "";
+      customInput.addEventListener("input", () => {
+        clearAdvanceTimer();
+        const text = customInput?.value || "";
+        if (text.trim()) {
+          customTexts.set(field.id, text);
+          answers.set(field.id, { kind: "custom", text: text.trim() });
+        } else {
+          customTexts.delete(field.id);
+          answers.delete(field.id);
+        }
+        syncSelection();
+        syncControls();
+      });
+      customInput.addEventListener("keydown", (event: KeyboardEvent) => {
+        if (event.key !== "Enter" || !hasAnswer(questionIndex)) return;
+        event.preventDefault();
+        if (questionIndex < fields.length - 1) {
+          showQuestion(questionIndex + 1);
+        } else {
+          submitAnswers();
+        }
+      });
+      customRow.append(customMarker, customInput);
+      options.appendChild(customRow);
+    }
+    panel.appendChild(options);
+    panels.push({ element: panel, prompt, optionButtons, customInput });
+    syncSelection();
+    return panels[panels.length - 1];
+  };
+
+  for (const [index, field] of fields.entries()) {
+    createQuestionPanel(field, index);
+  }
+  track.appendChild(panels[0].element);
+
+  const footer = doc.createElement("div");
+  footer.className = "llm-planning-question-footer";
+  const navigation = doc.createElement("div");
+  navigation.className = "llm-planning-question-navigation";
+  const previousButton = doc.createElement("button");
+  previousButton.type = "button";
+  previousButton.className = "llm-planning-question-nav-btn";
+  previousButton.title = "Previous question";
+  previousButton.setAttribute("aria-label", previousButton.title);
+  previousButton.textContent = "‹";
+  const counter = doc.createElement("span");
+  counter.className = "llm-planning-question-counter";
+  counter.textContent = `1 / ${fields.length}`;
+  const nextButton = doc.createElement("button");
+  nextButton.type = "button";
+  nextButton.className = "llm-planning-question-nav-btn";
+  nextButton.title = "Next question";
+  nextButton.setAttribute("aria-label", nextButton.title);
+  nextButton.textContent = "›";
+  navigation.append(previousButton, counter, nextButton);
+
+  const actions = doc.createElement("div");
+  actions.className = "llm-planning-question-actions";
+  const cancelButton = doc.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className =
+    "llm-agent-hitl-btn llm-agent-hitl-btn-secondary llm-planning-question-cancel";
+  cancelButton.textContent =
+    normalizedActions.cancelAction?.label ||
+    pending.action.cancelLabel ||
+    "Cancel plan";
+  const continueButton = doc.createElement("button");
+  continueButton.type = "button";
+  continueButton.className =
+    "llm-agent-hitl-btn llm-planning-question-continue";
+  continueButton.textContent =
+    getPendingActionButton(pending.action, normalizedActions.defaultActionId)
+      ?.label ||
+    pending.action.confirmLabel ||
+    "Continue planning";
+  actions.append(cancelButton, continueButton);
+  footer.append(navigation, actions);
+  card.appendChild(footer);
+  allButtons.push(previousButton, nextButton, cancelButton, continueButton);
+
+  const syncPanelState = () => {
+    panels.forEach((panel, index) => {
+      const active = index === activeIndex;
+      panel.element.classList.toggle(
+        "llm-planning-question-panel-active",
+        active,
+      );
+      panel.element.setAttribute("aria-hidden", active ? "false" : "true");
+      for (const button of panel.optionButtons) {
+        button.tabIndex = active ? 0 : -1;
+      }
+      if (panel.customInput) panel.customInput.tabIndex = active ? 0 : -1;
+    });
+  };
+
+  const layoutTrack = (animate: boolean) => {
+    const activePanel = panels[activeIndex].element;
+    const height = activePanel.offsetHeight || activePanel.scrollHeight;
+    viewport.style.transition = animate
+      ? `height ${PLANNING_QUESTION_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`
+      : "none";
+    track.style.transition = animate
+      ? `transform ${PLANNING_QUESTION_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`
+      : "none";
+    if (height > 0) viewport.style.height = `${height}px`;
+    track.style.transform = `translate3d(0, ${-activePanel.offsetTop}px, 0)`;
+  };
+
+  function syncControls(): void {
+    previousButton.disabled = activeIndex === 0;
+    nextButton.disabled =
+      activeIndex >= fields.length - 1 || !hasAnswer(activeIndex);
+    continueButton.disabled = !hasAnswer(activeIndex);
+  }
+
+  const rollCounter = (previousIndex: number) => {
+    if (counterTimer) clearTimeout(counterTimer);
+    counter.textContent = `${activeIndex + 1} / ${fields.length}`;
+    counter.dataset.direction = activeIndex < previousIndex ? "back" : "next";
+    counter.classList.remove("llm-planning-question-counter-rolling");
+    void counter.offsetWidth;
+    counter.classList.add("llm-planning-question-counter-rolling");
+    counterTimer = setTimeout(() => {
+      counter.classList.remove("llm-planning-question-counter-rolling");
+    }, 320);
+  };
+
+  function showQuestion(nextIndex: number): void {
+    const bounded = Math.min(Math.max(nextIndex, 0), fields.length - 1);
+    if (bounded === activeIndex) return;
+    if (bounded > activeIndex && !hasAnswer(activeIndex)) return;
+    clearAdvanceTimer();
+    const previousIndex = activeIndex;
+    activeIndex = bounded;
+    syncPanelState();
+    syncControls();
+    rollCounter(previousIndex);
+    if (mountedAllPanels) {
+      layoutTrack(true);
+    } else {
+      track.replaceChildren(panels[activeIndex].element);
+      viewport.style.height = "auto";
+    }
+    const focus = () =>
+      panels[activeIndex].prompt.focus({ preventScroll: true });
+    const win = doc.defaultView;
+    if (win?.requestAnimationFrame) win.requestAnimationFrame(focus);
+    else focus();
+  }
+
+  function submitAnswers(): void {
+    clearAdvanceTimer();
+    if (!fields.every((_, index) => hasAnswer(index))) return;
+    for (const button of allButtons) button.disabled = true;
+    for (const panel of panels) {
+      if (panel.customInput) panel.customInput.disabled = true;
+    }
+    getAgentRuntime().resolveConfirmation(pending.requestId, {
+      approved: true,
+      actionId: normalizedActions.defaultActionId,
+      data: Object.fromEntries(
+        fields.map((field) => [field.id, answers.get(field.id)]),
+      ),
+    });
+  }
+
+  previousButton.addEventListener("click", () => showQuestion(activeIndex - 1));
+  nextButton.addEventListener("click", () => showQuestion(activeIndex + 1));
+  continueButton.addEventListener("click", () => {
+    if (activeIndex < fields.length - 1) showQuestion(activeIndex + 1);
+    else submitAnswers();
+  });
+  cancelButton.addEventListener("click", () => {
+    clearAdvanceTimer();
+    for (const button of allButtons) button.disabled = true;
+    getAgentRuntime().resolveConfirmation(pending.requestId, {
+      approved: false,
+      actionId: normalizedActions.cancelActionId,
+    });
+  });
+
+  syncPanelState();
+  syncControls();
+  const win = doc.defaultView;
+  if (win?.requestAnimationFrame) {
+    win.requestAnimationFrame(() => {
+      const initialHeight =
+        panels[activeIndex].element.offsetHeight ||
+        panels[activeIndex].element.scrollHeight;
+      if (initialHeight > 0) viewport.style.height = `${initialHeight}px`;
+      track.replaceChildren(...panels.map((panel) => panel.element));
+      mountedAllPanels = true;
+      syncPanelState();
+      layoutTrack(false);
+      card.dataset.questionStackReady = "true";
+    });
+  }
+
+  return card;
+}
+
 export function renderPendingActionCard(
   doc: Document,
   pending: { requestId: string; action: AgentPendingAction },
 ): HTMLDivElement {
+  if (isPlanningQuestionAction(pending.action)) {
+    return renderPlanningQuestionCard(doc, pending);
+  }
   const card = doc.createElement("div");
   card.className = "llm-agent-hitl-card";
   card.dataset.requestId = pending.requestId;
@@ -4239,6 +4621,7 @@ function renderPlanContainer(params: {
       const badge = params.doc.createElement("span");
       badge.className = `llm-plan-task-badge llm-plan-task-badge-${entry.status}`;
       badge.setAttribute("aria-hidden", "true");
+      applyStableAnimationPhase(badge, entry.startedAt || ledger.createdAt);
       const symbol = PLAN_STATUS_SYMBOLS[entry.status] || "";
       badge.textContent = symbol || `${index + 1}`;
 
@@ -4440,6 +4823,7 @@ function renderPlanContainer(params: {
     if (ledger) {
       root.dataset.llmPlanExecutionId = ledger.executionId;
       root.dataset.llmPlanExecutionStatus = ledger.status;
+      applyStableAnimationPhase(root, ledger.createdAt);
     } else {
       delete root.dataset.llmPlanExecutionId;
       delete root.dataset.llmPlanExecutionStatus;
@@ -5024,6 +5408,12 @@ export function renderAgentTrace({
   }
   const wrap = doc.createElement("div");
   wrap.className = "llm-agent-activity";
+  applyStableAnimationPhase(
+    wrap,
+    message.waitingAnimationStartedAt ||
+      events.find((entry) => entry.createdAt > 0)?.createdAt ||
+      message.timestamp,
+  );
   const list = doc.createElement("div");
   list.className = "llm-agent-activity-list";
 
@@ -5059,6 +5449,13 @@ export function renderAgentTrace({
   const pending = getPendingConfirmation(events);
   if (pending) {
     wrap.classList.add("llm-agent-activity-with-pending-action");
+  }
+  if (pending && isPlanningQuestionAction(pending.action)) {
+    wrap.classList.add("llm-agent-activity-question-card");
+    wrap.dataset.llmAssistantTurnReplacement = "true";
+    onInterleavedText?.();
+    wrap.appendChild(renderPendingActionCard(doc, pending));
+    return wrap;
   }
   const hasFinalResponse = events.some(
     (entry) => entry.payload.type === "final",

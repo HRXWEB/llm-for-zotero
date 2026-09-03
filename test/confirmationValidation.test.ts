@@ -152,4 +152,63 @@ describe("confirmation resolution validation", function () {
     if (!duplicateOptions.ok)
       assert.match(duplicateOptions.error, /Duplicate option/);
   });
+
+  it("validates tagged option and custom planning answers", function () {
+    const planningAction: AgentPendingAction = {
+      toolName: "request_user_input",
+      mode: "review",
+      title: "Plan needs your input",
+      confirmLabel: "Continue planning",
+      cancelLabel: "Cancel plan",
+      fields: [
+        {
+          type: "choice",
+          id: "scope",
+          label: "Which corpus?",
+          allowCustom: true,
+          requiredForActionIds: ["continue"],
+          options: [
+            { id: "collection", label: "Collection" },
+            { id: "library", label: "Library" },
+          ],
+        },
+      ],
+      actions: [
+        { id: "continue", label: "Continue planning", approved: true },
+        { id: "cancel", label: "Cancel plan", approved: false },
+      ],
+      defaultActionId: "continue",
+      cancelActionId: "cancel",
+    };
+
+    assert.isTrue(
+      validateConfirmationResolution(planningAction, {
+        approved: true,
+        actionId: "continue",
+        data: { scope: { kind: "option", optionId: "library" } },
+      }).ok,
+    );
+    assert.isTrue(
+      validateConfirmationResolution(planningAction, {
+        approved: true,
+        actionId: "continue",
+        data: { scope: { kind: "custom", text: "My reading list" } },
+      }).ok,
+    );
+
+    for (const value of [
+      { kind: "option", optionId: "undeclared" },
+      { kind: "custom", text: "   " },
+      { kind: "custom", text: "Valid", injected: true },
+      "library",
+    ]) {
+      assert.isFalse(
+        validateConfirmationResolution(planningAction, {
+          approved: true,
+          actionId: "continue",
+          data: { scope: value },
+        }).ok,
+      );
+    }
+  });
 });

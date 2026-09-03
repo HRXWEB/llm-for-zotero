@@ -123,6 +123,10 @@ export type AgentPendingActionButton = {
   backLabel?: string;
 };
 
+export type AgentPendingChoiceValue =
+  | { kind: "option"; optionId: string }
+  | { kind: "custom"; text: string };
+
 type AgentPendingFieldBase = {
   id: string;
   visibleForActionIds?: string[];
@@ -158,6 +162,18 @@ export type AgentPendingField =
         id: string;
         label: string;
       }>;
+    })
+  | (AgentPendingFieldBase & {
+      type: "choice";
+      label: string;
+      value?: AgentPendingChoiceValue;
+      options: Array<{
+        id: string;
+        label: string;
+        description?: string;
+      }>;
+      allowCustom?: boolean;
+      customPlaceholder?: string;
     })
   | (AgentPendingFieldBase & {
       type: "review_table";

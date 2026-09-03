@@ -47,6 +47,10 @@ import {
   isEmbeddableGeneratedImage,
   resolveGeneratedImageAsset,
 } from "../src/modules/contextPanel/generatedImageAssets";
+import {
+  getStableAnimationDelay,
+  STABLE_ANIMATION_DELAY_PROPERTY,
+} from "../src/modules/contextPanel/stableAnimationPhase";
 
 class FakeClassList {
   private readonly classes = new Set<string>();
@@ -77,6 +81,14 @@ class FakeClassList {
   }
 }
 
+class FakeStyleDeclaration {
+  [key: string]: string | ((name: string, value: string) => void);
+
+  setProperty(name: string, value: string): void {
+    this[name] = value;
+  }
+}
+
 class FakeElement {
   public readonly classList = new FakeClassList();
   public readonly dataset: Record<string, string | undefined> = {};
@@ -87,7 +99,11 @@ class FakeElement {
   public title = "";
   public disabled = false;
   public attributes: Record<string, string> = {};
-  public style: Record<string, string> = {};
+  public style = new FakeStyleDeclaration();
+  public offsetHeight = 0;
+  public scrollHeight = 0;
+  public offsetTop = 0;
+  public offsetWidth = 0;
   private copyableChildren: FakeElement[] = [];
   private html = "";
   private listeners = new Map<string, Array<(event: any) => void>>();
@@ -1015,6 +1031,69 @@ describe("rendered Markdown code block source controls", function () {
 });
 
 describe("agentTrace render", function () {
+  it("keeps continuous animation phase anchored to its lifecycle start", function () {
+    assert.equal(getStableAnimationDelay(1_000, 1_000), "0ms");
+    assert.equal(getStableAnimationDelay(1_000, 2_750), "-1750ms");
+    assert.equal(getStableAnimationDelay(undefined, 2_750), "0ms");
+
+    const originalNow = Date.now;
+    Date.now = () => 5_000;
+    try {
+      const trace = renderAgentTrace({
+        doc: fakeDocument,
+        message: {
+          role: "assistant",
+          text: "",
+          timestamp: 500,
+          waitingAnimationStartedAt: 1_000,
+          runMode: "agent",
+          streaming: true,
+        },
+        events: [
+          {
+            runId: "run-stable-animation",
+            seq: 1,
+            eventType: "status",
+            payload: {
+              type: "status",
+              text: "Planning the request and reviewing context",
+            },
+            createdAt: 1_000,
+          },
+        ],
+      }) as unknown as FakeElement;
+      assert.equal(trace.style[STABLE_ANIMATION_DELAY_PROPERTY], "-4000ms");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("phase-anchors every reconstructed continuous progress animation", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const relevantSelector =
+      /(?:llm-at-(?:row-)?planning|llm-typing-dot|llm-plan-progress-trigger-dot|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
+    const infiniteRules = Array.from(
+      css.matchAll(/animation:[^;]*\binfinite\b[^;]*;/g),
+    ).flatMap((match) => {
+      const declarationIndex = match.index || 0;
+      const blockStart = css.lastIndexOf("{", declarationIndex);
+      const previousBlockEnd = css.lastIndexOf("}", declarationIndex);
+      const blockEnd = css.indexOf("}", declarationIndex);
+      const selector = css.slice(previousBlockEnd + 1, blockStart).trim();
+      if (!relevantSelector.test(selector)) return [];
+      return [{ selector, body: css.slice(blockStart + 1, blockEnd) }];
+    });
+
+    assert.lengthOf(infiniteRules, 7);
+    for (const { selector, body } of infiniteRules) {
+      assert.include(
+        body,
+        "--llm-stable-animation-delay",
+        `missing stable phase for ${selector.trim()}`,
+      );
+    }
+  });
+
   it("floats only active or recoverable Plan execution states", function () {
     assert.isTrue(isFloatingPlanExecutionStatus("running"));
     assert.isTrue(isFloatingPlanExecutionStatus("interrupted"));
@@ -1027,6 +1106,178 @@ describe("agentTrace render", function () {
     assert.equal(formatAgentActivityDuration(250), "1s");
     assert.equal(formatAgentActivityDuration(259_000), "4m 19s");
     assert.equal(formatAgentActivityDuration(3_661_000), "1h 1m 1s");
+  });
+
+  it("replaces planning activity with one question at a time", async function () {
+    const action: AgentPendingAction = {
+      toolName: "request_user_input",
+      mode: "review",
+      title: "Plan needs your input",
+      confirmLabel: "Continue planning",
+      cancelLabel: "Cancel plan",
+      fields: [
+        {
+          type: "choice",
+          id: "scope",
+          label: "Which corpus should the review use?",
+          allowCustom: true,
+          customPlaceholder: "Something else…",
+          requiredForActionIds: ["continue"],
+          options: [
+            {
+              id: "collection",
+              label: "Selected collection",
+              description: "Use the current collection only.",
+            },
+            { id: "library", label: "Whole library" },
+          ],
+        },
+        {
+          type: "choice",
+          id: "search",
+          label: "Should external search be included?",
+          allowCustom: true,
+          requiredForActionIds: ["continue"],
+          options: [
+            { id: "no", label: "Zotero only" },
+            { id: "yes", label: "Include external search" },
+          ],
+        },
+      ],
+      actions: [
+        { id: "continue", label: "Continue planning", approved: true },
+        { id: "cancel", label: "Cancel plan", approved: false },
+      ],
+      defaultActionId: "continue",
+      cancelActionId: "cancel",
+    };
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text: "",
+        timestamp: 1,
+        runMode: "agent",
+        streaming: true,
+      },
+      events: [
+        {
+          runId: "run-question-card",
+          seq: 1,
+          eventType: "status",
+          payload: {
+            type: "status",
+            text: "Planning the request and reviewing context",
+          },
+          createdAt: 1,
+        },
+        {
+          runId: "run-question-card",
+          seq: 2,
+          eventType: "confirmation_required",
+          payload: {
+            type: "confirmation_required",
+            requestId: "question-card",
+            action,
+          },
+          createdAt: 2,
+        },
+      ],
+    }) as unknown as FakeElement;
+
+    assert.equal(trace.dataset.llmAssistantTurnReplacement, "true");
+    assert.isNull(trace.findByClass("llm-agent-activity-details"));
+    assert.lengthOf(trace.findAllByClass("llm-planning-question-panel"), 1);
+    assert.include(
+      collectFakeText(trace.findByClass("llm-planning-question-panel")),
+      "Which corpus should the review use?",
+    );
+    assert.include(
+      collectFakeText(trace.findByClass("llm-planning-question-panel")),
+      "Use the current collection only.",
+    );
+
+    const firstOption = trace.findAllByClass("llm-planning-question-option")[0];
+    firstOption.dispatchFakeEvent("click");
+    assert.isTrue(
+      firstOption.classList.contains("llm-planning-question-option-selected"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    assert.include(
+      collectFakeText(trace.findByClass("llm-planning-question-panel")),
+      "Should external search be included?",
+    );
+    assert.equal(
+      trace.findByClass("llm-planning-question-counter")?.textContent,
+      "2 / 2",
+    );
+
+    const finalOption = trace.findAllByClass("llm-planning-question-option")[0];
+    finalOption.dispatchFakeEvent("click");
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    assert.include(
+      collectFakeText(trace.findByClass("llm-planning-question-panel")),
+      "Should external search be included?",
+      "the final option waits for explicit submission",
+    );
+
+    const previous = trace.findAllByClass("llm-planning-question-nav-btn")[0];
+    previous.dispatchFakeEvent("click");
+    assert.include(
+      collectFakeText(trace.findByClass("llm-planning-question-panel")),
+      "Which corpus should the review use?",
+    );
+    assert.isTrue(
+      trace
+        .findAllByClass("llm-planning-question-option")[0]
+        .classList.contains("llm-planning-question-option-selected"),
+      "the earlier answer is retained",
+    );
+  });
+
+  it("accepts a custom planning-question answer in the card", function () {
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "custom-question-card",
+      action: {
+        toolName: "request_user_input",
+        mode: "review",
+        title: "Plan needs your input",
+        confirmLabel: "Continue planning",
+        cancelLabel: "Cancel plan",
+        fields: [
+          {
+            type: "choice",
+            id: "scope",
+            label: "Which corpus?",
+            allowCustom: true,
+            options: [
+              { id: "collection", label: "Collection" },
+              { id: "library", label: "Library" },
+            ],
+            requiredForActionIds: ["continue"],
+          },
+        ],
+        actions: [
+          { id: "continue", label: "Continue planning", approved: true },
+          { id: "cancel", label: "Cancel plan", approved: false },
+        ],
+        defaultActionId: "continue",
+        cancelActionId: "cancel",
+      },
+    }) as unknown as FakeElement;
+    const customInput = card.findByClass(
+      "llm-planning-question-custom-input",
+    ) as FakeElement & { value: string };
+    const continueButton = card.findByClass("llm-planning-question-continue");
+    assert.isTrue(continueButton?.disabled);
+    customInput.value = "A curated paper list";
+    customInput.dispatchFakeEvent("input");
+    assert.isFalse(continueButton?.disabled);
+    assert.isTrue(
+      card
+        .findByClass("llm-planning-question-custom")
+        ?.classList.contains("llm-planning-question-custom-selected"),
+    );
   });
 
   it("suppresses complete and partial web markers in streamed trace text", function () {

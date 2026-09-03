@@ -1,4 +1,5 @@
 import type {
+  AgentPendingChoiceValue,
   AgentPendingField,
   AgentToolDefinition,
   AgentToolInputValidation,
@@ -13,6 +14,17 @@ type PlanQuestion = {
 };
 
 type RequestUserInput = { questions: PlanQuestion[] };
+
+function readQuestionAnswer(value: unknown): string | undefined {
+  if (!validateObject<Record<string, unknown>>(value)) return undefined;
+  if (value.kind === "option" && typeof value.optionId === "string") {
+    return value.optionId;
+  }
+  if (value.kind === "custom" && typeof value.text === "string") {
+    return value.text.trim() || undefined;
+  }
+  return undefined;
+}
 
 function validateInput(
   args: unknown,
@@ -121,16 +133,13 @@ export function createRequestUserInputTool(): AgentToolDefinition<
       confirmLabel: "Continue planning",
       cancelLabel: "Cancel plan",
       fields: input.questions.map<AgentPendingField>((question) => ({
-        type: "select",
+        type: "choice",
         id: question.id,
         label: question.question,
         requiredForActionIds: ["continue"],
-        options: question.options.map((option) => ({
-          id: option.id,
-          label: option.description
-            ? `${option.label} — ${option.description}`
-            : option.label,
-        })),
+        options: question.options.map((option) => ({ ...option })),
+        allowCustom: true,
+        customPlaceholder: "Something else…",
       })),
       actions: [
         { id: "continue", label: "Continue planning", approved: true },
@@ -144,10 +153,9 @@ export function createRequestUserInputTool(): AgentToolDefinition<
       return ok({
         questions: input.questions.map((question) => ({
           ...question,
-          answer:
-            typeof record[question.id] === "string"
-              ? String(record[question.id])
-              : undefined,
+          answer: readQuestionAnswer(
+            record[question.id] as AgentPendingChoiceValue | undefined,
+          ),
         })),
       });
     },

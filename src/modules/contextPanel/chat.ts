@@ -334,6 +334,7 @@ import {
   renderAgentTrace,
   renderPendingActionCard,
 } from "./agentTrace/render";
+import { applyStableAnimationPhase } from "./stableAnimationPhase";
 import type { AgentActionContract } from "../../agent/contracts/types";
 import {
   inferPlanStepEffect,
@@ -12167,6 +12168,12 @@ export function refreshChat(
 
     const bubble = doc.createElement("div") as HTMLDivElement;
     bubble.className = `llm-bubble ${isUser ? "user" : "assistant"}`;
+    if (!isUser) {
+      applyStableAnimationPhase(
+        bubble,
+        msg.waitingAnimationStartedAt || msg.timestamp,
+      );
+    }
     let inlineEditEl: HTMLElement | null = null;
 
     if (isUser) {
@@ -13011,6 +13018,8 @@ export function refreshChat(
               },
             })
           : null;
+      const agentTraceReplacesAssistantTurn =
+        agentTraceEl?.dataset.llmAssistantTurnReplacement === "true";
       if (hasAnswerText && !agentUsesInterleavedText) {
         const safeText = buildAssistantDisplayMarkdownForRender(
           msg,
@@ -13045,7 +13054,11 @@ export function refreshChat(
 
       const bubbleHeaderNodes: HTMLElement[] = [];
 
-      if (hasModelName && !msg.compactMarker) {
+      if (
+        hasModelName &&
+        !msg.compactMarker &&
+        !agentTraceReplacesAssistantTurn
+      ) {
         const modelHeader = doc.createElement("div") as HTMLDivElement;
         modelHeader.className = "llm-model-header";
 
@@ -13077,7 +13090,9 @@ export function refreshChat(
       const hasReasoningSummary = Boolean(msg.reasoningSummary?.trim());
       const hasReasoningDetails = Boolean(msg.reasoningDetails?.trim());
       const showTopReasoningPanel =
-        (hasReasoningSummary || hasReasoningDetails) && msg.runMode !== "agent";
+        !agentTraceReplacesAssistantTurn &&
+        (hasReasoningSummary || hasReasoningDetails) &&
+        msg.runMode !== "agent";
       if (showTopReasoningPanel) {
         const details = doc.createElement("details") as HTMLDetailsElement;
         details.className = "llm-agent-reasoning";
@@ -13168,35 +13183,40 @@ export function refreshChat(
       }
 
       if (hasGeneratedImages) {
-        renderAssistantGeneratedImagesInto(bubble, generatedImages, doc, {
-          onImageLoaded: () => {
-            stabilizeFollowBottomAfterAsyncChatContent(
-              body,
-              conversationKey,
-              chatBox,
-            );
-          },
-          onImageActionStatus: (message, level) => {
-            const status = body.querySelector(
-              "#llm-status",
-            ) as HTMLElement | null;
-            if (status) setStatus(status, message, level);
-          },
-        });
+        if (!agentTraceReplacesAssistantTurn) {
+          renderAssistantGeneratedImagesInto(bubble, generatedImages, doc, {
+            onImageLoaded: () => {
+              stabilizeFollowBottomAfterAsyncChatContent(
+                body,
+                conversationKey,
+                chatBox,
+              );
+            },
+            onImageActionStatus: (message, level) => {
+              const status = body.querySelector(
+                "#llm-status",
+              ) as HTMLElement | null;
+              if (status) setStatus(status, message, level);
+            },
+          });
+        }
       }
 
-      decorateCompletedAssistantCitationLinks({
-        body,
-        panelItem: item,
-        bubble,
-        assistantMessage: msg,
-        pairedUserMessage: previousUserMessage,
-        webSourceAnchors,
-      });
+      if (!agentTraceReplacesAssistantTurn) {
+        decorateCompletedAssistantCitationLinks({
+          body,
+          panelItem: item,
+          bubble,
+          assistantMessage: msg,
+          pairedUserMessage: previousUserMessage,
+          webSourceAnchors,
+        });
+      }
 
       if (
         !hasAnswerText &&
         !hasGeneratedImages &&
+        !agentTraceReplacesAssistantTurn &&
         !(msg.streaming && isClaudeStreamingConversation)
       ) {
         const typing = doc.createElement("div") as HTMLDivElement;
@@ -13206,7 +13226,7 @@ export function refreshChat(
         bubble.appendChild(typing);
       }
 
-      if (!msg.compactMarker) {
+      if (!msg.compactMarker && !agentTraceReplacesAssistantTurn) {
         attachAssistantResponseContextMenu({
           body,
           doc,

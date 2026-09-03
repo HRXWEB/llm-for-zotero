@@ -18,10 +18,46 @@ function duplicate(values: readonly string[]): string | undefined {
 }
 
 function fieldOptionIds(field: AgentPendingField): string[] {
-  if (field.type === "select" || field.type === "assignment_table") {
+  if (
+    field.type === "select" ||
+    field.type === "choice" ||
+    field.type === "assignment_table"
+  ) {
     return field.options.map((option) => option.id);
   }
   return [];
+}
+
+function validateChoiceValue(
+  field: Extract<AgentPendingField, { type: "choice" }>,
+  value: unknown,
+): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `Invalid choice for confirmation field ${field.id}`;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind === "option") {
+    if (
+      Object.keys(record).some((key) => key !== "kind" && key !== "optionId") ||
+      typeof record.optionId !== "string" ||
+      !field.options.some((option) => option.id === record.optionId)
+    ) {
+      return `Invalid option for confirmation field ${field.id}`;
+    }
+    return null;
+  }
+  if (record.kind === "custom") {
+    if (
+      Object.keys(record).some((key) => key !== "kind" && key !== "text") ||
+      field.allowCustom !== true ||
+      typeof record.text !== "string" ||
+      !record.text.trim()
+    ) {
+      return `Invalid custom answer for confirmation field ${field.id}`;
+    }
+    return null;
+  }
+  return `Invalid choice for confirmation field ${field.id}`;
 }
 
 function isPresent(value: unknown): boolean {
@@ -138,6 +174,10 @@ export function validateConfirmationResolution(
           error: `Invalid option for confirmation field ${field.id}`,
         };
       }
+    }
+    if (field.type === "choice" && value !== undefined) {
+      const error = validateChoiceValue(field, value);
+      if (error) return { ok: false, error };
     }
     if (supplied === undefined && value !== undefined) data[field.id] = value;
   }
