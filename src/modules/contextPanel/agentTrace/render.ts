@@ -4711,9 +4711,9 @@ function renderPlanContainer(params: {
     const completed = required.filter(
       (entry) => entry.status === "completed",
     ).length;
-    const activeTask = ledger.tasks.find(
-      (entry) => entry.status === "in_progress",
-    );
+    const progressLabel = `${completed} of ${required.length} required steps complete`;
+    const progressTriggerLabel = (open: boolean): string =>
+      `${open ? "Hide" : "Show"} task progress details, ${progressLabel}`;
     const detailChildren = Array.from(root.children);
     const liveRegion = detailChildren.find((child) =>
       child.classList.contains("llm-plan-live-region"),
@@ -4723,7 +4723,7 @@ function renderPlanContainer(params: {
     trigger.type = "button";
     trigger.className = "llm-plan-progress-trigger";
     trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", "Show task progress details");
+    trigger.setAttribute("aria-label", progressTriggerLabel(false));
     const dot = params.doc.createElement("span");
     dot.className = "llm-plan-progress-trigger-dot";
     dot.dataset.status = ledger.status;
@@ -4733,16 +4733,12 @@ function renderPlanContainer(params: {
     label.textContent = "Task progress";
     const count = params.doc.createElement("span");
     count.className = "llm-plan-progress-trigger-count";
-    count.textContent = `${completed} / ${required.length}`;
-    const current = params.doc.createElement("span");
-    current.className = "llm-plan-progress-trigger-current";
-    current.textContent =
-      activeTask?.activeForm || executionStatusLabel(ledger.status);
+    count.textContent = `${completed}/${required.length}`;
     const chevron = params.doc.createElement("span");
     chevron.className = "llm-plan-progress-trigger-chevron";
     chevron.textContent = "⌃";
     chevron.setAttribute("aria-hidden", "true");
-    trigger.append(dot, label, count, current, chevron);
+    trigger.append(dot, label, count, chevron);
 
     const popover = params.doc.createElement("div");
     popover.className = "llm-plan-progress-popover";
@@ -4759,8 +4755,8 @@ function renderPlanContainer(params: {
       const viewportHeight = params.doc.documentElement.clientHeight;
       const boundaryLeft = container?.left ?? 0;
       const boundaryRight = container?.right ?? viewportWidth;
-      const availableWidth = Math.max(260, boundaryRight - boundaryLeft - 16);
-      const width = Math.min(640, availableWidth);
+      const availableWidth = Math.max(0, boundaryRight - boundaryLeft - 16);
+      const width = Math.min(420, availableWidth);
       const centeredLeft = anchor.left + anchor.width / 2 - width / 2;
       const left = Math.max(
         boundaryLeft + 8,
@@ -4772,8 +4768,8 @@ function renderPlanContainer(params: {
       popover.style.left = `${left}px`;
       popover.style.width = `${width}px`;
       popover.style.maxHeight = `${Math.max(
-        160,
-        Math.min(viewportHeight * 0.7, anchor.top - 24),
+        96,
+        Math.min(360, viewportHeight * 0.5, anchor.top - 24),
       )}px`;
     };
 
@@ -4781,10 +4777,7 @@ function renderPlanContainer(params: {
       if (open) positionFloatingPopover();
       root.classList.toggle("llm-plan-progress-open", open);
       trigger.setAttribute("aria-expanded", open ? "true" : "false");
-      trigger.setAttribute(
-        "aria-label",
-        open ? "Hide task progress details" : "Show task progress details",
-      );
+      trigger.setAttribute("aria-label", progressTriggerLabel(open));
     };
     trigger.addEventListener("click", (event) => {
       event.preventDefault();
@@ -4878,18 +4871,21 @@ function renderPlanContainer(params: {
       ).length;
       const progress = params.doc.createElement("div");
       progress.className = "llm-plan-progress";
-      const progressCopy = params.doc.createElement("span");
-      progressCopy.className = "llm-plan-progress-summary";
-      progressCopy.textContent = `${completed} of ${required.length} steps complete`;
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", "Required task completion");
+      progress.setAttribute("aria-valuemin", "0");
+      progress.setAttribute("aria-valuemax", `${required.length}`);
+      progress.setAttribute("aria-valuenow", `${completed}`);
       const progressTrack = params.doc.createElement("span");
       progressTrack.className = "llm-plan-progress-track";
+      progressTrack.setAttribute("aria-hidden", "true");
       const progressFill = params.doc.createElement("span");
       progressFill.className = "llm-plan-progress-fill";
       progressFill.style.width = `${
         required.length ? Math.round((completed / required.length) * 100) : 0
       }%`;
       progressTrack.appendChild(progressFill);
-      progress.append(progressCopy, progressTrack);
+      progress.appendChild(progressTrack);
       root.append(progress, renderExecutionTasks(ledger!));
       const researchProgress = [...params.events]
         .reverse()

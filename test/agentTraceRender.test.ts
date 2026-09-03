@@ -1590,10 +1590,23 @@ describe("agentTrace render", function () {
     assert.equal(root?.dataset.llmPlanExecutionId, "execution-pill");
     assert.equal(root?.dataset.llmPlanExecutionStatus, "running");
     assert.include(collectFakeText(trigger), "Task progress");
-    assert.include(collectFakeText(trigger), "1 / 3");
-    assert.include(collectFakeText(trigger), "Drafting the brief");
+    assert.include(collectFakeText(trigger), "1/3");
+    assert.notInclude(collectFakeText(trigger), "Drafting the brief");
+    assert.include(collectFakeText(popover), "Drafting the brief");
+    assert.include(collectFakeText(popover), "Search the library");
+    assert.include(collectFakeText(popover), "Finalize references");
     assert.equal(trigger?.attributes["aria-expanded"], "false");
+    assert.include(
+      trigger?.attributes["aria-label"] || "",
+      "1 of 3 required steps complete",
+    );
     assert.exists(popover?.findByClass("llm-plan-task-list"));
+    const progress = popover?.findByClass("llm-plan-progress");
+    assert.equal(progress?.attributes.role, "progressbar");
+    assert.equal(progress?.attributes["aria-valuemin"], "0");
+    assert.equal(progress?.attributes["aria-valuemax"], "3");
+    assert.equal(progress?.attributes["aria-valuenow"], "1");
+    assert.notInclude(collectFakeText(progress), "steps complete");
 
     root?.dispatchFakeEvent("mouseenter");
     assert.isTrue(root?.classList.contains("llm-plan-progress-hover"));
@@ -1603,8 +1616,37 @@ describe("agentTrace render", function () {
     trigger?.dispatchFakeEvent("click");
     assert.isTrue(root?.classList.contains("llm-plan-progress-open"));
     assert.equal(trigger?.attributes["aria-expanded"], "true");
+    assert.include(trigger?.attributes["aria-label"] || "", "Hide");
     trigger?.dispatchFakeEvent("click");
     assert.isFalse(root?.classList.contains("llm-plan-progress-open"));
+  });
+
+  it("keeps the task progress hover card compact without changing plan cards", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const popoverRule =
+      css.match(/\.llm-plan-progress-popover\s*\{[\s\S]*?\}/)?.[0] || "";
+    const compactTaskLineRule =
+      css.match(
+        /\.llm-plan-progress-popover\s+\.llm-plan-task-line\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+    const compactTaskBadgeRule =
+      css.match(
+        /\.llm-plan-progress-popover\s+\.llm-plan-task-badge\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+    const baseTaskLineRule =
+      css.match(/(?<!popover )\.llm-plan-task-line\s*\{[\s\S]*?\}/)?.[0] || "";
+
+    assert.include(popoverRule, "max-width: 420px");
+    assert.include(popoverRule, "max-height: min(50vh, 360px)");
+    assert.include(popoverRule, "padding: 8px");
+    assert.include(popoverRule, "border-radius: 10px");
+    assert.include(compactTaskLineRule, "min-height: 32px");
+    assert.include(compactTaskLineRule, "padding: 5px 7px");
+    assert.include(compactTaskBadgeRule, "flex-basis: 18px");
+    assert.include(compactTaskBadgeRule, "width: 18px");
+    assert.include(compactTaskBadgeRule, "height: 18px");
+    assert.include(baseTaskLineRule, "min-height: 42px");
+    assert.notInclude(css, ".llm-plan-progress-trigger-current");
   });
 
   it("keeps host-owned plan bookkeeping out of the visible tool trace", function () {
