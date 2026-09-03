@@ -129,9 +129,18 @@ export function openStandaloneDocumentWindow(
       installSourceTheme(options.sourceDoc, doc);
       installAddonStylesheet(doc);
       options.render(doc, root, newWin);
-      doc.addEventListener("keydown", (event: KeyboardEvent) => {
-        if (event.key === "Escape") newWin.close();
-      });
+      newWin.addEventListener(
+        "keydown",
+        (event: KeyboardEvent) => {
+          const closeShortcut =
+            event.key === "Escape" ||
+            ((event.metaKey || event.ctrlKey) && event.key === "w");
+          if (!closeShortcut) return;
+          event.preventDefault();
+          newWin.close();
+        },
+        true,
+      );
       initialized = true;
     } catch (error) {
       failInitialization(error);

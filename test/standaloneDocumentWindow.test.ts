@@ -29,8 +29,6 @@ class FakeDocument {
   public readonly documentElement = new FakeElement();
   public title = "";
   public defaultView: unknown = null;
-  private readonly keydownListeners: Array<(event: { key: string }) => void> =
-    [];
 
   constructor(public readonly root: FakeElement) {}
 
@@ -41,26 +39,21 @@ class FakeDocument {
   createElementNS(_namespace: string, _name: string): FakeElement {
     return new FakeElement();
   }
-
-  addEventListener(
-    type: string,
-    listener: (event: { key: string }) => void,
-  ): void {
-    if (type === "keydown") this.keydownListeners.push(listener);
-  }
-
-  dispatchKey(key: string): void {
-    for (const listener of this.keydownListeners) listener({ key });
-  }
 }
 
 function createWindow(doc: FakeDocument) {
-  const listeners = new Map<string, Array<() => void>>();
+  const listeners = new Map<
+    string,
+    Array<(event?: Record<string, unknown>) => void>
+  >();
   const win = {
     closed: false,
     focusCount: 0,
     document: doc,
-    addEventListener(type: string, listener: () => void) {
+    addEventListener(
+      type: string,
+      listener: (event?: Record<string, unknown>) => void,
+    ) {
       const current = listeners.get(type) || [];
       current.push(listener);
       listeners.set(type, current);
@@ -72,6 +65,19 @@ function createWindow(doc: FakeDocument) {
     focus() {
       this.focusCount += 1;
     },
+    dispatchKey(params: { key: string; metaKey?: boolean; ctrlKey?: boolean }) {
+      let defaultPrevented = false;
+      const event = {
+        key: params.key,
+        metaKey: params.metaKey ?? false,
+        ctrlKey: params.ctrlKey ?? false,
+        preventDefault: () => {
+          defaultPrevented = true;
+        },
+      };
+      for (const listener of listeners.get("keydown") || []) listener(event);
+      return defaultPrevented;
+    },
     close() {
       this.closed = true;
       for (const listener of listeners.get("unload") || []) listener();
@@ -82,7 +88,7 @@ function createWindow(doc: FakeDocument) {
 }
 
 describe("standalone document window", function () {
-  it("installs source styling, renders once, focuses an existing key, and closes on Escape", function () {
+  it("installs source styling, renders once, focuses an existing key, and supports close shortcuts", function () {
     const firstDoc = new FakeDocument(new FakeElement());
     const secondDoc = new FakeDocument(new FakeElement());
     const windows = [createWindow(firstDoc), createWindow(secondDoc)];
@@ -143,9 +149,37 @@ describe("standalone document window", function () {
     assert.lengthOf(openCalls, 2);
     assert.equal(renderCount, 2);
 
-    firstDoc.dispatchKey("Escape");
+    assert.isFalse(windows[0].dispatchKey({ key: "x", metaKey: true }));
+    assert.isFalse(windows[0].closed);
+    assert.isTrue(windows[0].dispatchKey({ key: "Escape" }));
     assert.isTrue(windows[0].closed);
     assert.isFalse(windows[1].closed);
-    windows[1].close();
+    assert.isTrue(windows[1].dispatchKey({ key: "w", metaKey: true }));
+    assert.isTrue(windows[1].closed);
+  });
+
+  it("closes with Ctrl-W", function () {
+    const targetDoc = new FakeDocument(new FakeElement());
+    const targetWin = createWindow(targetDoc);
+    const sourceDoc = {
+      documentElement: new FakeElement(),
+      defaultView: {
+        getComputedStyle: () => ({ getPropertyValue: () => "" }),
+        openDialog: () => targetWin,
+      },
+    };
+
+    assert.isTrue(
+      openStandaloneDocumentWindow({
+        sourceDoc: sourceDoc as unknown as Document,
+        chromeDocument: "standaloneResponseDocument.xhtml",
+        windowName: "response-window-ctrl-w",
+        rootId: "document-root",
+        title: "Response from Codex",
+        render: () => undefined,
+      }),
+    );
+    assert.isTrue(targetWin.dispatchKey({ key: "w", ctrlKey: true }));
+    assert.isTrue(targetWin.closed);
   });
 });
