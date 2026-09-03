@@ -4438,6 +4438,331 @@ describe("agentTrace render", function () {
     });
   });
 
+  it("splits one logical reasoning step around a visible agent message", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-reasoning-message-boundary",
+        seq: 1,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "reasoning-a",
+          details: "Checked the first batch.",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-reasoning-message-boundary",
+        seq: 2,
+        eventType: "codex_progress",
+        payload: {
+          type: "codex_progress",
+          itemId: "message-1",
+          text: "Classifications batch 3: 89 items reviewed.",
+          kind: "assistant_message",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-reasoning-message-boundary",
+        seq: 3,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "reasoning-a",
+          details: "Continued with the remaining receipts.",
+        },
+        createdAt: 3,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
+    const reasoningItems = items.filter((item) => item.type === "reasoning");
+    const messageIndex = items.findIndex(
+      (item) =>
+        item.type === "message" &&
+        item.text === "Classifications batch 3: 89 items reviewed.",
+    );
+
+    assert.lengthOf(reasoningItems, 2);
+    assert.equal(reasoningItems[0].logicalKey, reasoningItems[1].logicalKey);
+    assert.notEqual(reasoningItems[0].key, reasoningItems[1].key);
+    assert.equal(reasoningItems[0].summary, "Checked the first batch.");
+    assert.equal(
+      reasoningItems[1].summary,
+      "Continued with the remaining receipts.",
+    );
+    assert.isBelow(items.indexOf(reasoningItems[0]), messageIndex);
+    assert.isBelow(messageIndex, items.indexOf(reasoningItems[1]));
+  });
+
+  it("splits fallback reasoning around a visible agent message", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-fallback-reasoning-message-boundary",
+        seq: 1,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          details: "First thought.",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-fallback-reasoning-message-boundary",
+        seq: 2,
+        eventType: "codex_progress",
+        payload: {
+          type: "codex_progress",
+          itemId: "message-1",
+          text: "The first pass is complete.",
+          kind: "assistant_message",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-fallback-reasoning-message-boundary",
+        seq: 3,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          details: "Second thought.",
+        },
+        createdAt: 3,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    const reasoningItems = items.filter((item) => item.type === "reasoning");
+
+    assert.lengthOf(reasoningItems, 2);
+    assert.deepEqual(
+      reasoningItems.map((item) => item.summary),
+      ["First thought.", "Second thought."],
+    );
+    assert.notEqual(reasoningItems[0].key, reasoningItems[1].key);
+  });
+
+  it("splits reasoning around visible status and confirmation-card activity", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-visible-boundaries",
+        seq: 1,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "Before status.",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-visible-boundaries",
+        seq: 2,
+        eventType: "status",
+        payload: {
+          type: "status",
+          text: "Reviewing classifications",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-visible-boundaries",
+        seq: 3,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "Before confirmation.",
+        },
+        createdAt: 3,
+      },
+      {
+        runId: "run-visible-boundaries",
+        seq: 4,
+        eventType: "confirmation_required",
+        payload: {
+          type: "confirmation_required",
+          requestId: "confirmation-1",
+          action: {
+            toolName: "write_note",
+            mode: "approval",
+            title: "Approve note creation",
+            confirmLabel: "Create note",
+            cancelLabel: "Cancel",
+            fields: [],
+          },
+        },
+        createdAt: 4,
+      },
+      {
+        runId: "run-visible-boundaries",
+        seq: 5,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "After confirmation.",
+        },
+        createdAt: 5,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    const reasoningItems = items.filter((item) => item.type === "reasoning");
+
+    assert.deepEqual(
+      reasoningItems.map((item) => item.summary),
+      ["Before status.", "Before confirmation.", "After confirmation."],
+    );
+    assert.equal(new Set(reasoningItems.map((item) => item.key)).size, 3);
+  });
+
+  it("keeps reasoning consecutive across hidden provider and usage events", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-hidden-boundaries",
+        seq: 1,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "First ",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-hidden-boundaries",
+        seq: 2,
+        eventType: "provider_event",
+        payload: {
+          type: "provider_event",
+          providerType: "openai_compatible",
+          payload: { kind: "stream_tick" },
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-hidden-boundaries",
+        seq: 3,
+        eventType: "usage",
+        payload: {
+          type: "usage",
+          round: 1,
+          promptTokens: 10,
+          completionTokens: 2,
+          totalTokens: 12,
+        },
+        createdAt: 3,
+      },
+      {
+        runId: "run-hidden-boundaries",
+        seq: 4,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "second.",
+        },
+        createdAt: 4,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    const reasoningItems = items.filter((item) => item.type === "reasoning");
+
+    assert.lengthOf(reasoningItems, 1);
+    assert.equal(reasoningItems[0].summary, "First second.");
+  });
+
+  it("keeps expansion state independent for split segments of one logical step", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-independent-reasoning-segments",
+        seq: 1,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "First segment.",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-independent-reasoning-segments",
+        seq: 2,
+        eventType: "codex_progress",
+        payload: {
+          type: "codex_progress",
+          itemId: "message-1",
+          text: "Intermediate update.",
+          kind: "assistant_message",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-independent-reasoning-segments",
+        seq: 3,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          stepId: "shared-step",
+          details: "Second segment.",
+        },
+        createdAt: 3,
+      },
+    ];
+    const message = {
+      role: "assistant" as const,
+      text: "",
+      timestamp: 1,
+      runMode: "agent" as const,
+      modelProviderLabel: "Codex",
+      streaming: true,
+    };
+
+    const firstRender = renderAgentTrace({
+      doc: fakeDocument,
+      message,
+      events,
+    }) as unknown as FakeElement;
+    const firstSummaries = firstRender.findAllByClass(
+      "llm-agent-reasoning-summary",
+    );
+    assert.lengthOf(firstSummaries, 2);
+    firstSummaries[0].dispatchFakeEvent("pointerdown");
+
+    const secondRender = renderAgentTrace({
+      doc: fakeDocument,
+      message,
+      events,
+    }) as unknown as FakeElement;
+    const reasoningBlocks = secondRender.findAllByClass(
+      "llm-agent-reasoning",
+    ) as Array<FakeElement & { open?: boolean }>;
+
+    assert.lengthOf(reasoningBlocks, 2);
+    assert.isTrue(Boolean(reasoningBlocks[0].open));
+    assert.isFalse(Boolean(reasoningBlocks[1].open));
+  });
+
   it("renders Codex traces around app-server concepts", function () {
     const events: AgentRunEventRecord[] = [
       {
@@ -4521,6 +4846,7 @@ describe("agentTrace render", function () {
         payload: {
           type: "reasoning",
           round: 1,
+          stepId: "shared-step",
           details: "First thought.",
         },
         createdAt: 1,
@@ -4544,6 +4870,7 @@ describe("agentTrace render", function () {
         payload: {
           type: "reasoning",
           round: 1,
+          stepId: "shared-step",
           details: "Second thought.",
         },
         createdAt: 3,
@@ -4557,13 +4884,14 @@ describe("agentTrace render", function () {
     assert.deepInclude(reasoningItems[0], {
       type: "reasoning",
       summary: "First thought.",
-      label: "Thinking",
+      label: "Thinking for step 1",
     });
     assert.deepInclude(reasoningItems[1], {
       type: "reasoning",
       summary: "Second thought.",
-      label: "Thinking",
+      label: "Thinking for step 1",
     });
+    assert.notEqual(reasoningItems[0].key, reasoningItems[1].key);
   });
 
   it("uses a single primary action surface for multi-action review cards", function () {
@@ -5463,6 +5791,125 @@ describe("agentTrace render", function () {
       type: "inline_text",
       text: "Working through the evidence.",
     });
+  });
+
+  it("keeps streamed text before reasoning inline and terminal text in the answer area", function () {
+    const intermediateText = "I checked the first set of receipts.";
+    const terminalText = "The receipt-backed classification is complete.";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-message-reasoning-message",
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: intermediateText },
+        createdAt: 1,
+      },
+      {
+        runId: "run-message-reasoning-message",
+        seq: 2,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          details: "Verifying the remaining evidence.",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-message-reasoning-message",
+        seq: 3,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: terminalText },
+        createdAt: 3,
+      },
+    ];
+
+    const { items, isInterleaved, inlineTextReplacesAssistantText } =
+      buildAgentTraceDisplayItems(events, null, {
+        role: "assistant",
+        text: terminalText,
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "Gemini",
+        streaming: true,
+      });
+    const inlineTexts = items
+      .filter(
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+          item.type === "inline_text",
+      )
+      .map((item) => item.text);
+    const intermediateIndex = items.findIndex(
+      (item) => item.type === "inline_text" && item.text === intermediateText,
+    );
+    const reasoningIndex = items.findIndex((item) => item.type === "reasoning");
+
+    assert.isTrue(isInterleaved);
+    assert.isFalse(inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTexts, [intermediateText]);
+    assert.isBelow(intermediateIndex, reasoningIndex);
+  });
+
+  it("deduplicates the final answer after interleaved reasoning activity", function () {
+    const intermediateText = "I checked the first set of receipts.";
+    const finalText = "The receipt-backed classification is complete.";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-message-reasoning-final",
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: intermediateText },
+        createdAt: 1,
+      },
+      {
+        runId: "run-message-reasoning-final",
+        seq: 2,
+        eventType: "reasoning",
+        payload: {
+          type: "reasoning",
+          round: 1,
+          details: "Verifying the remaining evidence.",
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-message-reasoning-final",
+        seq: 3,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: finalText },
+        createdAt: 3,
+      },
+      {
+        runId: "run-message-reasoning-final",
+        seq: 4,
+        eventType: "final",
+        payload: { type: "final", text: finalText },
+        createdAt: 4,
+      },
+    ];
+
+    const { items, isInterleaved, inlineTextReplacesAssistantText } =
+      buildAgentTraceDisplayItems(events, null, {
+        role: "assistant",
+        text: finalText,
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "OpenAI",
+      });
+    const inlineTexts = items
+      .filter(
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+          item.type === "inline_text",
+      )
+      .map((item) => item.text);
+
+    assert.isTrue(isInterleaved);
+    assert.isFalse(inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTexts, [intermediateText]);
   });
 
   it("joins streamed interleaved text across hidden provider events", function () {

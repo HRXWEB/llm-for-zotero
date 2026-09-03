@@ -136,6 +136,7 @@ type AgentTraceDisplayItem =
   | {
       type: "reasoning";
       key: string;
+      logicalKey: string;
       label: string;
       summary?: string;
       details?: string;
@@ -3707,34 +3708,6 @@ function buildInitialAgentMessage(requestChips: AgentTraceChip[]): string {
     : "Checking the current request and Zotero context.";
 }
 
-function hasInterleavedTextAndTools(
-  events: AgentRunEventRecord[],
-  options: { preserveRolledBackText?: boolean } = {},
-): boolean {
-  let visibleDraftLength = 0;
-  for (const entry of events) {
-    if (entry.payload.type === "message_delta") {
-      visibleDraftLength += (entry.payload.text || "").length;
-      continue;
-    }
-    if (
-      entry.payload.type === "message_rollback" &&
-      !options.preserveRolledBackText
-    ) {
-      const rollbackLength =
-        typeof entry.payload.length === "number" && entry.payload.length > 0
-          ? entry.payload.length
-          : (entry.payload.text || "").length;
-      visibleDraftLength = Math.max(0, visibleDraftLength - rollbackLength);
-      continue;
-    }
-    if (entry.payload.type === "tool_call" && visibleDraftLength > 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function replaceInlineTextDedupeKey(
   visibleInlineText: Set<string>,
   previousText: string,
@@ -3822,7 +3795,7 @@ function shouldSuppressInlineFinalAnswer(
 type AgentTraceAdapterContext = {
   items: AgentTraceDisplayItem[];
   isCodexTrace: boolean;
-  isInterleaved: boolean;
+  preserveRolledBackText: boolean;
   requestSummary: AgentTraceRequestSummary;
   userMessage: Message | null | undefined;
   pendingActions: Map<string, AgentPendingAction>;
@@ -3830,13 +3803,85 @@ type AgentTraceAdapterContext = {
     string,
     Extract<AgentRunEventRecord["payload"], { type: "tool_result" }>
   >;
-  announcedWriting: boolean;
   lastMeaningfulStatus: string | null;
   reasoningLabels: Map<string, string>;
+  reasoningSegmentCounts: Map<string, number>;
   reasoningStepCounter: number;
   fallbackReasoningStep: number;
   visibleInlineText: Set<string>;
+  intermediateInlineTextItems: Set<
+    Extract<AgentTraceDisplayItem, { type: "inline_text" }>
+  >;
 };
+
+function markLatestInlineTextAsIntermediate(
+  ctx: AgentTraceAdapterContext,
+  beforeIndex: number,
+): void {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const item = ctx.items[index];
+    if (item.type !== "inline_text") continue;
+    ctx.intermediateInlineTextItems.add(item);
+    return;
+  }
+}
+
+function rollbackInlineTraceText(
+  ctx: AgentTraceAdapterContext,
+  payload: Extract<
+    AgentRunEventRecord["payload"],
+    { type: "message_rollback" }
+  >,
+): void {
+  if (ctx.preserveRolledBackText) return;
+  let remaining =
+    typeof payload.length === "number" && payload.length > 0
+      ? payload.length
+      : (payload.text || "").length;
+  if (remaining <= 0) return;
+
+  for (let index = ctx.items.length - 1; index >= 0 && remaining > 0; index--) {
+    const item = ctx.items[index];
+    if (item.type !== "inline_text") continue;
+    const previousText = item.text;
+    const previousKey = normalizeInlineTextForDedupe(previousText);
+    if (previousKey) ctx.visibleInlineText.delete(previousKey);
+    if (remaining >= previousText.length) {
+      remaining -= previousText.length;
+      ctx.intermediateInlineTextItems.delete(item);
+      ctx.items.splice(index, 1);
+      continue;
+    }
+    item.text = previousText.slice(0, previousText.length - remaining);
+    remaining = 0;
+    const nextKey = normalizeInlineTextForDedupe(item.text);
+    if (nextKey) ctx.visibleInlineText.add(nextKey);
+  }
+}
+
+function replaceInlineTextWithDraftingAction(
+  items: AgentTraceDisplayItem[],
+): AgentTraceDisplayItem[] {
+  let insertedDraftingAction = false;
+  const result: AgentTraceDisplayItem[] = [];
+  for (const item of items) {
+    if (item.type !== "inline_text") {
+      result.push(item);
+      continue;
+    }
+    if (insertedDraftingAction) continue;
+    insertedDraftingAction = true;
+    result.push({
+      type: "action",
+      row: {
+        kind: "plan",
+        icon: NOTE_EDIT_PENCIL_ICON,
+        text: "Drafting answer",
+      },
+    });
+  }
+  return result;
+}
 
 function appendReasoningTraceItem(
   ctx: AgentTraceAdapterContext,
@@ -3850,29 +3895,24 @@ function appendReasoningTraceItem(
   const hasExplicitStepId = Boolean(
     typeof payload.stepId === "string" && payload.stepId.trim(),
   );
-  const reasoningKey = hasExplicitStepId
+  const logicalKey = hasExplicitStepId
     ? getReasoningTraceKey(payload)
     : `step:${ctx.fallbackReasoningStep}`;
-  let existing: Extract<AgentTraceDisplayItem, { type: "reasoning" }> | null =
-    null;
-  for (let itemIndex = ctx.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
-    const candidate = ctx.items[itemIndex];
-    if (candidate.type === "reasoning" && candidate.key === reasoningKey) {
-      existing = candidate;
-      break;
-    }
-  }
-  if (existing && existing.type === "reasoning") {
-    const prev = existing.summary || "";
+  const previousItem = ctx.items[ctx.items.length - 1];
+  if (
+    previousItem?.type === "reasoning" &&
+    previousItem.logicalKey === logicalKey
+  ) {
+    const prev = previousItem.summary || "";
     if (!prev.includes(text)) {
-      existing.summary = appendAgentTraceText(existing.summary, text);
+      previousItem.summary = appendAgentTraceText(previousItem.summary, text);
     }
     return;
   }
 
   let label = readAgentTraceText(payload.stepLabel) || "";
   if (!label) {
-    label = ctx.reasoningLabels.get(reasoningKey) || "";
+    label = ctx.reasoningLabels.get(logicalKey) || "";
   }
   if (!label) {
     if (hasExplicitStepId) {
@@ -3883,11 +3923,14 @@ function appendReasoningTraceItem(
     } else {
       label = ctx.isCodexTrace ? "Codex reasoning" : "Thinking";
     }
-    ctx.reasoningLabels.set(reasoningKey, label);
+    ctx.reasoningLabels.set(logicalKey, label);
   }
+  const segmentNumber = (ctx.reasoningSegmentCounts.get(logicalKey) || 0) + 1;
+  ctx.reasoningSegmentCounts.set(logicalKey, segmentNumber);
   ctx.items.push({
     type: "reasoning",
-    key: reasoningKey,
+    key: `${logicalKey}:segment:${segmentNumber}`,
+    logicalKey,
     label,
     summary: text,
     details: undefined,
@@ -4054,26 +4097,14 @@ function appendLegacyAgentTraceEvent(
       return true;
     }
     case "message_delta":
-      if (ctx.isInterleaved) {
-        appendInterleavedInlineText(
-          ctx.items,
-          entry.payload.text || "",
-          ctx.visibleInlineText,
-        );
-      } else if (!ctx.announcedWriting) {
-        ctx.announcedWriting = true;
-        ctx.items.push({
-          type: "action",
-          row: {
-            kind: "plan",
-            icon: NOTE_EDIT_PENCIL_ICON,
-            text: "Drafting answer",
-          },
-        });
-      }
+      appendInterleavedInlineText(
+        ctx.items,
+        entry.payload.text || "",
+        ctx.visibleInlineText,
+      );
       return true;
     case "message_rollback":
-      ctx.announcedWriting = false;
+      rollbackInlineTraceText(ctx, entry.payload);
       return true;
     default:
       return false;
@@ -4225,6 +4256,7 @@ export function buildAgentTraceDisplayItems(
   const items: AgentTraceDisplayItem[] = [];
   const isCodexTrace = assistantMessage?.modelProviderLabel === "Codex";
   const isAgentTrace = assistantMessage?.runMode === "agent";
+  const preserveRolledBackText = isCodexTrace || isAgentTrace;
   const compactedEvents = compactAgentTraceEvents(events);
   const toolResultsByCallId = new Map<
     string,
@@ -4235,26 +4267,24 @@ export function buildAgentTraceDisplayItems(
       toolResultsByCallId.set(entry.payload.callId, entry.payload);
     }
   }
-  const isInterleaved = hasInterleavedTextAndTools(events, {
-    preserveRolledBackText: isCodexTrace || isAgentTrace,
-  });
   const requestChips = buildAgentTraceRequestChips(userMessage);
   const requestSummary = buildAgentTraceRequestSummary(userMessage);
   const planPhase = resolveTracePlanPhase(compactedEvents);
   const adapterContext: AgentTraceAdapterContext = {
     items,
     isCodexTrace,
-    isInterleaved,
+    preserveRolledBackText,
     requestSummary,
     userMessage,
     pendingActions: new Map<string, AgentPendingAction>(),
     toolResultsByCallId,
-    announcedWriting: false,
     lastMeaningfulStatus: null,
     reasoningLabels: new Map<string, string>(),
+    reasoningSegmentCounts: new Map<string, number>(),
     reasoningStepCounter: 0,
     fallbackReasoningStep: 1,
     visibleInlineText: new Set<string>(),
+    intermediateInlineTextItems: new Set(),
   };
 
   items.push({
@@ -4293,16 +4323,51 @@ export function buildAgentTraceDisplayItems(
 
   for (let index = 0; index < compactedEvents.length; index += 1) {
     const entry = compactedEvents[index];
-    if (appendCodexAgentTraceEvent(adapterContext, entry)) continue;
-    if (appendLegacyAgentTraceEvent(adapterContext, entry)) continue;
-    appendSharedAgentTraceEvent(adapterContext, entry);
+    const itemCountBeforeEvent = items.length;
+    const handled =
+      appendCodexAgentTraceEvent(adapterContext, entry) ||
+      appendLegacyAgentTraceEvent(adapterContext, entry) ||
+      appendSharedAgentTraceEvent(adapterContext, entry);
+    if (
+      handled &&
+      entry.payload.type !== "message_delta" &&
+      entry.payload.type !== "message_rollback" &&
+      entry.payload.type !== "final" &&
+      items.length > itemCountBeforeEvent
+    ) {
+      markLatestInlineTextAsIntermediate(adapterContext, itemCountBeforeEvent);
+    }
   }
 
   const finalText = getFinalTraceText(compactedEvents);
-  const displayItems = finalText
-    ? items.filter((item) => !shouldSuppressInlineFinalAnswer(item, finalText))
-    : items;
-  const inlineTextReplacesAssistantText = isInterleaved && !finalText;
+  const isInterleaved = items.some(
+    (item) =>
+      item.type === "inline_text" &&
+      adapterContext.intermediateInlineTextItems.has(item),
+  );
+  const hasTerminalInlineText = items.some(
+    (item) =>
+      item.type === "inline_text" &&
+      !adapterContext.intermediateInlineTextItems.has(item),
+  );
+  const hasCanonicalAssistantText = Boolean(assistantMessage?.text?.trim());
+  const displayItems = isInterleaved
+    ? finalText
+      ? items.filter(
+          (item) => !shouldSuppressInlineFinalAnswer(item, finalText),
+        )
+      : hasCanonicalAssistantText
+        ? items.filter(
+            (item) =>
+              item.type !== "inline_text" ||
+              adapterContext.intermediateInlineTextItems.has(item),
+          )
+        : items
+    : replaceInlineTextWithDraftingAction(items);
+  const inlineTextReplacesAssistantText =
+    isInterleaved &&
+    !finalText &&
+    (!hasTerminalInlineText || !hasCanonicalAssistantText);
 
   return {
     items: displayItems,
