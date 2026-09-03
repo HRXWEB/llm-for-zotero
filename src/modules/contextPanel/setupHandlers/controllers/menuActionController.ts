@@ -18,28 +18,16 @@ import { positionMenuBelowButton } from "../../menuPositioning";
 import { renderMermaidSourceToSvg } from "../../renderedMarkdown";
 import { getMessageQuoteDisplay } from "../../quoteRenderPlan";
 import { setStatus } from "../../textUtils";
-import type {
-  ConversationSystem,
-  GeneratedChatImage,
-  QuoteCitation,
-} from "../../../../shared/types";
-import type { ChatRuntimeMode, Message, PaperContextRef } from "../../types";
-import { setResponseActionRunner } from "../../state";
+import type { ConversationSystem } from "../../../../shared/types";
+import type { ChatRuntimeMode, Message } from "../../types";
+import {
+  setResponseActionRunner,
+  type ResponseActionKind,
+  type ResponseActionTarget,
+} from "../../state";
+import { openStandaloneResponseDocument } from "../../standaloneResponseDocumentWindow";
 
-export type ResponseMenuTarget = {
-  item: Zotero.Item;
-  contentText: string;
-  queryText?: string;
-  modelName: string;
-  conversationKey?: number;
-  userTimestamp?: number;
-  assistantTimestamp?: number;
-  paperContexts?: PaperContextRef[];
-  quoteCitations?: QuoteCitation[];
-  generatedImages?: GeneratedChatImage[];
-} | null;
-
-type ResponseActionKind = "copy" | "note" | "fork" | "delete";
+export type ResponseMenuTarget = ResponseActionTarget | null;
 
 const inFlightResponseNoteSaves = new Map<string, Promise<void>>();
 
@@ -474,6 +462,14 @@ export async function runResponseMenuAction(
     }
     if (action === "note") {
       await saveResponseTargetAsNote(deps, target, setStatusMessage);
+      return;
+    }
+    if (action === "expand") {
+      if (!target || !openStandaloneResponseDocument(deps.body, target)) {
+        setStatusMessage(t("The response window could not be opened"), "error");
+        return;
+      }
+      setStatusMessage(t("Opened response in larger view"), "ready");
       return;
     }
     if (action === "fork") {

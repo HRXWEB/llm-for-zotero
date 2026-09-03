@@ -19,6 +19,7 @@ import type {
 import { TTLMap } from "./contexts/ttlMap";
 import { clearMermaidSvgCache } from "./mermaidSvgCache";
 import type { ConversationForkLink } from "../../shared/conversationForkLinks";
+import type { WebSourceAnchor } from "../../webAccess/types";
 export {
   areConversationWritesFrozen,
   bumpConversationWriteGeneration,
@@ -369,9 +370,11 @@ export type ResponseActionTarget = {
   paperContexts?: PaperContextRef[];
   quoteCitations?: QuoteCitation[];
   generatedImages?: GeneratedChatImage[];
+  webSourceAnchors?: WebSourceAnchor[];
+  agentRunId?: string;
 };
 
-export type ResponseActionKind = "copy" | "note" | "fork" | "delete";
+export type ResponseActionKind = "copy" | "note" | "fork" | "delete" | "expand";
 export type ResponseActionRunner = (
   action: ResponseActionKind,
   target: ResponseActionTarget | null,

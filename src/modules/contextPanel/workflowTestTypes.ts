@@ -586,6 +586,7 @@ export type WorkflowTestApi = {
     panelId: string,
     userText: string,
     assistantText: string,
+    assistant?: Partial<import("./types").Message>,
   ) => Promise<WorkflowTestSeededTurn>;
   deletePanelTurn: (
     panelId: string,

@@ -1064,10 +1064,23 @@ export function buildAssistantResponseActionTarget(params: {
   pairedUserMessage: Message | null;
   conversationKey: number;
   selectedText?: string;
+  webSourceAnchors?: readonly WebSourceAnchor[];
 }): ResponseActionTarget | null {
-  const { item, message, pairedUserMessage, conversationKey, selectedText } =
-    params;
-  const quoteDisplay = getMessageQuoteDisplay(message);
+  const {
+    item,
+    message,
+    pairedUserMessage,
+    conversationKey,
+    selectedText,
+    webSourceAnchors = [],
+  } = params;
+  const quoteDisplay =
+    webSourceAnchors.length && !selectedText
+      ? {
+          markdown: message.text || "",
+          quoteCitations: message.quoteCitations,
+        }
+      : getMessageQuoteDisplay(message);
   const menuContent = resolveAssistantResponseMenuContent(
     {
       text: selectedText ? message.text : quoteDisplay.markdown,
@@ -1091,6 +1104,13 @@ export function buildAssistantResponseActionTarget(params: {
       : undefined,
     quoteCitations: quoteDisplay.quoteCitations || undefined,
     generatedImages: menuContent.generatedImages,
+    webSourceAnchors: webSourceAnchors.length
+      ? webSourceAnchors.map((anchor) => ({
+          offset: anchor.offset,
+          sources: anchor.sources.map((source) => ({ ...source })),
+        }))
+      : undefined,
+    agentRunId: message.agentRunId,
   };
 }
 
@@ -1400,6 +1420,27 @@ export function appendUserMessageCopyAction(params: {
     if (status) setStatus(status, t("Copied query"), "ready");
   });
   return button;
+}
+
+export function appendAssistantResponseExpandAction(params: {
+  body: Element;
+  doc: Document;
+  actions: HTMLElement;
+  target: ResponseActionTarget | null;
+}): HTMLButtonElement | null {
+  if (!params.target) return null;
+  return appendMessageMetaActionButton({
+    body: params.body,
+    doc: params.doc,
+    actions: params.actions,
+    className: "llm-message-action-expand",
+    title: "Open response in larger view",
+    responseAction: "expand",
+    responseTarget: params.target,
+    conversationKey: params.target.conversationKey,
+    userTimestamp: params.target.userTimestamp,
+    assistantTimestamp: params.target.assistantTimestamp,
+  });
 }
 
 function getMessageSelectedTextExpandedIndex(
@@ -12229,6 +12270,7 @@ export function refreshChat(
       );
     }
     let inlineEditEl: HTMLElement | null = null;
+    let responseWebSourceAnchors: readonly WebSourceAnchor[] = [];
 
     if (isUser) {
       const contextBadgesRow = doc.createElement("div") as HTMLDivElement;
@@ -13053,6 +13095,7 @@ export function refreshChat(
         ? cachedTraceEvents
         : msg.pendingAgentTraceEvents || [];
       const webSourceAnchors = getWebSourceAnchorsFromTrace(traceEvents);
+      responseWebSourceAnchors = webSourceAnchors;
       let agentUsesInterleavedText = false;
       const agentTraceEl =
         msg.runMode === "agent" && !msg.compactMarker
@@ -13330,6 +13373,7 @@ export function refreshChat(
         message: msg,
         pairedUserMessage: pairedUserForActions,
         conversationKey: actionConversationKey,
+        webSourceAnchors: responseWebSourceAnchors,
       });
       const actionDeleteTarget = buildAssistantResponseDeleteTarget({
         item,
@@ -13418,6 +13462,14 @@ export function refreshChat(
           conversationKey: actionConversationKey,
           userTimestamp: actionUserTimestamp,
           assistantTimestamp: actionAssistantTimestamp,
+        });
+      }
+      if (actionResponseTarget) {
+        appendAssistantResponseExpandAction({
+          body,
+          doc,
+          actions,
+          target: actionResponseTarget,
         });
       }
 

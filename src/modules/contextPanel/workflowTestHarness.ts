@@ -3823,6 +3823,7 @@ async function seedPanelStoredTurn(
   panelId: string,
   userText: string,
   assistantText: string,
+  assistant: Partial<Message> = {},
 ): Promise<WorkflowTestSeededTurn> {
   assertWorkflowTestEnabled();
   const panel = getPanel(panelId);
@@ -3839,6 +3840,7 @@ async function seedPanelStoredTurn(
     timestamp: userTimestamp,
   };
   const assistantMessage = {
+    ...assistant,
     role: "assistant" as const,
     text: assistantText,
     timestamp: assistantTimestamp,

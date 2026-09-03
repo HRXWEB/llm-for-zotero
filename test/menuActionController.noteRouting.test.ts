@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   attachMenuActionController,
   buildResponseActionTargetFromHistory,
+  runResponseMenuAction,
 } from "../src/modules/contextPanel/setupHandlers/controllers/menuActionController";
 import { invokeResponseMenuActionButton } from "../src/modules/contextPanel/chat";
 import {
@@ -834,6 +835,67 @@ describe("menu action controller note routing", function () {
         userTimestamp: 100,
         assistantTimestamp: 200,
       },
+    ]);
+  });
+
+  it("opens a larger response view and reports success", async function () {
+    const body = new FakeElement();
+    const openedWindow = {
+      closed: false,
+      addEventListener: () => {},
+      setTimeout: () => 0,
+      close: () => {},
+      focus: () => {},
+      document: {},
+    };
+    body.ownerDocument = {
+      documentElement: {},
+      defaultView: {
+        openDialog: () => openedWindow,
+      },
+    };
+    const statuses: Array<{ message: string; level: string }> = [];
+    const target: ResponseActionTarget = {
+      item: { id: 42, libraryID: 1 } as unknown as Zotero.Item,
+      contentText: "Expanded answer",
+      modelName: "Codex",
+      conversationKey: 9,
+      assistantTimestamp: 203,
+    };
+
+    await runResponseMenuAction(
+      { body, logError: () => {} } as any,
+      "expand",
+      target,
+      (message, level) => statuses.push({ message, level }),
+    );
+
+    assert.deepEqual(statuses, [
+      { message: "Opened response in larger view", level: "ready" },
+    ]);
+  });
+
+  it("reports when a larger response view cannot be opened", async function () {
+    const body = new FakeElement();
+    body.ownerDocument = { documentElement: {}, defaultView: {} };
+    const statuses: Array<{ message: string; level: string }> = [];
+    const target: ResponseActionTarget = {
+      item: { id: 42, libraryID: 1 } as unknown as Zotero.Item,
+      contentText: "Expanded answer",
+      modelName: "Codex",
+      conversationKey: 9,
+      assistantTimestamp: 204,
+    };
+
+    await runResponseMenuAction(
+      { body, logError: () => {} } as any,
+      "expand",
+      target,
+      (message, level) => statuses.push({ message, level }),
+    );
+
+    assert.deepEqual(statuses, [
+      { message: "The response window could not be opened", level: "error" },
     ]);
   });
 
