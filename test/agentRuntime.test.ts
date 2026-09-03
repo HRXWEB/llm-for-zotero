@@ -54,6 +54,7 @@ import type {
   AgentStepParams,
 } from "../src/agent/model/adapter";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 type MockDbRow = Record<string, unknown>;
 
@@ -89,10 +90,11 @@ function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
       requiresConfirmation: false,
     },
     validate: (args) => ({ ok: true, value: args as never }),
-    planMutation: async () => ({
-      effect: "write",
-      reversibility: "full",
-    }),
+    planInvocation: async () =>
+      stateChangeInvocationPlan({
+        reversibility: "full",
+        reason: "Test library write.",
+      }),
     describeAction: () => [
       {
         id: "move-to-collection:unverified",
@@ -118,6 +120,27 @@ function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
       };
     },
   } as never);
+}
+
+function createRequiredMoveActionContractService(): ActionContractService {
+  const service = createTestActionContractService();
+  service.createContract = async () => ({
+    version: 3,
+    id: "required-move-contract",
+    writeDisposition: "required",
+    interpretationSource: "classifier",
+    obligations: [
+      {
+        id: "required-move-contract:obligation:0",
+        capability: "zotero.collections",
+        operation: "move_to_collection",
+        proofDomain: "zotero_state",
+        coverage: "all",
+        targetKind: "items",
+      },
+    ],
+  });
+  return service;
 }
 
 function commandActionDescriptor(id: string) {
@@ -2259,10 +2282,11 @@ describe("AgentRuntime", function () {
           requiresConfirmation: false,
         },
         validate: (args: unknown) => ({ ok: true, value: args }),
-        planMutation: async () => ({
-          effect: "write",
-          reversibility: "full",
-        }),
+        planInvocation: async () =>
+          stateChangeInvocationPlan({
+            reversibility: "full",
+            reason: "Test file write.",
+          }),
         describeAction: (input) => [
           {
             id: `file_write:${String((input as { filePath?: unknown }).filePath || "")}`,
@@ -2453,6 +2477,364 @@ describe("AgentRuntime", function () {
       if (outcome.kind !== "completed") return;
       assert.isFalse(sawCorrection);
       assert.equal(outcome.text, "I found it.");
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("preserves an informational final after unrelated exploratory actions are blocked", async function () {
+    const restoreDb = installMockDb();
+    try {
+      await initAgentChangeJournal();
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      let paperReads = 0;
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read paper",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => {
+          paperReads += 1;
+          return {
+            mode: "targeted",
+            results: [
+              {
+                paperContext: {
+                  itemId: 1,
+                  contextItemId: 2,
+                  title:
+                    "Overcoming catastrophic forgetting in neural networks",
+                },
+                chunkIndex: 4,
+                sourceFingerprint: "paper-source-1",
+                sectionLabel: "Introduction",
+                text: "Elastic weight consolidation slows forgetting.",
+              },
+            ],
+          };
+        },
+      });
+      const registerBlockedExploration = (
+        name: "zotero_script" | "run_command",
+      ) => {
+        registry.register({
+          spec: {
+            name,
+            description: name,
+            inputSchema: { type: "object" },
+            executionClass: "external_effect",
+            requiresConfirmation: true,
+          },
+          validate: (args) => ({ ok: true, value: args }),
+          describeAction: () =>
+            name === "zotero_script"
+              ? [
+                  {
+                    id: "zotero_script_execute:qa-inspection",
+                    proofDomain: "execution" as const,
+                    capability: "zotero.script" as const,
+                    operation: "zotero_script_execute" as const,
+                    source: "zotero_script" as const,
+                    requestedTargets: [],
+                    destinationCollectionIds: [],
+                  },
+                ]
+              : commandActionDescriptor("command_execute:qa-inspection"),
+          planInvocation: () =>
+            stateChangeInvocationPlan({
+              reason: "Test blocked exploratory action.",
+            }),
+          createPendingAction: () => ({
+            toolName: name,
+            title: `Review ${name}`,
+            confirmLabel: "Run",
+            cancelLabel: "Cancel",
+            fields: [],
+          }),
+          execute: async () => ({
+            content: { status: "unexpected_execution" },
+            effect: "applied" as const,
+          }),
+        });
+      };
+      registerBlockedExploration("zotero_script");
+      registerBlockedExploration("run_command");
+
+      const toolStep = (
+        id: string,
+        name: "paper_read" | "zotero_script" | "run_command",
+        args: Record<string, unknown>,
+      ): AgentModelStep => ({
+        kind: "tool_calls",
+        calls: [{ id, name, arguments: args }],
+        assistantMessage: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id, name, arguments: args }],
+        },
+      });
+      const substantiveAnswer =
+        "Elastic weight consolidation protects parameters important to earlier tasks, reducing catastrophic forgetting while leaving other parameters available for new learning.";
+      const steps: AgentModelStep[] = [
+        toolStep("read-1", "paper_read", {
+          mode: "targeted",
+          query: "How does the method prevent forgetting?",
+        }),
+        toolStep("read-2", "paper_read", {
+          mode: "targeted",
+          query: "How does the method prevent forgetting?",
+        }),
+        toolStep("script-1", "zotero_script", {
+          access: "library",
+          effect: "read",
+        }),
+        toolStep("command-1", "run_command", { command: "rg EWC paper.txt" }),
+        {
+          kind: "final",
+          text: substantiveAnswer,
+          assistantMessage: {
+            role: "assistant",
+            content: substantiveAnswer,
+          },
+        },
+        {
+          kind: "final",
+          text: "No response.",
+          assistantMessage: { role: "assistant", content: "No response." },
+        },
+      ];
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            const step = steps[modelSteps];
+            modelSteps += 1;
+            return step;
+          },
+        }),
+      });
+      let confirmations = 0;
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 2448,
+          mode: "agent",
+          userText:
+            "How does Overcoming catastrophic forgetting in neural networks prevent forgetting?",
+          model: "test-model",
+          apiBase: "",
+          apiKey: "test",
+          libraryID: 1,
+          classifiedIntent: {
+            retrievalIntent: "targeted",
+            wantedSections: [],
+            writeDisposition: "none",
+            actionIntents: [],
+          },
+        },
+        onEvent: (event) => {
+          if (event.type !== "confirmation_required") return;
+          confirmations += 1;
+          runtime.resolveConfirmation(event.requestId, false);
+        },
+      });
+
+      assert.equal(confirmations, 2);
+      assert.equal(
+        paperReads,
+        1,
+        "the identical second read must reuse the turn-local evidence handle",
+      );
+      assert.equal(modelSteps, 5, "the substantive final must not be retried");
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.text, substantiveAnswer);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("rehydrates immediately preserved paper evidence without repeating retrieval", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      let paperReads = 0;
+      const evidenceText =
+        "The diagonal Fisher information estimates each parameter's importance.";
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read paper",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => {
+          paperReads += 1;
+          return {
+            mode: "targeted",
+            results: [
+              {
+                paperContext: { itemId: 20, contextItemId: 21 },
+                sourceKind: "paper_text",
+                sourceFingerprint: "ewc-source",
+                chunkIndex: 7,
+                text: evidenceText,
+                quoteCitationIds: ["quote-fisher"],
+              },
+            ],
+            quoteCitations: [
+              {
+                id: "quote-fisher",
+                quoteText: evidenceText,
+                itemId: 20,
+                contextItemId: 21,
+                sourceFingerprint: "ewc-source",
+              },
+            ],
+          };
+        },
+      });
+      registry.register(createToolResultReadTool());
+
+      let step = 0;
+      let restoredContent: Record<string, unknown> | undefined;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(params): Promise<AgentModelStep> {
+            step += 1;
+            if (step === 1) {
+              const call = {
+                id: "paper-source-call",
+                name: "paper_read",
+                arguments: { mode: "targeted", query: "Fisher importance" },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            if (step === 2) {
+              assert.include(
+                params.tools.map((tool) => tool.name),
+                "tool_result_read",
+              );
+              const paperMessage = params.messages.find(
+                (message) =>
+                  message.role === "tool" && message.name === "paper_read",
+              );
+              assert.equal(paperMessage?.role, "tool");
+              const delivered = JSON.parse(
+                (paperMessage as { content: string }).content,
+              ) as { toolResultHandle?: string };
+              assert.match(delivered.toolResultHandle || "", /^trh_/);
+              const call = {
+                id: "rehydrate-paper-call",
+                name: "tool_result_read",
+                arguments: {
+                  handle: delivered.toolResultHandle,
+                  path: "results",
+                  offset: 0,
+                  limit: 1,
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            const restoredMessage = params.messages.find(
+              (message) =>
+                message.role === "tool" && message.name === "tool_result_read",
+            );
+            assert.equal(restoredMessage?.role, "tool");
+            restoredContent = JSON.parse(
+              (restoredMessage as { content: string }).content,
+            );
+            return {
+              kind: "final",
+              text: "The Fisher estimate identifies important parameters.",
+              assistantMessage: {
+                role: "assistant",
+                content: "The Fisher estimate identifies important parameters.",
+              },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 2449,
+          mode: "agent",
+          userText: "How does EWC estimate parameter importance?",
+          model: "test-model",
+          apiBase: "",
+          apiKey: "test",
+          libraryID: 1,
+          classifiedIntent: {
+            retrievalIntent: "targeted",
+            wantedSections: [],
+            writeDisposition: "none",
+            actionIntents: [],
+          },
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      assert.equal(paperReads, 1);
+      assert.equal(restoredContent?.path, "results");
+      assert.equal(restoredContent?.returnedCount, 1);
+      assert.equal(
+        (
+          restoredContent?.items as Array<{
+            text: string;
+            quoteCitationIds: string[];
+          }>
+        )[0].text,
+        evidenceText,
+      );
+      assert.deepEqual(
+        (
+          restoredContent?.items as Array<{
+            text: string;
+            quoteCitationIds: string[];
+          }>
+        )[0].quoteCitationIds,
+        ["quote-fisher"],
+      );
     } finally {
       restoreDb();
     }
@@ -2816,10 +3198,11 @@ describe("AgentRuntime", function () {
             destinationCollectionIds: [],
           },
         ],
-        planMutation: async () => ({
-          effect: "write",
-          reversibility: "full",
-        }),
+        planInvocation: async () =>
+          stateChangeInvocationPlan({
+            reversibility: "full",
+            reason: "Test note write.",
+          }),
         execute: async (input) => {
           noteWrites.push(input.operation);
           noteExists = true;
@@ -3854,11 +4237,11 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         describeAction: () =>
           commandActionDescriptor("command_execute:pending-confirmation"),
-        planMutation: () => ({
-          effect: "write",
-          reversibility: "full",
-          requiresConfirmation: true,
-        }),
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            reversibility: "full",
+            reason: "Test confirmed write.",
+          }),
         createPendingAction: () => ({
           toolName: "confirmation_write",
           title: "Confirm write",
@@ -4071,7 +4454,12 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         describeAction: () =>
           commandActionDescriptor("command_execute:recovery-write"),
-        planMutation: () => ({ effect: "write", reversibility: "full" }),
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            domains: ["local_execution"],
+            reversibility: "full",
+            reason: "Test recovery write.",
+          }),
         execute: async (_input, context) => {
           writes += 1;
           assert.isString(context.runId);
@@ -4230,7 +4618,12 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         describeAction: () =>
           commandActionDescriptor("command_execute:changed-key"),
-        planMutation: () => ({ effect: "write", reversibility: "full" }),
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            domains: ["local_execution"],
+            reversibility: "full",
+            reason: "Test changed-key write.",
+          }),
         execute: async (_input, context) => {
           writes += 1;
           await prepareJournalAction({
@@ -6247,14 +6640,7 @@ describe("shallow guard round-limit safety", function () {
     try {
       await initAgentChangeJournal();
       const registry = new AgentToolRegistry(
-        new ActionContractService({
-          getCollectionSummary: () => null,
-          listCollectionSummaries: () => [],
-          listCollectionPaperTargets: async () => ({ papers: [] }),
-          listCollectionItemTargets: async () => ({ items: [] }),
-          getItem: () => null,
-          getEditableArticleMetadata: () => null,
-        }),
+        createRequiredMoveActionContractService(),
       );
       registerZeroEffectLibraryUpdate(registry);
 
@@ -6362,12 +6748,12 @@ describe("shallow guard round-limit safety", function () {
             terminalSnapshot?.type === "provider_event"
               ? terminalSnapshot.payload?.state
               : undefined,
-            "failed",
+            "unverified",
           );
           assert.equal(
             progress?.state,
-            "pending",
-            "failed evaluation must remain nonterminal until rollback succeeds",
+            "unverified",
+            "the unverified obligation must remain nonterminal until rollback succeeds",
           );
         },
       });
@@ -6379,10 +6765,10 @@ describe("shallow guard round-limit safety", function () {
         "Filed both papers",
         "the first, false claim must not be what the user is left with",
       );
-      assert.include(outcome.text, "write was blocked");
+      assert.include(outcome.text, "could not verify completion");
       assert.deepEqual(rollbackProgress, [
-        { correctionCount: 0, state: "pending", updatedAt: 11 },
-        { correctionCount: 1, state: "pending", updatedAt: 22 },
+        { correctionCount: 0, state: "unverified", updatedAt: 11 },
+        { correctionCount: 1, state: "unverified", updatedAt: 22 },
       ]);
       assert.equal(resolvedRequest?.actionProgress?.state, "failed");
       assert.isAbove(resolvedRequest?.actionProgress?.updatedAt || 0, 22);
@@ -6442,7 +6828,9 @@ describe("shallow guard round-limit safety", function () {
     const installed = installMockDb();
     try {
       await initAgentChangeJournal();
-      const registry = new AgentToolRegistry(createTestActionContractService());
+      const registry = new AgentToolRegistry(
+        createRequiredMoveActionContractService(),
+      );
       registerZeroEffectLibraryUpdate(registry);
 
       let resolvedRequest: AgentRuntimeRequest | undefined;
@@ -6519,7 +6907,7 @@ describe("shallow guard round-limit safety", function () {
       assert.match(String(error), /injected rollback failure/i);
       assert.equal(modelStep, 2);
       assert.equal(resolvedRequest?.actionProgress?.correctionCount, 0);
-      assert.equal(resolvedRequest?.actionProgress?.state, "pending");
+      assert.equal(resolvedRequest?.actionProgress?.state, "unverified");
       assert.equal(resolvedRequest?.actionProgress?.updatedAt, 17);
       assert.equal(
         installed.transcriptWriteAttempts(),
@@ -6535,7 +6923,9 @@ describe("shallow guard round-limit safety", function () {
     const installed = installMockDb();
     try {
       await initAgentChangeJournal();
-      const registry = new AgentToolRegistry(createTestActionContractService());
+      const registry = new AgentToolRegistry(
+        createRequiredMoveActionContractService(),
+      );
       registerZeroEffectLibraryUpdate(registry);
 
       let resolvedRequest: AgentRuntimeRequest | undefined;
@@ -6614,7 +7004,7 @@ describe("shallow guard round-limit safety", function () {
       assert.isTrue(rollbackObserved);
       assert.equal(modelStep, 2);
       assert.equal(resolvedRequest?.actionProgress?.correctionCount, 0);
-      assert.equal(resolvedRequest?.actionProgress?.state, "pending");
+      assert.equal(resolvedRequest?.actionProgress?.state, "unverified");
       assert.equal(resolvedRequest?.actionProgress?.updatedAt, 19);
       assert.notInclude(
         JSON.stringify(installed.transcripts),
@@ -6783,10 +7173,11 @@ describe("shallow guard round-limit safety", function () {
         },
         validate: () => ({ ok: true, value: { operation } }),
         describeAction: (input) => describeLibraryMutationActions(input),
-        planMutation: async () => ({
-          effect: "write",
-          reversibility: "full",
-        }),
+        planInvocation: async () =>
+          stateChangeInvocationPlan({
+            reversibility: "full",
+            reason: "Test library write.",
+          }),
         async execute() {
           call += 1;
           return call === 1

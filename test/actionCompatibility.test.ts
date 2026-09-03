@@ -11,6 +11,7 @@ import type {
 } from "../src/agent/actions/types";
 import type { AgentToolDefinition } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 function createStubTool<TInput extends Record<string, unknown>, TResult>(
   spec: AgentToolDefinition<TInput, TResult>["spec"],
@@ -31,10 +32,13 @@ function createStubTool<TInput extends Record<string, unknown>, TResult>(
     },
     ...(spec.executionClass === "external_effect"
       ? {
-          planMutation: async () => ({
-            effect: "write" as const,
-            reversibility: "full" as const,
-          }),
+          planInvocation: async () =>
+            stateChangeInvocationPlan({
+              domains: ["zotero_library"],
+              effects: ["modify"],
+              reversibility: "full",
+              reason: `Stub ${spec.name} mutates Zotero state.`,
+            }),
           describeAction: async () => [
             {
               id: `stub:${spec.name}`,

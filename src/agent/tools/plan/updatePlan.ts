@@ -3,6 +3,7 @@ import type {
   AgentToolInputValidation,
 } from "../../types";
 import { planExecutionCoordinator } from "../../plans/coordinator";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   buildDefaultPlanContract,
   decodePlanContract,
@@ -523,6 +524,12 @@ export function createUpdatePlanTool(
         "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and 3–7 stable steps. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. For a fuzzy multi-paper document, use contract.investigation with question, stable subquestion/criterion IDs, strict scope such as {libraryID:1,kind:'library'}, requiredEvidenceDepth, estimatedDeepReadPapers, and approvedLargeCorpus; use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use verifier research_coverage on the screening/deep-evidence criterion, document_integrity and document_published on document criteria, mutation_receipts only on a mutation criterion, and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
     },
     validate: validateUpdatePlanInput,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        reason:
+          "This host-owned control updates only the active plan representation.",
+      }),
     execute: async (input, context) => {
       const plan = context.request.planContext;
       if (!plan || plan.phase !== "planning") {

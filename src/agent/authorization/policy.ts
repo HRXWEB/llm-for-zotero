@@ -2,6 +2,7 @@ import type {
   ActionConstraint,
   ActionDomain,
   ActionEffect,
+  ActionMechanism,
   ActionProposal,
   AuthorizationDecision,
   OriginalAuthorizationContext,
@@ -33,6 +34,13 @@ function constraint(
   return { kind: "deny_effects", effects, domains, description };
 }
 
+function mechanismConstraint(
+  mechanisms: Exclude<ActionMechanism, "none">[],
+  description: string,
+): ActionConstraint {
+  return { kind: "deny_mechanisms", mechanisms, description };
+}
+
 export function parseActionConstraints(userText: string): ActionConstraint[] {
   const constraints: ActionConstraint[] = [];
   if (LIBRARY_MUTATION.test(userText)) {
@@ -54,9 +62,8 @@ export function parseActionConstraints(userText: string): ActionConstraint[] {
   }
   if (EXECUTION.test(userText)) {
     constraints.push(
-      constraint(
-        ["execute"],
-        ["local_execution", "privileged_zotero"],
+      mechanismConstraint(
+        ["shell", "zotero_script"],
         "The user prohibited commands and scripts from executing.",
       ),
     );
@@ -74,25 +81,34 @@ export function parseActionConstraints(userText: string): ActionConstraint[] {
 }
 
 export function hasExplicitNoWriteConstraint(userText: string): boolean {
-  return parseActionConstraints(userText).some((entry) =>
-    entry.effects.some((effect) =>
-      ["create", "modify", "delete", "execute"].includes(effect),
-    ),
+  return parseActionConstraints(userText).some(
+    (entry) =>
+      entry.kind === "deny_effects" &&
+      entry.effects.some((effect) =>
+        ["create", "modify", "delete"].includes(effect),
+      ),
   );
 }
 
 export function proposalViolatesConstraints(
-  proposal: Pick<ActionProposal, "domains" | "effects">,
+  proposal: Pick<ActionProposal, "domains" | "effects" | "invocationPlan">,
   constraints: readonly ActionConstraint[],
 ): ActionConstraint | null {
   return (
-    constraints.find(
-      (constraint) =>
+    constraints.find((constraint) => {
+      if (constraint.kind === "deny_mechanisms") {
+        return (
+          proposal.invocationPlan.mechanism !== "none" &&
+          constraint.mechanisms.includes(proposal.invocationPlan.mechanism)
+        );
+      }
+      return (
         proposal.domains.some((domain) =>
           constraint.domains.includes(domain),
         ) &&
-        proposal.effects.some((effect) => constraint.effects.includes(effect)),
-    ) || null
+        proposal.effects.some((effect) => constraint.effects.includes(effect))
+      );
+    }) || null
   );
 }
 
@@ -101,22 +117,32 @@ export function normalizeStoredActionConstraints(
     | readonly (ActionConstraint | { kind: "no_write"; description: string })[]
     | undefined,
 ): ActionConstraint[] {
-  return (constraints || []).flatMap((entry) =>
-    entry.kind === "deny_effects"
-      ? [entry]
-      : [
-          constraint(
-            ["create", "modify", "delete", "execute"],
-            [
-              "zotero_library",
-              "filesystem",
-              "local_execution",
-              "privileged_zotero",
-            ],
-            entry.description,
-          ),
+  return (constraints || []).flatMap((entry) => {
+    if (entry.kind === "deny_mechanisms") return [entry];
+    if (entry.kind === "deny_effects") {
+      const executeDenied = entry.effects.includes("execute");
+      const effects = entry.effects.filter((effect) => effect !== "execute");
+      return [
+        ...(effects.length ? [{ ...entry, effects }] : []),
+        ...(executeDenied
+          ? [mechanismConstraint(["shell", "zotero_script"], entry.description)]
+          : []),
+      ];
+    }
+    return [
+      constraint(
+        ["create", "modify", "delete"],
+        [
+          "zotero_library",
+          "filesystem",
+          "local_execution",
+          "privileged_zotero",
         ],
-  );
+        entry.description,
+      ),
+      mechanismConstraint(["shell", "zotero_script"], entry.description),
+    ];
+  });
 }
 
 export function authorizeOriginalAction(
@@ -127,7 +153,7 @@ export function authorizeOriginalAction(
     context.hasExplicitNoWrite && !context.constraints?.length
       ? [
           constraint(
-            ["create", "modify", "delete", "execute"],
+            ["create", "modify", "delete"],
             [
               "zotero_library",
               "filesystem",
@@ -149,6 +175,7 @@ export function authorizeOriginalAction(
     };
   }
   if (
+    proposal.invocationPlan.impact === "prohibited" ||
     proposal.riskSignals.includes("protected_target") ||
     proposal.riskSignals.includes("raw_database") ||
     proposal.riskSignals.includes("authorization_tampering")
@@ -158,11 +185,10 @@ export function authorizeOriginalAction(
       reason: "The proposed action targets a protected integrity boundary.",
     };
   }
-  const trustedLibraryRead =
-    proposal.domains.length === 1 &&
-    proposal.domains[0] === "zotero_library" &&
-    proposal.effects.every((effect) => effect === "read");
-  if (trustedLibraryRead) {
+  const trustedRead =
+    proposal.invocationPlan.impact === "read_only" &&
+    proposal.invocationPlan.assurance !== "unknown";
+  if (trustedRead) {
     return { kind: "execute", authority: "safe_read" };
   }
   if (context.mode === "safe") {
@@ -173,6 +199,27 @@ export function authorizeOriginalAction(
   }
   if (context.mode === "yolo") {
     return { kind: "execute", authority: "yolo" };
+  }
+  const exceptionalDanger = proposal.riskSignals.some((signal) =>
+    [
+      "ambiguous_target",
+      "scope_expansion",
+      "sensitive_egress",
+      "broad_delete",
+      "privilege_escalation",
+      "package_system_modification",
+      "download_to_shell",
+    ].includes(signal),
+  );
+  if (exceptionalDanger) {
+    return {
+      kind: "confirm",
+      reason:
+        "Auto mode found genuine ambiguity or exceptional danger in the exact action.",
+    };
+  }
+  if (proposal.invocationPlan.impact === "ambiguous") {
+    return { kind: "execute", authority: "auto_policy" };
   }
   const intentPattern = proposal.domains.includes("local_execution")
     ? /\b(?:run|execute|command|shell|terminal|script|test|build|install|analy[sz]e|compute|calculate|convert)\b/i
@@ -190,21 +237,5 @@ export function authorizeOriginalAction(
         "Auto mode could not map the proposed effect to a clear action in the user's request.",
     };
   }
-  const exceptionalDanger = proposal.riskSignals.some((signal) =>
-    [
-      "ambiguous_target",
-      "scope_expansion",
-      "sensitive_egress",
-      "broad_delete",
-      "privilege_escalation",
-      "download_to_shell",
-    ].includes(signal),
-  );
-  return exceptionalDanger
-    ? {
-        kind: "confirm",
-        reason:
-          "Auto mode found genuine ambiguity or exceptional danger in the exact action.",
-      }
-    : { kind: "execute", authority: "auto_policy" };
+  return { kind: "execute", authority: "auto_policy" };
 }

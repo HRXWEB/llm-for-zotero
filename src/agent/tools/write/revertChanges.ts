@@ -1,4 +1,8 @@
 import type { AgentWriteToolDefinition } from "../../types";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../../authorization/invocationPlan";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import {
   analyzeJournalActions,
@@ -111,36 +115,25 @@ export function createRevertChangesTool(
       });
     },
 
-    /**
-     * A dry run changes nothing, so it needs no card; and there is nothing to
-     * confirm when the journal has no pending entries.
-     */
-    async shouldRequireConfirmation(input, context) {
-      if (input.dryRun) return false;
-      const selection = await selectRevertJournalActions({
-        conversationKey: context.request.conversationKey,
-        count: input.count,
-      });
-      return selection.actions.length > 0;
-    },
-
-    async planMutation(input, context) {
+    async planInvocation(input, context) {
       if (input.dryRun) {
-        return { effect: "none", reversibility: "full" };
+        return readOnlyInvocationPlan({
+          reason: "A dry run reads journal state without applying inverses.",
+        });
       }
       const selection = await selectRevertJournalActions({
         conversationKey: context.request.conversationKey,
         count: input.count,
       });
       return selection.actions.length
-        ? {
-            effect: "write",
+        ? stateChangeInvocationPlan({
             reversibility: "none",
             reason:
               "Reverting history does not create redo entries, so the revert itself cannot be automatically undone.",
-            requiresConfirmation: true,
-          }
-        : { effect: "none", reversibility: "full" };
+          })
+        : readOnlyInvocationPlan({
+            reason: "There are no journalled actions to revert.",
+          });
     },
 
     async createPendingAction(input, context) {

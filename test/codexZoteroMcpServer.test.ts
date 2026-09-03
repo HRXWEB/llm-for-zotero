@@ -17,6 +17,10 @@ import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../src/agent/authorization/invocationPlan";
 
 type EndpointReply = [number, string, string];
 
@@ -68,7 +72,13 @@ function createWriteTool(name: string): AgentToolDefinition<unknown, unknown> {
       requiresConfirmation: true,
     },
     validate: (args) => ({ ok: true, value: args ?? {} }),
-    planMutation: async () => ({ effect: "write", reversibility: "full" }),
+    planInvocation: async () =>
+      stateChangeInvocationPlan({
+        domains: ["zotero_library"],
+        effects: ["modify"],
+        reversibility: "full",
+        reason: `The ${name} fixture mutates Zotero state.`,
+      }),
     describeAction: () => testWriteDescriptor(name),
     execute: async () => ({ content: { ok: true }, effect: "applied" }),
   };
@@ -1003,10 +1013,10 @@ describe("Zotero MCP server", function () {
         },
         validate: (args) => ({ ok: true, value: args ?? {} }),
         describeAction: () => testWriteDescriptor(name),
-        planMutation: async () => ({
-          effect: "none",
-          reversibility: "none",
-        }),
+        planInvocation: async () =>
+          readOnlyInvocationPlan({
+            reason: `${name} is read-only in this MCP boundary fixture.`,
+          }),
         execute: async () => {
           executed.push(name);
           return { content: { name }, effect: "none" };
@@ -1903,10 +1913,13 @@ describe("Zotero MCP server", function () {
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
       describeAction: () => testWriteDescriptor("library_update"),
-      planMutation: async () => ({
-        effect: "write",
-        reversibility: "full",
-      }),
+      planInvocation: async () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          reversibility: "full",
+          reason: "The library update mutates Zotero state.",
+        }),
       execute: async () => {
         writeExecuteCount += 1;
         return {
@@ -2362,11 +2375,12 @@ describe("Zotero MCP server", function () {
         },
         validate: (args) => ({ ok: true, value: args ?? {} }),
         describeAction: () => testWriteDescriptor(name),
-        planMutation: async () => ({
-          effect: "none",
-          reversibility: "none",
-        }),
-        shouldRequireConfirmation: async () => false,
+        planInvocation: async () =>
+          readOnlyInvocationPlan({
+            mechanism: name === "run_command" ? "shell" : "none",
+            domains: ["local_execution"],
+            reason: `${name} is a read-only native-boundary fixture.`,
+          }),
         createPendingAction: async () => ({
           toolName: name,
           title: `Confirm ${name}`,
@@ -2844,10 +2858,14 @@ describe("Zotero MCP server", function () {
       },
       validate: (args) => ({ ok: true, value: args ?? {} }),
       describeAction: () => testWriteDescriptor("zotero_script"),
-      planMutation: async () => ({
-        effect: "write",
-        reversibility: "full",
-      }),
+      planInvocation: async () =>
+        stateChangeInvocationPlan({
+          mechanism: "zotero_script",
+          domains: ["privileged_zotero"],
+          effects: ["modify"],
+          reversibility: "full",
+          reason: "The Zotero script fixture mutates Zotero state.",
+        }),
       createPendingAction: async () => {
         throw new Error("zotero_script should not request confirmation");
       },

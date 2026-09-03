@@ -30,7 +30,6 @@ import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
 import {
   normalizeStoredActionConstraints,
   parseActionConstraints,
-  proposalViolatesConstraints,
 } from "../authorization/policy";
 
 export type {
@@ -448,35 +447,6 @@ export class ActionContractService {
       );
     }
     if (!prepared.proposals.length) return null;
-    const hasWriteProposal = prepared.proposals.some(
-      (proposal) => proposal.operation !== "read_full",
-    );
-    const violatedConstraint = prepared.proposals
-      .map((proposal) =>
-        proposalViolatesConstraints(
-          {
-            domains:
-              proposal.proofDomain === "file_state"
-                ? ["filesystem"]
-                : proposal.proofDomain === "execution"
-                  ? proposal.capability === "zotero.script"
-                    ? ["privileged_zotero"]
-                    : ["local_execution"]
-                  : ["zotero_library"],
-            effects:
-              proposal.operation === "read_full"
-                ? ["read"]
-                : proposal.proofDomain === "execution"
-                  ? ["execute"]
-                  : ["modify"],
-          },
-          normalizeStoredActionConstraints(contract.hardConstraints),
-        ),
-      )
-      .find(Boolean);
-    if (hasWriteProposal && violatedConstraint) {
-      return failure(violatedConstraint.description, contract, prepared);
-    }
     if (!contract.obligations.length) {
       // Classifier output is a planning hint, not permission authority.
       // A concrete proposal that emerges later is reconciled by the runtime's

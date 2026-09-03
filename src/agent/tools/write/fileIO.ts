@@ -3,6 +3,10 @@
  * Enables the agent to read data files, write scripts, export results, etc.
  */
 import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../../authorization/invocationPlan";
 import type { PaperContextRef } from "../../../shared/types";
 import {
   formatPaperCitationLabel,
@@ -654,32 +658,25 @@ export function createFileIOTool(): AgentWriteToolDefinition<
       };
     },
 
-    async shouldRequireConfirmation(input, _context) {
-      // Read operations are safe — auto-approve
-      if (input.action === "read") return false;
-      const exists = await fileExists(input.filePath);
-      // New file writes are reversible by deleting the created file, so they
-      // can run directly. Unknown existence is treated like an overwrite.
-      if (exists === false) return false;
-      // Existing files are overwrites and always require review, even if this
-      // conversation previously enabled file_io auto-accept.
-      return true;
-    },
-
-    async planMutation(input) {
+    async planInvocation(input) {
       if (input.action === "read") {
-        return { effect: "none", reversibility: "full" };
+        return readOnlyInvocationPlan({
+          domains: ["filesystem"],
+          targets: [input.filePath],
+          reason: "The host-owned file reader cannot modify the target.",
+        });
       }
       const exists = await fileExists(input.filePath);
-      return {
-        effect: "write",
+      return stateChangeInvocationPlan({
+        domains: ["filesystem"],
+        effects: [exists === false ? "create" : "modify"],
+        targets: [input.filePath],
         reversibility: "full",
         reason:
           exists === true
             ? "The existing file content is stored with a checksum before overwrite."
             : "A newly created file can be removed by its durable inverse.",
-        requiresConfirmation: exists !== false,
-      };
+      });
     },
 
     async execute(input, context) {

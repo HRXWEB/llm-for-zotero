@@ -11,6 +11,7 @@
 import type { AgentToolDefinition } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { ok, fail, validateObject, normalizePositiveIntArray } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type CiteExportInput = {
   action: "cite" | "bibliography" | "export" | "styles" | "formats";
@@ -152,6 +153,11 @@ export function createCiteExportTool(
       });
     },
 
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library"],
+        reason: "Citation formatting and export read Zotero metadata only.",
+      }),
     async execute(input) {
       if (input.action === "styles") {
         return { styles: zoteroGateway.listCitationStyles() };

@@ -3,6 +3,7 @@ import type {
   AgentToolDefinition,
   AgentToolInputValidation,
 } from "../../types";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { loadPlanArtifact } from "../../plans/store";
 import { planExecutionCoordinator } from "../../plans/coordinator";
 import { shouldCheckpointResearchExpansion } from "../../research/policy";
@@ -126,7 +127,10 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
         "When research_update reports checkpointRequired, stop deep reading and call approve_research_expansion. Do not raise the ceiling through research_update. If approval is declined, either finalize a partial result at the user's direction or revise the plan to narrow scope.",
     },
     validate: validateInput,
-    planMutation: () => ({ effect: "none", reversibility: "none" }),
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        reason: "This confirmation changes only the active plan workflow.",
+      }),
     shouldRequireConfirmation: () => true,
     createPendingAction: pendingAction,
     applyConfirmation: (input, data) => {

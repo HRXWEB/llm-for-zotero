@@ -123,8 +123,11 @@ export async function callTool(
 
   // Confirmation required
   if (ctx.confirmationMode === "auto_approve") {
-    const execution = await prepared.execute({ approved: true });
-    return execution.result;
+    let execution = await prepared.execute({ approved: true });
+    while (execution.kind === "confirmation") {
+      execution = await execution.execute({ approved: true });
+    }
+    return execution.execution.result;
   }
 
   // native_ui or mcp_response: surface the confirmation card to the caller
@@ -142,8 +145,20 @@ export async function callTool(
   // The registry validates the action ID against the rendered schema before
   // deciding whether it is a cancellation. Review workflows may use
   // approved:false for non-mutating navigation actions such as Next/Refresh.
-  const execution = await prepared.execute(resolution);
-  return attachConfirmationResolution(execution.result, {
+  let execution = await prepared.execute(resolution);
+  while (execution.kind === "confirmation") {
+    ctx.onProgress({
+      type: "confirmation_required",
+      requestId: execution.requestId,
+      action: execution.action,
+    });
+    const nextResolution = await ctx.requestConfirmation(
+      execution.requestId,
+      execution.action,
+    );
+    execution = await execution.execute(nextResolution);
+  }
+  return attachConfirmationResolution(execution.execution.result, {
     actionId: resolution.actionId,
     data: resolution.data,
   });

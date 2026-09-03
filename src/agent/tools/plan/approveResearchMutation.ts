@@ -3,6 +3,7 @@ import type {
   AgentToolDefinition,
   AgentToolInputValidation,
 } from "../../types";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import type {
   AgentActionCapability,
   AgentActionContract,
@@ -282,7 +283,11 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
         "If the approved contract declares effects.libraryMutation.approval='after_research', do not call any Zotero write tool until research is terminal and approve_research_mutation has shown the exact operation/target preview. Targets use stable libraryID/itemKey pairs from paper findings. After approval, use only write calls covered by the returned frozen action contract. If the user skips the changes, mark only the mutation task skipped and preserve the research document.",
     },
     validate: validateInput,
-    planMutation: () => ({ effect: "none", reversibility: "none" }),
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        reason:
+          "This confirmation records a plan decision without mutating Zotero.",
+      }),
     shouldRequireConfirmation: () => true,
     createPendingAction: (input) => pendingAction(input),
     execute: async (input, context) => {

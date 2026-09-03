@@ -9,10 +9,6 @@ import type {
 } from "../types";
 import { innermostToolResult } from "./toolResultEnvelope";
 import { operationCatalogEntry } from "./operationCatalog";
-import {
-  normalizeStoredActionConstraints,
-  proposalViolatesConstraints,
-} from "../authorization/policy";
 
 export type ContractEvaluation = {
   state:
@@ -100,6 +96,7 @@ export function createFallbackToolReceipts(params: {
   cancelled?: boolean;
   reason?: string;
   content?: unknown;
+  actionContract?: AgentActionContract;
 }): AgentActionReceipt[] {
   if (
     params.executionClass === "read" &&
@@ -108,6 +105,13 @@ export function createFallbackToolReceipts(params: {
     typeof params.input === "object" &&
     (params.input as { mode?: unknown }).mode === "full"
   ) {
+    const matchingObligations = (
+      params.actionContract?.obligations || []
+    ).filter(
+      (obligation) =>
+        obligation.operation === "read_full" &&
+        obligation.proofDomain === "zotero_state",
+    );
     return [
       {
         version: 2,
@@ -116,6 +120,10 @@ export function createFallbackToolReceipts(params: {
         proofDomain: "zotero_state",
         capability: "zotero.read",
         operation: "read_full",
+        obligationId:
+          matchingObligations.length === 1
+            ? matchingObligations[0].id
+            : undefined,
         verification: "verified",
         status: "observed",
         requestedTargets: [],
@@ -225,10 +233,7 @@ function receiptMatches(
   receipt: AgentActionReceipt,
   obligation: AgentActionObligation,
 ): boolean {
-  return receipt.obligationId
-    ? receipt.obligationId === obligation.id
-    : receipt.operation === obligation.operation &&
-        receipt.proofDomain === obligation.proofDomain;
+  return receipt.obligationId === obligation.id;
 }
 
 function receiptVerified(receipt: AgentActionReceipt): boolean {
@@ -245,82 +250,14 @@ export function evaluateActionContract(
   receipts: AgentActionReceipt[],
   progress?: AgentActionProgressLedger,
 ): ContractEvaluation {
-  const constraints = normalizeStoredActionConstraints(
-    contract.hardConstraints,
-  );
-  if (constraints.length) {
-    const attemptedForbiddenEffect = receipts.some((receipt) =>
-      proposalViolatesConstraints(
-        {
-          domains:
-            receipt.proofDomain === "file_state"
-              ? ["filesystem"]
-              : receipt.proofDomain === "execution"
-                ? receipt.capability === "zotero.script"
-                  ? ["privileged_zotero"]
-                  : ["local_execution"]
-                : ["zotero_library"],
-          effects:
-            receipt.operation === "read_full"
-              ? ["read"]
-              : receipt.proofDomain === "execution"
-                ? ["execute"]
-                : ["modify"],
-        },
-        constraints,
-      ),
-    );
-    if (!attemptedForbiddenEffect && !contract.obligations.length) {
-      return { state: "satisfied" };
-    }
-    if (!attemptedForbiddenEffect) {
-      // Constraints do not replace normal obligation evaluation when this
-      // particular receipt is outside their declared domains/effects.
-    } else {
-      return {
-        state: "failed",
-        correction:
-          "Correction for this turn: the proposed effect is explicitly denied in this domain. Do not retry or claim that anything changed.",
-        failure: "An action was blocked by an explicit typed user constraint.",
-      };
-    }
-  }
+  // The action contract is a completion contract, not a retrospective tool
+  // allowlist. Authorization already enforced hard constraints before a tool
+  // could run. With no requested obligations there is therefore nothing for
+  // finalization to prove, and unrelated rejected, cancelled, or unverified
+  // exploratory calls must not invalidate an informational answer.
   if (!contract.obligations.length) {
-    const effectReceipts = receipts.filter(
-      (receipt) =>
-        receipt.operation !== "read_full" ||
-        receipt.proposalId === "missing-proposal",
-    );
-    const verifiedEffect = receipts.some(receiptVerified);
-    if (
-      verifiedEffect ||
-      (!effectReceipts.length && contract.writeDisposition === "none")
-    ) {
-      return { state: "satisfied" };
-    }
-    if (effectReceipts.length) {
-      return {
-        state: "failed",
-        correction:
-          "Correction for this turn: an effect was proposed, but no verified result proves that it completed. Do not claim that anything changed.",
-        failure:
-          "The write was blocked or did not produce a verified action receipt.",
-      };
-    }
-    if (contract.writeDisposition === "uncertain") {
-      return {
-        state: "failed",
-        failure:
-          "I could not determine whether you intended an action. Please state the exact action and target scope.",
-      };
-    }
-    return {
-      state: "failed",
-      failure:
-        "The requested write could not be represented as a valid typed obligation, so no mutation was allowed.",
-    };
+    return { state: "satisfied" };
   }
-
   const missing: AgentActionObligation[] = [];
   const failed: AgentActionObligation[] = [];
   let sawPartial = false;

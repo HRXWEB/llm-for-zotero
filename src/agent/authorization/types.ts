@@ -15,12 +15,21 @@ export type ActionEffect =
   | "execute"
   | "egress";
 
-export type ActionConstraint = Readonly<{
-  kind: "deny_effects";
-  effects: ActionEffect[];
-  domains: ActionDomain[];
-  description: string;
-}>;
+export type ActionMechanism = "none" | "shell" | "zotero_script";
+
+export type ActionConstraint = Readonly<
+  | {
+      kind: "deny_effects";
+      effects: ActionEffect[];
+      domains: ActionDomain[];
+      description: string;
+    }
+  | {
+      kind: "deny_mechanisms";
+      mechanisms: Exclude<ActionMechanism, "none">[];
+      description: string;
+    }
+>;
 
 export type ActionRiskSignal =
   | "ambiguous_target"
@@ -29,21 +38,24 @@ export type ActionRiskSignal =
   | "broad_delete"
   | "protected_target"
   | "privilege_escalation"
+  | "package_system_modification"
   | "download_to_shell"
   | "authorization_tampering"
   | "raw_database";
 
 export type ActionProposal = {
-  version: 1;
+  version: 2;
   runtime: "original" | "claude" | "codex";
   toolName: string;
   operation: string;
+  capabilities: string[];
   domains: ActionDomain[];
   effects: ActionEffect[];
   targets: string[];
   summary: string;
   reversibility: "full" | "partial" | "none";
   riskSignals: ActionRiskSignal[];
+  invocationPlan: import("../types").AgentInvocationPlan;
   intentBinding: {
     conversationKey?: number;
     conversationGeneration?: number;

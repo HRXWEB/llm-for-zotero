@@ -9,6 +9,7 @@ import {
 } from "../../../utils/modelInputCap";
 import { getAgentToolResultHandle } from "../../store/toolResultHandles";
 import { fail, ok } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type ToolResultReadInput = {
   handle: string;
@@ -321,6 +322,13 @@ export function createToolResultReadTool(): AgentToolDefinition<
     isAvailable: (request) =>
       request.metadata?.agentToolResultReadAvailable === true,
     validate: validateToolResultReadInput,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        effects: ["read"],
+        reason:
+          "Rehydrating a stored tool result reads turn-local host state only.",
+      }),
     execute: executeToolResultRead,
     presentation: {
       label: "Read Stored Tool Result",

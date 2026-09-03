@@ -3,6 +3,7 @@ import type {
   AgentToolInputValidation,
   AgentToolResult,
 } from "../../types";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   DirectDocumentFinalizer,
   PlanDocumentFinalizer,
@@ -359,6 +360,12 @@ export function createSubmitDocumentTool(
         "This turn requires a document artifact, so do not stop with ordinary answer text. Finish the requested work and call submit_document exactly once. Write complete Markdown with natural headings. For a literature review include a Scope and limitations section, put [[cite:C1]] tokens at supported claims, and copy the host-issued evidence IDs returned by read tools into each citation source. For other authored documents, citations and evidence IDs are optional. Record grounding concerns in groundingIssues. Do not hand-write References; the host generates them through Zotero CSL. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        reason:
+          "This host-owned control submits an already prepared workflow document.",
+      }),
     execute: async (input, context) => {
       const policy = context.request.documentOutcomePolicy;
       if (!policy?.required) {

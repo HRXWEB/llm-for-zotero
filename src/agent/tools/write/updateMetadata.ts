@@ -330,7 +330,7 @@ export function createUpdateMetadataTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, input.operations, context),
 
     async execute(input, context) {

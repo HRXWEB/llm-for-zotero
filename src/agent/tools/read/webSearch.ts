@@ -12,6 +12,7 @@ import type {
 } from "../../../webAccess/types";
 import { registerWebSearchSources } from "../../../webAccess/runSources";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { fail, ok, validateObject } from "../shared";
 import {
   createConfiguredWebAccessProvider,
@@ -282,6 +283,14 @@ export function createWebSearchTool(
         buildSearchTraceDetails(args, content),
     },
     validate: validateWebSearchInput,
+    planInvocation: (input) =>
+      readOnlyInvocationPlan({
+        domains: ["network"],
+        effects: ["read", "egress"],
+        targets: [input.query],
+        reason:
+          "The configured web provider receives the search query and returns public results.",
+      }),
     execute: async (input, context) => {
       if (!context.runId) {
         throw new Error("web_search requires an active local agent run.");

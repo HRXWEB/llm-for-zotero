@@ -4,6 +4,7 @@ import type {
   ExecutionTaskStatus,
 } from "../../types";
 import { planExecutionCoordinator } from "../../plans/coordinator";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { listTaskEvidence } from "../../plans/store";
 import type {
   PlanAcceptanceCriterion,
@@ -198,6 +199,12 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         "Execute the approved plan in order. The host starts the active task and owns the authoritative ledger. Call task_update with exactly one task transition, using the immutable taskId from the approved-plan context. Existing tasks normally need only taskId and status, but when completing a task whose expectedEffect is reasoning or whose completion requirement is bounded_reasoning, include reasoningAssertion in that same update; otherwise completion is rejected. Wait for that call to commit before submitting another transition. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, delete, reorder, or silently skip an approved task.",
     },
     validate: validateTaskUpdateInput,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        reason:
+          "This host-owned control updates only task progress in the active workflow.",
+      }),
     execute: async (input, context) => {
       const plan = context.request.planContext;
       if (!plan || plan.phase !== "executing") {

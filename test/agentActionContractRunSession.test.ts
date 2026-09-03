@@ -4,6 +4,7 @@ import {
   readLatestActionContractCheckpoint,
   type ActionContractCheckpoint,
 } from "../src/agent/contracts/actionContractRunSession";
+import { evaluateActionContract } from "../src/agent/contracts/actionEvaluation";
 import type {
   AgentActionContract,
   AgentActionProgressLedger,
@@ -302,6 +303,29 @@ describe("ActionContractRunSession initialization", function () {
 });
 
 describe("ActionContractRunSession state machine", function () {
+  it("uses only receipts explicitly bound to the requested obligation", function () {
+    const contract = createContract();
+    const matching = createReceipt({
+      id: "matching",
+      obligationId: contract.obligations[0].id,
+    });
+    const unbound = createReceipt({ id: "unbound" });
+    const wrongBinding = createReceipt({
+      id: "wrong-binding",
+      obligationId: "other-obligation",
+    });
+
+    assert.equal(evaluateActionContract(contract, [unbound]).state, "pending");
+    assert.equal(
+      evaluateActionContract(contract, [wrongBinding]).state,
+      "pending",
+    );
+    assert.equal(
+      evaluateActionContract(contract, [matching, unbound, wrongBinding]).state,
+      "satisfied",
+    );
+  });
+
   it("keeps checkpointing inert without an active contract", async function () {
     const harness = createHarness({ contract: null });
     await harness.session.initialize({ checkpoint: null });
@@ -440,7 +464,7 @@ describe("ActionContractRunSession state machine", function () {
     assert.isAbove(progress.updatedAt, 1);
   });
 
-  it("reports a failed evaluation without committing terminal progress", async function () {
+  it("accepts a zero-obligation contract regardless of classifier uncertainty", async function () {
     const contract = createContract("uncertain-contract", {
       writeDisposition: "uncertain",
       obligations: [],
@@ -451,16 +475,39 @@ describe("ActionContractRunSession state machine", function () {
 
     const decision = await harness.session.evaluateFinal({ canCorrect: false });
 
-    assert.equal(decision.kind, "fail");
-    assert.equal(progress.state, "pending");
+    assert.deepEqual(decision, { kind: "accept" });
+    assert.equal(progress.state, "satisfied");
     assert.equal(
       harness.events.at(-1)?.type === "provider_event"
         ? harness.events.at(-1)?.payload?.state
         : undefined,
-      "failed",
+      "satisfied",
     );
-    if (decision.kind !== "fail") return;
-    harness.session.commitRejectedFinal(decision);
-    assert.equal(progress.state, "failed");
+  });
+
+  it("accepts a zero-obligation final despite every unrelated receipt outcome", async function () {
+    const contract = createContract("informational-contract", {
+      writeDisposition: "none",
+      obligations: [],
+    });
+    const harness = createHarness({ contract });
+    await harness.session.initialize({ checkpoint: null });
+    await harness.session.recordToolReceipts([
+      createReceipt({ id: "denied", status: "failed" }),
+      createReceipt({ id: "rejected", status: "failed" }),
+      createReceipt({ id: "cancelled", status: "cancelled" }),
+      createReceipt({ id: "partial", status: "partial" }),
+      createReceipt({ id: "unverified", status: "unverified" }),
+      createReceipt({
+        id: "execution-only",
+        verification: "execution_only",
+      }),
+      createReceipt({ id: "observed", status: "observed" }),
+    ]);
+
+    const decision = await harness.session.evaluateFinal({ canCorrect: true });
+
+    assert.deepEqual(decision, { kind: "accept" });
+    assert.equal(harness.request.actionProgress!.state, "satisfied");
   });
 });

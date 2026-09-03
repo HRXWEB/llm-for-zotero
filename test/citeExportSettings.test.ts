@@ -320,7 +320,7 @@ describe("citations, export and settings", function () {
       assert.equal(result.value, false);
     });
 
-    it("only asks for confirmation when writing", function () {
+    it("plans reads and writes from the concrete setting operation", async function () {
       const tool = createLibrarySettingsTool(gateway());
       const list = tool.validate({ action: "list" });
       const set = tool.validate({
@@ -330,11 +330,13 @@ describe("citations, export and settings", function () {
       });
       assert.isTrue(list.ok && set.ok);
       if (!list.ok || !set.ok) return;
-      assert.isFalse(
-        tool.shouldRequireConfirmation?.(list.value, {} as never) as boolean,
+      assert.equal(
+        (await tool.planInvocation?.(list.value, {} as never))?.impact,
+        "read_only",
       );
-      assert.isTrue(
-        tool.shouldRequireConfirmation?.(set.value, {} as never) as boolean,
+      assert.equal(
+        (await tool.planInvocation?.(set.value, {} as never))?.impact,
+        "state_change",
       );
     });
   });

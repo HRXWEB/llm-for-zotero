@@ -10,6 +10,7 @@ import type {
   AgentToolResult,
   AgentToolReviewResolution,
 } from "../types";
+import { defaultInvocationPlan } from "../authorization/invocationPlan";
 import { describeLibraryMutationActions } from "../contracts/actionContract";
 import { fail, ok } from "./shared";
 
@@ -171,21 +172,12 @@ export function createDelegatingTool<TResult = unknown>(params: {
       }
       return tool.spec.requiresConfirmation;
     },
-    async planMutation(input, context) {
+    async planInvocation(input, context) {
       const tool = input.delegateTool;
-      if (tool.planMutation) {
-        return tool.planMutation(input.delegateInput, context);
+      if (tool.planInvocation) {
+        return tool.planInvocation(input.delegateInput, context);
       }
-      const requiresConfirmation = tool.shouldRequireConfirmation
-        ? await tool.shouldRequireConfirmation(input.delegateInput, context)
-        : tool.spec.requiresConfirmation;
-      return {
-        effect: requiresConfirmation ? ("write" as const) : ("none" as const),
-        reversibility: "none" as const,
-        reason: requiresConfirmation
-          ? "The delegated operation did not provide a durable inverse plan."
-          : undefined,
-      };
+      return defaultInvocationPlan(tool.spec.executionClass);
     },
     async acceptInheritedApproval(input, approval, context) {
       const tool = input.delegateTool;

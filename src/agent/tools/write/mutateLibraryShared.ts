@@ -3,11 +3,16 @@
  * confirmation cards, normalizing inputs, and executing operations.
  */
 import type {
-  AgentMutationPlan,
+  AgentInvocationPlan,
   AgentPendingField,
   AgentToolContext,
   AgentWriteToolOutput,
 } from "../../types";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../../authorization/invocationPlan";
+import type { ActionEffect } from "../../authorization/types";
 import type {
   ApplyTagsOperation,
   MoveToCollectionOperation,
@@ -630,9 +635,11 @@ export async function planLibraryMutations(
   mutationService: LibraryMutationService,
   operations: LibraryMutationOperation[],
   context: AgentToolContext,
-): Promise<AgentMutationPlan> {
+): Promise<AgentInvocationPlan> {
   if (!operations.length) {
-    return { effect: "none", reversibility: "full" };
+    return readOnlyInvocationPlan({
+      reason: "The validated library operation contains no changes.",
+    });
   }
   const plans = [];
   for (const operation of operations) {
@@ -643,15 +650,59 @@ export async function planLibraryMutations(
     : plans.every((plan) => plan.reversibility === "none")
       ? "none"
       : "partial";
-  return {
-    effect: "write",
+  const createOperations = new Set<LibraryMutationOperation["type"]>([
+    "create_collection",
+    "create_items",
+    "import_identifiers",
+    "import_local_files",
+    "save_note",
+    "save_notes_batch",
+    "save_saved_search",
+  ]);
+  const deleteOperations = new Set<LibraryMutationOperation["type"]>([
+    "delete_attachment",
+    "delete_collection",
+    "delete_saved_search",
+    "remove_from_collection",
+    "remove_tags",
+    "trash_items",
+  ]);
+  const effects = [
+    ...new Set<ActionEffect>(
+      operations.map((operation) =>
+        createOperations.has(operation.type)
+          ? "create"
+          : deleteOperations.has(operation.type)
+            ? "delete"
+            : "modify",
+      ),
+    ),
+  ];
+  const targets = [
+    ...new Set(
+      operations.flatMap((operation) =>
+        Object.entries(operation).flatMap(([key, value]) => {
+          if (!/(?:id|ids|path|paths)$/i.test(key)) return [];
+          return (Array.isArray(value) ? value : [value])
+            .filter(
+              (entry): entry is string | number =>
+                typeof entry === "string" || typeof entry === "number",
+            )
+            .map((entry) => `${key}:${entry}`);
+        }),
+      ),
+    ),
+  ];
+  return stateChangeInvocationPlan({
+    effects,
+    targets,
     reversibility,
     reason:
       plans
         .map((plan) => plan.reason)
         .filter((reason): reason is string => Boolean(reason))
-        .join(" ") || undefined,
-  };
+        .join(" ") || "The validated Zotero library operation changes state.",
+  });
 }
 
 // ── Metadata & Creator normalization ─────────────────────────────────────────

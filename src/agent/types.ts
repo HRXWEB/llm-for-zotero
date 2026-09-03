@@ -43,6 +43,12 @@ import type {
   TrustedReadObservation,
 } from "./plans/types";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
+import type {
+  ActionDomain,
+  ActionEffect,
+  ActionMechanism,
+  ActionRiskSignal,
+} from "./authorization/types";
 
 export type {
   ApprovedPlanGrant,
@@ -325,6 +331,8 @@ export type AgentInheritedApproval = {
   sourceToolName: string;
   sourceActionId: string;
   sourceMode?: "approval" | "review";
+  /** Minted by the host for the exact downstream tool name and raw input. */
+  approvedCallDigest?: string;
 };
 
 export type ToolSpec = {
@@ -874,6 +882,8 @@ export type AgentToolContext = {
   modelName: string;
   modelProviderLabel?: string;
   resourceSignature?: string;
+  /** Exact authoritative plan prepared by the registry for this execution. */
+  invocationPlan?: AgentInvocationPlan;
   signal?: AbortSignal;
   /**
    * Internal consent witness used only when journal initialization failed.
@@ -971,20 +981,17 @@ export type AgentToolPresentation = {
   buildResultCards?: (content: unknown) => AgentToolResultCard[] | null;
 };
 
-/**
- * The safety-relevant part of a tool's mutation plan.
- *
- * This is produced from the validated call, so confirmation policy consumes
- * the same operation-specific answer that the durable coordinator will use
- * instead of maintaining a second allowlist of supposedly reversible tools.
- */
-export type AgentMutationPlan = {
-  effect: "none" | "write";
+/** The single safety decision produced from one validated invocation. */
+export type AgentInvocationPlan = {
+  mechanism: ActionMechanism;
+  impact: "read_only" | "state_change" | "ambiguous" | "prohibited";
+  assurance: "runtime_enforced" | "statically_recognized" | "unknown";
+  domains: ActionDomain[];
+  effects: ActionEffect[];
+  targets: string[];
+  riskSignals: ActionRiskSignal[];
   reversibility: "full" | "partial" | "none";
-  reason?: string;
-  /** Recovery resumes and privileged source review may require consent even
-   * when the selected write mode would otherwise auto-approve the call. */
-  requiresConfirmation?: boolean;
+  reason: string;
 };
 
 export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
@@ -1001,10 +1008,10 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
     input: TInput,
     context: AgentToolContext,
   ) => Promise<AgentToolExecutionOutput<TResult>>;
-  planMutation?: (
+  planInvocation?: (
     input: TInput,
     context: AgentToolContext,
-  ) => AgentMutationPlan | Promise<AgentMutationPlan>;
+  ) => AgentInvocationPlan | Promise<AgentInvocationPlan>;
   shouldRequireConfirmation?: (
     input: TInput,
     context: AgentToolContext,
@@ -1072,8 +1079,15 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
 export type AgentWriteToolDefinition<
   TInput = unknown,
   TResult = unknown,
-> = Omit<AgentToolDefinition<TInput, TResult>, "spec" | "execute"> & {
+> = Omit<
+  AgentToolDefinition<TInput, TResult>,
+  "spec" | "execute" | "planInvocation"
+> & {
   spec: ToolSpec & { executionClass: "external_effect" };
+  planInvocation: (
+    input: TInput,
+    context: AgentToolContext,
+  ) => AgentInvocationPlan | Promise<AgentInvocationPlan>;
   execute: (
     input: TInput,
     context: AgentToolContext,
@@ -1122,6 +1136,6 @@ export type PreparedToolExecution =
       action: AgentPendingAction;
       execute: (
         resolution: AgentConfirmationResolution,
-      ) => Promise<PreparedToolExecutionResult>;
+      ) => Promise<PreparedToolExecution>;
       deny: (resolutionData?: unknown) => PreparedToolExecutionResult;
     };

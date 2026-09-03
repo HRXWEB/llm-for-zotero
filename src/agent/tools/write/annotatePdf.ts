@@ -1,4 +1,5 @@
 import type { AgentWriteToolDefinition } from "../../types";
+import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import {
   buildAnnotationSortIndex,
@@ -215,13 +216,13 @@ export function createAnnotatePdfTool(
       return ok(edited === undefined ? input : { ...input, comment: edited });
     },
 
-    planMutation() {
-      return {
-        effect: "write",
+    planInvocation() {
+      return stateChangeInvocationPlan({
+        effects: ["create"],
         reversibility: "partial",
         reason:
           "The annotation ID needed by the inverse is assigned only after Zotero commits.",
-      };
+      });
     },
 
     async execute(input, context) {

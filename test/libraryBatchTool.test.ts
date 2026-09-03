@@ -13,6 +13,7 @@ import type { AgentToolContext } from "../src/agent/types";
 import type { BatchJobRecord } from "../src/agent/store/batchJobStore";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 /**
  * The batch engine was a complete propose/paginate/apply system that the
@@ -232,10 +233,13 @@ describe("library_batch", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true as const, value: {} }),
-      planMutation: () => ({
-        effect: "write" as const,
-        reversibility: "full" as const,
-      }),
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          reversibility: "full",
+          reason: "The test batch mutates Zotero tags.",
+        }),
       describeAction: () => [
         {
           id: "batch-test:tags",
@@ -864,8 +868,9 @@ describe("library_batch", function () {
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
 
-    assert.isFalse(
-      await tool.shouldRequireConfirmation?.(validated.value, context),
+    assert.equal(
+      (await tool.planInvocation?.(validated.value, context))?.impact,
+      "read_only",
     );
     const result = (await tool.execute(validated.value, context)).content as {
       interruptedJobs: Array<Record<string, unknown>>;

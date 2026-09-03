@@ -10,6 +10,7 @@ import type { PdfPageService } from "../../services/pdfPageService";
 import { parsePageSelectionValue } from "../../services/pdfPageService";
 import type { RetrievalService } from "../../services/retrievalService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { joinLocalPath } from "../../../utils/localPath";
 import {
   formatPaperCitationLabel,
@@ -1154,6 +1155,21 @@ export function createPaperReadTool(
         visualInput: resolved.value,
       });
     },
+    planInvocation: (input) =>
+      readOnlyInvocationPlan({
+        domains:
+          input.mode === "visual" || input.mode === "capture"
+            ? ["zotero_library", "filesystem", "network"]
+            : ["zotero_library", "filesystem"],
+        effects:
+          input.mode === "visual" || input.mode === "capture"
+            ? ["read", "egress"]
+            : ["read"],
+        reason:
+          input.mode === "visual" || input.mode === "capture"
+            ? "The host renders selected PDF pages and sends reviewed images to the model."
+            : "The host-owned paper reader returns metadata or extracted text without changing the source.",
+      }),
     async execute(input, context) {
       if (input.mode === "visual" || input.mode === "capture") {
         if (input.mode === "visual") {

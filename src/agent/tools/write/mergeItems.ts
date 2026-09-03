@@ -189,7 +189,7 @@ export function createMergeItemsTool(
       });
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {

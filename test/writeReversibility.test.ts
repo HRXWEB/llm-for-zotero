@@ -5,13 +5,14 @@ import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createLibrarySettingsTool } from "../src/agent/tools/write/librarySettings";
 import type {
-  AgentMutationPlan,
+  AgentInvocationPlan,
   AgentToolContext,
   AgentToolDefinition,
 } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
-describe("mutation-plan confirmation policy", function () {
+describe("invocation-plan confirmation policy", function () {
   const originalZotero = globalThis.Zotero;
   const context = {
     request: {
@@ -28,8 +29,13 @@ describe("mutation-plan confirmation policy", function () {
     globalThis.Zotero = originalZotero;
   });
 
+  const writePlan = (
+    reversibility: AgentInvocationPlan["reversibility"],
+    reason = "Test state change.",
+  ) => stateChangeInvocationPlan({ reversibility, reason });
+
   function tool(
-    plan?: AgentMutationPlan,
+    plan?: AgentInvocationPlan,
   ): AgentToolDefinition<Record<string, never>, unknown> {
     return {
       spec: {
@@ -40,7 +46,7 @@ describe("mutation-plan confirmation policy", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
-      ...(plan ? { planMutation: async () => plan } : {}),
+      ...(plan ? { planInvocation: async () => plan } : {}),
       describeAction: () => [
         {
           id: "settings:test",
@@ -69,7 +75,7 @@ describe("mutation-plan confirmation policy", function () {
 
   async function prepare(params: {
     mode: "auto" | "safe" | "yolo";
-    plan?: AgentMutationPlan;
+    plan?: AgentInvocationPlan;
     journal: boolean;
   }) {
     const db = params.journal ? new ChangeJournalTestDb() : undefined;
@@ -91,7 +97,7 @@ describe("mutation-plan confirmation policy", function () {
     const prepared = await prepare({
       mode: "safe",
       journal: true,
-      plan: { effect: "write", reversibility: "full" },
+      plan: writePlan("full"),
     });
     assert.equal(prepared.kind, "confirmation");
   });
@@ -100,7 +106,7 @@ describe("mutation-plan confirmation policy", function () {
     const prepared = await prepare({
       mode: "auto",
       journal: true,
-      plan: { effect: "write", reversibility: "full" },
+      plan: writePlan("full"),
     });
     assert.equal(prepared.kind, "result");
     if (prepared.kind === "result") {
@@ -113,7 +119,7 @@ describe("mutation-plan confirmation policy", function () {
       const prepared = await prepare({
         mode: "auto",
         journal: true,
-        plan: { effect: "write", reversibility },
+        plan: writePlan(reversibility),
       });
       assert.equal(prepared.kind, "result", reversibility);
     }
@@ -128,12 +134,10 @@ describe("mutation-plan confirmation policy", function () {
     const prepared = await prepare({
       mode: "yolo",
       journal: true,
-      plan: {
-        effect: "write",
-        reversibility: "full",
-        requiresConfirmation: true,
-        reason: "Resume an interrupted batch only after reviewing its state.",
-      },
+      plan: writePlan(
+        "full",
+        "Resume an interrupted batch only after reviewing its state.",
+      ),
     });
     assert.equal(prepared.kind, "result");
   });
@@ -247,7 +251,7 @@ describe("mutation-plan confirmation policy", function () {
     const prepared = await prepare({
       mode: "yolo",
       journal: false,
-      plan: { effect: "write", reversibility: "full" },
+      plan: writePlan("full"),
     });
     assert.equal(prepared.kind, "result");
     if (prepared.kind === "result") {
@@ -263,7 +267,7 @@ describe("mutation-plan confirmation policy", function () {
     const prepared = await prepare({
       mode: "auto",
       journal: false,
-      plan: { effect: "write", reversibility: "full" },
+      plan: writePlan("full"),
     });
     assert.equal(prepared.kind, "result");
     if (prepared.kind === "result") {

@@ -14,6 +14,7 @@ import type {
   ZoteroGateway,
 } from "../../services/zoteroGateway";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type QueryLibraryInput = {
   entity: QueryLibraryEntity;
@@ -654,6 +655,11 @@ export function createQueryLibraryTool(
         view,
       });
     },
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library"],
+        reason: "The structured library query reads Zotero records only.",
+      }),
     execute: async (input, context) => {
       const libraryID =
         input.libraryID ||

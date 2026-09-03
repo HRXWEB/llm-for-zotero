@@ -2,6 +2,7 @@ import type { AgentToolDefinition } from "../../types";
 import type { PdfPageService } from "../../services/pdfPageService";
 import { parsePageSelectionValue } from "../../services/pdfPageService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   fail,
   normalizePositiveInt,
@@ -308,6 +309,13 @@ export function createViewPdfPagesTool(
       }
       return ok(input);
     },
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library", "filesystem", "network"],
+        effects: ["read", "egress"],
+        reason:
+          "The host renders PDF pages and sends the reviewed images to the model.",
+      }),
     execute: async (input, context) => {
       // Capture active view
       if (input.capture) {

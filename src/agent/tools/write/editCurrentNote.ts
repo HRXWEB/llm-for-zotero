@@ -6,6 +6,7 @@ import {
   storeRecoveryText,
 } from "../../store/journalRecoveryBlobStore";
 import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
+import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
 import {
   normalizeNoteSourceText,
   stripNoteHtml,
@@ -547,12 +548,6 @@ export function createEditCurrentNoteTool(
         },
       },
     },
-    shouldRequireConfirmation: async (input: EditCurrentNoteInput) => {
-      // Create mode: write directly, no confirmation needed
-      if (input.mode === "create") return false;
-      // Edit mode: always show diff preview for user review
-      return true;
-    },
     acceptInheritedApproval: async (_input, approval) => {
       // Accept review-mode approvals from search_literature_online review cards
       // that chain a save_note operation
@@ -837,22 +832,18 @@ export function createEditCurrentNoteTool(
         _patchedHtml: patchedHtml,
       });
     },
-    planMutation(input) {
+    planInvocation(input) {
       const hasLocalImages =
         /!\[[^\]]*\]\(file:\/\/|<img\s+[^>]*src\s*=\s*"file:\/\//i.test(
           input.content,
         );
-      return {
-        effect: "write",
+      return stateChangeInvocationPlan({
+        effects: [input.mode === "create" ? "create" : "modify"],
         reversibility: hasLocalImages ? "partial" : "full",
         reason: hasLocalImages
           ? "The note pre-image is recoverable, but imported attachment side effects may require Zotero's trash cascade."
-          : undefined,
-        // Edit/append review also resolves patch inputs against the current
-        // note and binds the expected pre-image. Skipping that review would
-        // execute an unresolved patch as an empty replacement.
-        requiresConfirmation: input.mode !== "create",
-      };
+          : "The note pre-image is journalled before the validated update.",
+      });
     },
     execute: async (input, context) => {
       resolveCreateOrAppendContent(input);

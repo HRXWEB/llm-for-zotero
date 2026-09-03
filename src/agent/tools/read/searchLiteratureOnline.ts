@@ -6,6 +6,7 @@ import type {
 } from "../../types";
 import { LiteratureSearchService } from "../../services/literatureSearchService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
@@ -350,6 +351,14 @@ export function createSearchLiteratureOnlineTool(
         libraryID: normalizePositiveInt(args.libraryID),
       });
     },
+    planInvocation: (input) =>
+      readOnlyInvocationPlan({
+        domains: ["network"],
+        effects: ["read", "egress"],
+        targets: input.query ? [input.query] : [],
+        reason:
+          "The literature provider receives the query and returns public metadata without changing Zotero.",
+      }),
     execute: async (input, context) => {
       const results = await service.execute(input, context);
       return {

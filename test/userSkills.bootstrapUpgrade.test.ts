@@ -385,7 +385,7 @@ describe("user skill bootstrap upgrades", function () {
 
   it("migrates declarative supersession without replacing legacy match metadata", function () {
     const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"]
-      .replace("version: 6", "version: 5")
+      .replace("version: 7", "version: 6")
       .replace("supersedes: simple-paper-qa\n", "");
     const patched = patchSkillFrontmatter(
       old,

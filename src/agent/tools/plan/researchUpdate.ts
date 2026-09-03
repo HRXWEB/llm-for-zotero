@@ -3,6 +3,7 @@ import type {
   AgentToolInputValidation,
 } from "../../types";
 import { canonicalJson } from "../../services/libraryMutation/canonicalJson";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { planExecutionCoordinator } from "../../plans/coordinator";
 import {
@@ -645,6 +646,12 @@ export function createResearchUpdateTool(
         "For an approved investigation, use research_update to persist work rather than keeping a paper list only in model context. First call {operation:'inventory_scope'} exactly once; the host inventories every frozen item, attachment key, duplicate, readability, abstract, and index state without making you enumerate the corpus. Then advance stages in order with set_stage. During broad screening, batch up to 25 papers in each record_papers call, with every approved criterion ID mapped to met, not_met, or unknown for every paper. An invalid papers[index] rejects the transactional batch; correct that indexed entry and retry the batch. Persist recall-expansion probes with record_probes, deep-read included or unresolved candidates, then call {operation:'list_verified_reads'} to obtain the exact approved criterion/subquestion IDs, per-paper durable status, strongest durable sourceReadRef, exact findingId, and exact evidenceRefs. A verifiedReads entry with evidenceDepth:'body' is a PDF/body-capable receipt and is preferred across resumed runs; use its exact trusted locator fields. On resume at synthesis or drafting, page through {operation:'list_findings'} until nextCursor is null; use those durable normalized findings instead of recovering old tool handles or rereading PDFs. For record_themes and submit_document, copy findingId and evidenceRefs exactly; never shorten or invent their IDs. Never invent criterion IDs or omit an approved criterion. Detailed evidence and findings may also be persisted in validated batches of up to 25 papers. Store one paper finding per paper and durable theme reductions. Missing evidence is unresolved, never negative evidence. Finalize only after the approved coverage is terminal; the host derives complete versus complete_with_limitations and emits aggregate progress.",
     },
     validate: validateResearchUpdate,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        reason:
+          "This host-owned control updates only the active research workflow ledger.",
+      }),
     execute: async (input, context) => {
       const plan = context.request.planContext;
       if (!plan || plan.phase !== "executing") {

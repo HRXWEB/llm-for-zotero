@@ -1604,7 +1604,10 @@ describe("durable change journal v2", function () {
     });
     const tool = createUndoLastActionTool({} as never);
 
-    assert.isFalse(await tool.shouldRequireConfirmation?.({}, context));
+    assert.equal(
+      (await tool.planInvocation?.({}, context))?.impact,
+      "read_only",
+    );
     const execution = await tool.execute!({}, context);
 
     assert.equal(execution.effect, "none");
@@ -1728,15 +1731,14 @@ describe("durable change journal v2", function () {
         items: [{ itemId: 4, exists: false }],
       },
     });
-    const undoPlan = await createUndoLastActionTool({} as never).planMutation?.(
-      {},
-      context,
-    );
+    const undoPlan = await createUndoLastActionTool(
+      {} as never,
+    ).planInvocation?.({}, context);
     const revertPlan = await createRevertChangesTool(
       {} as never,
-    ).planMutation?.({ count: 1, dryRun: false }, context);
+    ).planInvocation?.({ count: 1, dryRun: false }, context);
     const revertTool = createRevertChangesTool({} as never);
-    const dryRunPlan = await revertTool.planMutation?.(
+    const dryRunPlan = await revertTool.planInvocation?.(
       { count: 1, dryRun: true },
       context,
     );
@@ -1746,17 +1748,15 @@ describe("durable change journal v2", function () {
     );
 
     assert.deepInclude(undoPlan, {
-      effect: "write",
+      impact: "state_change",
       reversibility: "none",
-      requiresConfirmation: true,
     });
     assert.deepInclude(revertPlan, {
-      effect: "write",
+      impact: "state_change",
       reversibility: "none",
-      requiresConfirmation: true,
     });
-    assert.deepEqual(dryRunPlan, {
-      effect: "none",
+    assert.deepInclude(dryRunPlan, {
+      impact: "read_only",
       reversibility: "full",
     });
     assert.equal(dryRunExecution.effect, "none");
@@ -1833,8 +1833,8 @@ describe("durable change journal v2", function () {
       });
       assert.isTrue(validated.ok);
       if (!validated.ok) return;
-      const plan = await tool.planMutation?.(validated.value, context);
-      assert.equal(plan?.effect, "write");
+      const plan = await tool.planInvocation?.(validated.value, context);
+      assert.equal(plan?.impact, "state_change");
       assert.equal(plan?.reversibility, "partial");
 
       await tool.execute(validated.value, context);
@@ -1885,9 +1885,9 @@ describe("durable change journal v2", function () {
       });
       assert.isTrue(validated.ok);
       if (!validated.ok) return;
-      const plan = await tool.planMutation?.(validated.value, context);
+      const plan = await tool.planInvocation?.(validated.value, context);
       assert.deepInclude(plan, {
-        effect: "write",
+        impact: "state_change",
         reversibility: "none",
       });
 
@@ -3114,6 +3114,7 @@ describe("durable change journal v2", function () {
 
   it("prevents a library read script from mutating Zotero", async function () {
     let savedTitle = "Before";
+    let trashCalls = 0;
     const item = {
       id: 91,
       setField: (_field: string, value: string) => {
@@ -3124,7 +3125,12 @@ describe("durable change journal v2", function () {
     globalThis.Zotero = {
       ...(globalThis.Zotero as unknown as Record<string, unknown>),
       Libraries: { userLibraryID: 1 },
-      Items: { get: (id: number) => (id === 91 ? item : null) },
+      Items: {
+        get: (id: number) => (id === 91 ? item : null),
+        trash: async () => {
+          trashCalls += 1;
+        },
+      },
       debug: () => undefined,
     } as never;
     const tool = createZoteroScriptTool({
@@ -3139,14 +3145,35 @@ describe("durable change journal v2", function () {
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
-    const plan = await tool.planMutation?.(validated.value, context);
+    const plan = await tool.planInvocation?.(validated.value, context);
     assert.deepInclude(plan, {
-      effect: "none",
+      impact: "read_only",
+      assurance: "runtime_enforced",
       reversibility: "full",
     });
 
-    await tool.execute(validated.value, context);
+    const itemMutation = await tool.execute(validated.value, context);
     assert.equal(savedTitle, "Before");
+    assert.equal(itemMutation.effect, "none");
+
+    const namespaceMutation = tool.validate({
+      access: "library",
+      effect: "read",
+      script: "await Zotero.Items.trash(91); return 'trashed';",
+      description: "A namespace mutation falsely declared as a read",
+    });
+    assert.isTrue(namespaceMutation.ok);
+    if (!namespaceMutation.ok) return;
+    const namespaceResult = await tool.execute(
+      namespaceMutation.value,
+      context,
+    );
+    assert.equal(trashCalls, 0);
+    assert.equal(namespaceResult.effect, "none");
+    assert.include(
+      String((namespaceResult.content as { output?: unknown }).output || ""),
+      "non-read Zotero API trash",
+    );
   });
 
   it("skips stale metadata, note, file, and created-item inverses", async function () {

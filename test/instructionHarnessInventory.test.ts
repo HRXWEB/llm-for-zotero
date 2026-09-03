@@ -26,7 +26,7 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
   "evidence-based-qa.md": [
     "read then retrieve, then answer",
     "Targeted retrieval",
-    "### Budget",
+    "Use the evidence frontier rather than a call count",
   ],
   "import-cited-reference.md": [
     "Identify what the user gave you",
@@ -44,7 +44,7 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
     "Finish with `submit_document`",
   ],
   "simple-paper-qa.md": [
-    "one read, then answer",
+    "Follow `paperEvidenceProgress`",
     "contentStatus:'no_pdf_attachment'",
     "contentStatus:'no_extractable_pdf_text'",
   ],

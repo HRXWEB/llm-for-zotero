@@ -4,6 +4,10 @@ import type {
   AgentJournalStepOutcome,
   AgentWriteToolDefinition,
 } from "../../types";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../../authorization/invocationPlan";
 import type { AgentToolRegistry } from "../registry";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import type { ActionRegistry } from "../../actions";
@@ -378,21 +382,17 @@ export function createLibraryBatchTool(deps: {
       return ok({ kind: "run", job, jobArgs });
     },
 
-    shouldRequireConfirmation(input) {
-      return input.kind !== "list";
-    },
-
-    planMutation(input) {
+    planInvocation(input) {
       if (input.kind === "list") {
-        return { effect: "none", reversibility: "full" };
+        return readOnlyInvocationPlan({
+          reason: "Listing durable batch jobs reads checkpoint state only.",
+        });
       }
-      return {
-        effect: "write",
+      return stateChangeInvocationPlan({
         reversibility: "partial",
         reason:
           "Each applied page is journalled, while external model work and an interrupted remainder are checkpointed separately.",
-        requiresConfirmation: input.kind === "resume",
-      };
+      });
     },
 
     createPendingAction(input, context) {

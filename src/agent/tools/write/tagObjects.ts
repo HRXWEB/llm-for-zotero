@@ -152,7 +152,7 @@ export function createUpdateLibraryTagTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {
@@ -276,7 +276,7 @@ export function createSetItemTagsTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {

@@ -328,6 +328,66 @@ describe("agent prompt budget", function () {
     assert.equal(modelFacing.snippets[0].paperContext.contextItemId, "30000");
   });
 
+  it("preserves the original paper-evidence handle and progress when reducing its payload", function () {
+    const evidence = buildEvidenceToolMessage(80);
+    evidence.name = "paper_read";
+    const content = JSON.parse(String(evidence.content));
+    content.toolResultHandle = "trh_original_paper_evidence";
+    content.paperEvidenceProgress = {
+      frontier: "advanced",
+      coverage: "targeted",
+      newOccurrenceIds: ["paper-occurrence:one"],
+      repeatedOccurrenceIds: [],
+      cumulativeOccurrenceCount: 1,
+      recommendation: "answer_or_self_check",
+      reason: "New source occurrences were delivered.",
+    };
+    content.paperEvidenceReferences = [
+      {
+        sourceToolCallId: "call-1",
+        occurrenceId: "paper-occurrence:one",
+        quoteCitationIds: ["quote-one"],
+        toolResultHandle: "trh_original_paper_evidence",
+      },
+    ];
+    evidence.content = JSON.stringify(content);
+    const result = enforceAgentPromptBudget({
+      messages: [
+        { role: "system", content: "Use paper evidence." },
+        { role: "user", content: "Answer from the paper." },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-1",
+              name: "paper_read",
+              arguments: { mode: "targeted", query: "method" },
+            },
+          ],
+        },
+        evidence,
+      ],
+      model: "claude-haiku-4-5",
+      inputTokenCap: 6_000,
+      conversationKey: 1,
+      resourceSignature: "scope-a",
+    });
+
+    assert.isTrue(result.changed);
+    const toolMessage = result.messages.find(
+      (message) => message.role === "tool",
+    );
+    assert.equal(toolMessage?.role, "tool");
+    const modelFacing = JSON.parse(String(toolMessage?.content));
+    assert.equal(modelFacing.toolResultHandle, "trh_original_paper_evidence");
+    assert.equal(modelFacing.paperEvidenceProgress.frontier, "advanced");
+    assert.equal(
+      modelFacing.paperEvidenceReferences[0].occurrenceId,
+      "paper-occurrence:one",
+    );
+  });
+
   it("strips orphan quote citation ids when evidence must be reduced", function () {
     const evidenceMessage = buildEvidenceToolMessage(80);
     const content = JSON.parse(String(evidenceMessage.content));

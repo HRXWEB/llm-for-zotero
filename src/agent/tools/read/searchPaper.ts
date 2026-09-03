@@ -9,6 +9,7 @@ import {
   PAPER_CONTEXT_REF_SCHEMA,
   validateObject,
 } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   normalizeTarget,
   normalizeTargets,
@@ -144,6 +145,12 @@ export function createSearchPaperTool(
       }
       return ok(input);
     },
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library", "filesystem"],
+        reason:
+          "Paper search reads indexed passages through host-owned retrieval services.",
+      }),
     execute: async (input, context) => {
       const papers = resolveDefaultTargets(
         input.target,

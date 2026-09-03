@@ -4,6 +4,12 @@ import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import type { AgentToolContext } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import {
+  prohibitedInvocationPlan,
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../src/agent/authorization/invocationPlan";
+import { buildActionCallDigest } from "../src/agent/authorization/proposal";
 
 const describeTestMutation = () => [
   {
@@ -53,6 +59,36 @@ describe("AgentToolRegistry", function () {
       String((result.execution.result.content as { error?: string }).error),
       "Unknown tool",
     );
+  });
+
+  it("gives every registered tool one complete invocation planner", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "plain_read",
+        description: "read",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: () => ({ ok: true, value: {} }),
+      execute: async () => ({ ok: true }),
+    });
+
+    const registered = registry.getTool("plain_read");
+    assert.isFunction(registered?.planInvocation);
+    const plan = await registered?.planInvocation?.({}, baseContext);
+    assert.deepInclude(plan, {
+      mechanism: "none",
+      impact: "read_only",
+      assurance: "runtime_enforced",
+      reversibility: "full",
+    });
+    assert.isArray(plan?.domains);
+    assert.isArray(plan?.effects);
+    assert.isArray(plan?.targets);
+    assert.isArray(plan?.riskSignals);
+    assert.isNotEmpty(plan?.reason || "");
   });
 
   it("rejects malformed diagnostic arguments centrally before validation", async function () {
@@ -205,9 +241,15 @@ describe("AgentToolRegistry", function () {
     assert.equal(result.kind, "confirmation");
     if (result.kind !== "confirmation") return;
     assert.equal(result.action.toolName, "mutate_library");
-    assert.deepEqual(
+    assert.includeMembers(
       result.action.fields.map((field) => field.id),
-      ["selectedOperations", "operationsJson"],
+      [
+        "selectedOperations",
+        "operationsJson",
+        "invocationImpact",
+        "invocationEffects",
+        "invocationReversibility",
+      ],
     );
     assert.equal(result.deny().result.ok, false);
     const approved = await result.execute({
@@ -217,13 +259,208 @@ describe("AgentToolRegistry", function () {
         operationsJson: JSON.stringify([{ id: "op-1", type: "apply_tags" }]),
       },
     });
-    assert.equal(approved.result.ok, true);
-    assert.deepEqual(approved.result.content, {
+    assert.equal(approved.kind, "result");
+    if (approved.kind !== "result") return;
+    assert.equal(approved.execution.result.ok, true);
+    assert.deepEqual(approved.execution.result.content, {
       applied: 1,
     });
   });
 
-  it("lets tools opt into explicit inherited approval", async function () {
+  it("replans edited confirmation input and confirms an expanded target exactly once", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "safe" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry();
+    let planCalls = 0;
+    const executedTargets: string[] = [];
+    registry.register({
+      spec: {
+        name: "editable_write",
+        description: "write a target",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: true,
+      },
+      validate: (args) => {
+        const target = (args as { target?: unknown })?.target;
+        return typeof target === "string" && target
+          ? { ok: true as const, value: { target } }
+          : { ok: false as const, error: "target is required" };
+      },
+      planInvocation: (input) => {
+        planCalls += 1;
+        return stateChangeInvocationPlan({
+          domains: ["filesystem"],
+          effects: ["modify"],
+          targets: [input.target],
+          reversibility: "full",
+          reason: `Replace ${input.target}.`,
+        });
+      },
+      describeAction: (input) => [
+        {
+          ...describeTestMutation()[0],
+          requestedTargets: [input.target],
+        },
+      ],
+      createPendingAction: (input) => ({
+        toolName: "editable_write",
+        title: "Review write",
+        confirmLabel: "Write",
+        cancelLabel: "Cancel",
+        fields: [
+          {
+            type: "text",
+            id: "target",
+            label: "Target",
+            value: input.target,
+          },
+        ],
+      }),
+      applyConfirmation: (input, data) => {
+        const target = (data as { target?: unknown } | undefined)?.target;
+        return {
+          ok: true,
+          value: {
+            target:
+              typeof target === "string" && target ? target : input.target,
+          },
+        };
+      },
+      execute: async (input) => {
+        executedTargets.push(input.target);
+        return { content: { target: input.target }, effect: "applied" };
+      },
+    });
+
+    const initial = await registry.prepareExecution(
+      {
+        id: "editable",
+        name: "editable_write",
+        arguments: { target: "/tmp/a.md" },
+      },
+      baseContext,
+    );
+    assert.equal(initial.kind, "confirmation");
+    assert.equal(planCalls, 1);
+    if (initial.kind !== "confirmation") return;
+
+    const expanded = await initial.execute({
+      approved: true,
+      data: { target: "/tmp/b.md" },
+    });
+    assert.equal(expanded.kind, "confirmation");
+    assert.equal(planCalls, 2);
+    assert.deepEqual(executedTargets, []);
+    if (expanded.kind !== "confirmation") return;
+
+    const execution = await expanded.execute({ approved: true });
+    assert.equal(execution.kind, "result");
+    assert.equal(planCalls, 2);
+    assert.deepEqual(executedTargets, ["/tmp/b.md"]);
+    if (execution.kind !== "result") return;
+    assert.deepEqual(execution.execution.result.content, {
+      target: "/tmp/b.md",
+    });
+  });
+
+  it("blocks a confirmed edit that crosses a hard boundary before execution", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "safe" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry();
+    let executions = 0;
+    registry.register({
+      spec: {
+        name: "boundary_write",
+        description: "write a target",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: true,
+      },
+      validate: (args) => ({
+        ok: true,
+        value: { target: String((args as { target?: unknown })?.target || "") },
+      }),
+      planInvocation: (input) =>
+        input.target === "/"
+          ? prohibitedInvocationPlan({
+              domains: ["filesystem"],
+              targets: [input.target],
+              riskSignals: ["protected_target"],
+              reason: "The target is a protected filesystem root.",
+            })
+          : stateChangeInvocationPlan({
+              domains: ["filesystem"],
+              targets: [input.target],
+              reason: "Write the requested target.",
+            }),
+      describeAction: (input) => [
+        {
+          ...describeTestMutation()[0],
+          requestedTargets: [input.target],
+        },
+      ],
+      createPendingAction: (input) => ({
+        toolName: "boundary_write",
+        title: "Review write",
+        confirmLabel: "Write",
+        cancelLabel: "Cancel",
+        fields: [
+          {
+            type: "text",
+            id: "target",
+            label: "Target",
+            value: input.target,
+          },
+        ],
+      }),
+      applyConfirmation: (input, data) => ({
+        ok: true,
+        value: {
+          target: String(
+            (data as { target?: unknown })?.target || input.target,
+          ),
+        },
+      }),
+      execute: async () => {
+        executions += 1;
+        return { content: { ok: true }, effect: "applied" };
+      },
+    });
+
+    const initial = await registry.prepareExecution(
+      {
+        id: "boundary",
+        name: "boundary_write",
+        arguments: { target: "/tmp/a.md" },
+      },
+      baseContext,
+    );
+    assert.equal(initial.kind, "confirmation");
+    if (initial.kind !== "confirmation") return;
+    const blocked = await initial.execute({
+      approved: true,
+      data: { target: "/" },
+    });
+    assert.equal(blocked.kind, "result");
+    assert.equal(executions, 0);
+    if (blocked.kind !== "result") return;
+    assert.isFalse(blocked.execution.result.ok);
+    assert.include(
+      JSON.stringify(blocked.execution.result.content),
+      "protected integrity boundary",
+    );
+  });
+
+  it("binds inherited approval to the exact downstream invocation", async function () {
     globalThis.Zotero = {
       DB: new ChangeJournalTestDb(),
       debug: () => undefined,
@@ -274,6 +511,7 @@ describe("AgentToolRegistry", function () {
           sourceToolName: "search_literature_online",
           sourceActionId: "import",
           sourceMode: "review",
+          approvedCallDigest: buildActionCallDigest("mutate_library", {}),
         },
       },
     );
@@ -282,6 +520,32 @@ describe("AgentToolRegistry", function () {
     if (result.kind !== "result") return;
     assert.equal(result.execution.result.ok, true);
     assert.deepEqual(result.execution.result.content, { applied: 1 });
+
+    const mismatched = await registry.prepareExecution(
+      {
+        id: "call-2-mismatch",
+        name: "mutate_library",
+        arguments: {},
+      },
+      baseContext,
+      {
+        inheritedApproval: {
+          sourceToolName: "search_literature_online",
+          sourceActionId: "import",
+          sourceMode: "review",
+          approvedCallDigest: buildActionCallDigest("mutate_library", {
+            changed: true,
+          }),
+        },
+      },
+    );
+    assert.equal(mismatched.kind, "result");
+    if (mismatched.kind !== "result") return;
+    assert.isFalse(mismatched.execution.result.ok);
+    assert.include(
+      JSON.stringify(mismatched.execution.result.content),
+      "not bound to this exact invocation",
+    );
   });
 
   it("blocks an unjournalled action even when it has inherited consent", async function () {
@@ -297,7 +561,11 @@ describe("AgentToolRegistry", function () {
         requiresConfirmation: true,
       },
       validate: () => ({ ok: true, value: {} }),
-      planMutation: () => ({ effect: "write", reversibility: "full" }),
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          reversibility: "full",
+          reason: "Test mutation.",
+        }),
       describeAction: describeTestMutation,
       acceptInheritedApproval: () => true,
       createPendingAction: () => ({
@@ -321,6 +589,7 @@ describe("AgentToolRegistry", function () {
           sourceToolName: "search_literature_online",
           sourceActionId: "import",
           sourceMode: "review",
+          approvedCallDigest: buildActionCallDigest("mutate_library", {}),
         },
       },
     );
@@ -394,6 +663,7 @@ describe("AgentToolRegistry", function () {
 
   it("does not acquire the conversation write lock for reads or read-only write modes", async function () {
     const registry = new AgentToolRegistry();
+    let receivedInvocationPlan: AgentToolContext["invocationPlan"];
     registry.register({
       spec: {
         name: "read_tool",
@@ -414,11 +684,15 @@ describe("AgentToolRegistry", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
-      planMutation: () => ({ effect: "none", reversibility: "full" }),
-      execute: async () => ({
-        content: { value: "listed" },
-        effect: "none",
-      }),
+      planInvocation: () =>
+        readOnlyInvocationPlan({ reason: "Test read-only mode." }),
+      execute: async (_input, context) => {
+        receivedInvocationPlan = context.invocationPlan;
+        return {
+          content: { value: "listed" },
+          effect: "none",
+        };
+      },
     });
     let lockCalls = 0;
     const options = {
@@ -448,6 +722,8 @@ describe("AgentToolRegistry", function () {
     if (list.kind === "result") {
       assert.equal(list.execution.result.effect, "none");
     }
+    assert.equal(receivedInvocationPlan?.impact, "read_only");
+    assert.equal(receivedInvocationPlan?.assurance, "runtime_enforced");
   });
 
   it("acquires the conversation write lock for a planned write", async function () {
@@ -467,7 +743,11 @@ describe("AgentToolRegistry", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
-      planMutation: () => ({ effect: "write", reversibility: "full" }),
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          reversibility: "full",
+          reason: "Test write.",
+        }),
       describeAction: describeTestMutation,
       execute: async () => ({
         content: { value: "written" },
@@ -546,7 +826,8 @@ describe("AgentToolRegistry", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
-      planMutation: () => ({ effect: "none", reversibility: "full" }),
+      planInvocation: () =>
+        readOnlyInvocationPlan({ reason: "Test read-only execution." }),
       execute: async () => ({ status: "finished" }),
     });
 
@@ -604,8 +885,10 @@ describe("AgentToolRegistry", function () {
     if (prepared.kind !== "confirmation") return;
     const executed = await prepared.execute({ approved: true });
     assert.equal(executions, 1);
-    assert.isTrue(executed.result.ok);
-    assert.deepEqual(executed.result.actionReceipts, []);
+    assert.equal(executed.kind, "result");
+    if (executed.kind !== "result") return;
+    assert.isTrue(executed.execution.result.ok);
+    assert.deepEqual(executed.execution.result.actionReceipts, []);
   });
 
   it("blocks an untyped external effect before execution and fabricates no command receipt", async function () {
@@ -620,7 +903,8 @@ describe("AgentToolRegistry", function () {
         requiresConfirmation: false,
       },
       validate: () => ({ ok: true, value: {} }),
-      planMutation: () => ({ effect: "write", reversibility: "none" }),
+      planInvocation: () =>
+        stateChangeInvocationPlan({ reason: "Untyped test effect." }),
       execute: async () => {
         executions += 1;
         return { content: { ok: true }, effect: "applied" as const };

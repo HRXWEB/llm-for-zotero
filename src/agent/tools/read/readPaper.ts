@@ -10,6 +10,7 @@ import {
   PAPER_CONTEXT_REF_SCHEMA,
   validateObject,
 } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
   describeNoDefaultPaperTarget,
   normalizeTarget,
@@ -136,6 +137,11 @@ export function createReadPaperTool(
       }
       return ok(input);
     },
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library", "filesystem"],
+        reason: "Paper text is read through the host-owned PDF service.",
+      }),
     execute: async (input, context) => {
       if (input.chunkIndexes?.length) {
         // Read specific chunks from a single paper

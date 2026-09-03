@@ -188,7 +188,7 @@ export function createCreateItemsTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {
@@ -328,7 +328,7 @@ export function createReparentItemsTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {
@@ -436,7 +436,7 @@ export function createRelateItemsTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {

@@ -8,6 +8,7 @@ import type {
   AgentToolInputValidation,
 } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 function createStubTool<TInput extends Record<string, unknown>, TResult>(
   spec: AgentToolDefinition<TInput, TResult>["spec"],
@@ -29,10 +30,13 @@ function createStubTool<TInput extends Record<string, unknown>, TResult>(
     },
     ...(spec.executionClass === "external_effect"
       ? {
-          planMutation: async () => ({
-            effect: "write" as const,
-            reversibility: "full" as const,
-          }),
+          planInvocation: async () =>
+            stateChangeInvocationPlan({
+              domains: ["zotero_library"],
+              effects: ["modify"],
+              reversibility: "full",
+              reason: `Stub ${spec.name} mutates Zotero state.`,
+            }),
           describeAction: async () => [
             {
               id: `stub:${spec.name}`,
@@ -132,10 +136,13 @@ function registerReviewApplyTagsTool(
         args as { assignments: Array<{ itemId: number; tags: string[] }> },
       );
     },
-    planMutation: async () => ({
-      effect: "write",
-      reversibility: "full",
-    }),
+    planInvocation: async () =>
+      stateChangeInvocationPlan({
+        domains: ["zotero_library"],
+        effects: ["modify"],
+        reversibility: "full",
+        reason: "The tool applies tags to Zotero items.",
+      }),
     describeAction: (input) => [
       {
         id: "apply-tags:test",

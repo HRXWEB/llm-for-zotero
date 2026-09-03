@@ -3,6 +3,7 @@ import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 /**
  * The mode is enforced at `prepareExecution` — the one point the in-plugin
@@ -55,10 +56,13 @@ describe("Original Agent permission gate", function () {
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args as never }),
-      planMutation: async () => ({
-        effect: "write",
-        reversibility: "full",
-      }),
+      planInvocation: async () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          reversibility: "full",
+          reason: "The library batch mutates Zotero state.",
+        }),
       describeAction: () => [
         {
           id: "settings:test",
@@ -134,10 +138,13 @@ describe("Original Agent permission gate", function () {
         requiresConfirmation: false,
       },
       validate: (args) => ({ ok: true, value: args as never }),
-      planMutation: async () => ({
-        effect: "write",
-        reversibility: "full",
-      }),
+      planInvocation: async () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          reversibility: "full",
+          reason: "The library update mutates Zotero state.",
+        }),
       describeAction: () => [
         {
           id: "settings:test",

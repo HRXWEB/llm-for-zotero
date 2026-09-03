@@ -251,7 +251,7 @@ describe("zotero_script scope control", function () {
     assert.include(String(result.error), "DB is not available");
   });
 
-  it("still allows Zotero.DB to read scripts, which change nothing", async function () {
+  it("withholds Zotero.DB from privileged read scripts as well", async function () {
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
       DB: { queryAsync: async () => [{ n: 3 }] },
       Items: { get: () => null },
@@ -269,10 +269,12 @@ describe("zotero_script scope control", function () {
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
+    const plan = await tool.planInvocation(validated.value, context);
+    assert.equal(plan.impact, "prohibited");
+    assert.include(plan.riskSignals, "raw_database");
     const result = (await tool.execute(validated.value, context))
       .content as Record<string, unknown>;
-    assert.isUndefined(result.error);
-    assert.equal(result.returnValue, 1);
+    assert.include(String(result.error), "DB is not available");
   });
 });
 

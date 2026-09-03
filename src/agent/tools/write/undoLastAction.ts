@@ -1,4 +1,8 @@
 import type { AgentWriteToolDefinition } from "../../types";
+import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../../authorization/invocationPlan";
 import { fail, ok, validateObject } from "../shared";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { revertActions } from "../../services/changeReverter";
@@ -73,25 +77,19 @@ export function createUndoLastActionTool(
     validate: (_args) => {
       return ok<UndoLastActionInput>({});
     },
-    shouldRequireConfirmation: async (_input, context) => {
-      const selection = await selectUndoJournalAction({
-        conversationKey: context.request.conversationKey,
-      });
-      return Boolean(selection.action);
-    },
-    planMutation: async (_input, context) => {
+    planInvocation: async (_input, context) => {
       const selection = await selectUndoJournalAction({
         conversationKey: context.request.conversationKey,
       });
       return selection.action
-        ? {
-            effect: "write",
+        ? stateChangeInvocationPlan({
             reversibility: "none",
             reason:
               "Undo replays an inverse without creating a redo action, so the undo itself cannot be automatically undone.",
-            requiresConfirmation: true,
-          }
-        : { effect: "none", reversibility: "full" };
+          })
+        : readOnlyInvocationPlan({
+            reason: "There is no journalled action to undo.",
+          });
     },
     createPendingAction: async (_input, context) => {
       const selection = await selectUndoJournalAction({

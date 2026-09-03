@@ -734,7 +734,7 @@ describe("Action Contract V2", function () {
     }
   });
 
-  it("rejects every model-originated write for an explicit no-write constraint", async function () {
+  it("leaves effect constraints to pre-execution authorization", async function () {
     const { service } = createHarness();
     const contract = await service.createContract(
       requestWithIntents([], { disposition: "none" }),
@@ -749,10 +749,7 @@ describe("Action Contract V2", function () {
         tags: ["topic:drift"],
       },
     });
-    assert.include(
-      (await service.validateScope(contract, prepared))?.message || "",
-      "explicitly prohibited",
-    );
+    assert.isNull(await service.validateScope(contract, prepared));
   });
 
   it("binds top-level and explicitly nested collection creation precisely", async function () {

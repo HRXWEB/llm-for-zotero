@@ -5,6 +5,7 @@ import type {
   AgentToolInputValidation,
 } from "../../types";
 import { fail, ok, validateObject } from "../shared";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type PlanQuestion = {
   id: string;
@@ -126,6 +127,12 @@ export function createRequestUserInputTool(): AgentToolDefinition<
     },
     isAvailable: (request) => request.planContext?.phase === "planning",
     validate: validateInput,
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: [],
+        reason:
+          "This interaction records user input in the active workflow only.",
+      }),
     createPendingAction: (input) => ({
       toolName: "request_user_input",
       title: "Plan needs your input",

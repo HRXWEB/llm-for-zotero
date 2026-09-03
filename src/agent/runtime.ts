@@ -127,6 +127,7 @@ import {
   type JournalActionWithSteps,
 } from "./store/changeJournal";
 import {
+  createAgentToolResultHandleRecord,
   hasAgentToolResultHandles,
   hydrateAgentToolResultHandles,
   type AgentToolResultHandleRecord,
@@ -140,6 +141,10 @@ import {
 import type { WebAttributionAssessment } from "../webAccess/attribution";
 import { clearWebSourcesForRun } from "../webAccess/runSources";
 import { PlanExecutionRunSession } from "./plans/runSession";
+import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
+import { canonicalJson } from "./services/libraryMutation/canonicalJson";
+import { sha256Text } from "./store/journalRecoveryBlobStore";
+import { buildActionCallDigest } from "./authorization/proposal";
 
 const TOOL_RESULT_READ_TOOL_NAME = "tool_result_read";
 
@@ -1103,6 +1108,8 @@ export class AgentRuntime {
       const resourceContextPlan = buildAgentResourceContextPlan(request);
       context.resourceSignature = resourceContextPlan.resourceSignature;
       request.contextCache = resourceContextPlan.contextCache;
+      const paperEvidenceFrontier = new PaperEvidenceFrontier();
+      const preservedTurnHandleRecords: AgentToolResultHandleRecord[] = [];
       const transcriptCompatibilityKey = buildAgentTranscriptCompatibilityKey({
         request,
         resourceSignature: resourceContextPlan.resourceSignature,
@@ -1499,7 +1506,10 @@ export class AgentRuntime {
           summaryTokens: budgetState.summaryTokens,
           conversationKey: request.conversationKey,
           resourceSignature: resourceContextPlan.resourceSignature,
-          preservedHandleRecords: params.preservedHandleRecords,
+          preservedHandleRecords: [
+            ...preservedTurnHandleRecords,
+            ...(params.preservedHandleRecords || []),
+          ],
         });
         const checkpoint: AgentUserMessage = {
           ...semantic.checkpoint,
@@ -2085,49 +2095,81 @@ export class AgentRuntime {
               : undefined,
         });
         toolsUsedThisTurn.push(call.name);
-        const execution = await this.registry.prepareExecution(
-          call,
-          {
-            ...context,
-            currentAnswerText,
-          },
-          {
-            callerKind: options.inheritedApproval ? "action" : "model",
-            inheritedApproval: options.inheritedApproval,
-            isExecutionAllowed: executionAllowed,
-            executeWithLock: (task) =>
-              withConversationWriteLock(request.conversationKey, task),
-          },
-        );
+        const cachedPaperEvidence =
+          call.name === "paper_read"
+            ? await paperEvidenceFrontier.readCached({
+                input: call.arguments,
+                toolCallId: call.id,
+                resourceSignature: resourceContextPlan.resourceSignature,
+              })
+            : null;
         let executedCall: {
           toolResult: AgentToolResult;
           toolDefinition?: import("./types").AgentToolDefinition<any, any>;
           input?: unknown;
           documentEvidenceRefs?: unknown[];
         };
-        if (execution.kind === "confirmation") {
-          const { resolution } = await requestActionResolution(
-            execution.action,
-          );
-          if (!executionAllowed()) return lifecycleError();
-          // Resolution semantics belong to the rendered action schema. Some
-          // review-card controls deliberately carry approved:false while
-          // continuing the workflow without applying a mutation.
-          const confirmedExecution = await execution.execute(resolution);
+        if (cachedPaperEvidence) {
           executedCall = {
-            toolResult: confirmedExecution.result,
-            toolDefinition: confirmedExecution.tool,
-            input: confirmedExecution.input,
+            toolResult: {
+              callId: call.id,
+              name: call.name,
+              ok: true,
+              actionReceipts: [],
+              content: cachedPaperEvidence.content,
+            },
+            toolDefinition: this.registry.getTool(call.name),
+            input: call.arguments,
           };
         } else {
-          if (!executionAllowed()) return lifecycleError();
-          executedCall = {
-            toolResult: execution.execution.result,
-            toolDefinition: execution.execution.tool,
-            input: execution.execution.input,
-          };
+          const execution = await this.registry.prepareExecution(
+            call,
+            {
+              ...context,
+              currentAnswerText,
+            },
+            {
+              callerKind: options.inheritedApproval ? "action" : "model",
+              inheritedApproval: options.inheritedApproval,
+              isExecutionAllowed: executionAllowed,
+              executeWithLock: (task) =>
+                withConversationWriteLock(request.conversationKey, task),
+            },
+          );
+          if (execution.kind === "confirmation") {
+            const { resolution } = await requestActionResolution(
+              execution.action,
+            );
+            if (!executionAllowed()) return lifecycleError();
+            // Resolution semantics belong to the rendered action schema. Some
+            // review-card controls deliberately carry approved:false while
+            // continuing the workflow without applying a mutation.
+            let confirmedExecution = await execution.execute(resolution);
+            while (confirmedExecution.kind === "confirmation") {
+              const next = await requestActionResolution(
+                confirmedExecution.action,
+              );
+              if (!executionAllowed()) return lifecycleError();
+              confirmedExecution = await confirmedExecution.execute(
+                next.resolution,
+              );
+            }
+            executedCall = {
+              toolResult: confirmedExecution.execution.result,
+              toolDefinition: confirmedExecution.execution.tool,
+              input: confirmedExecution.execution.input,
+            };
+          } else {
+            if (!executionAllowed()) return lifecycleError();
+            executedCall = {
+              toolResult: execution.execution.result,
+              toolDefinition: execution.execution.tool,
+              input: execution.execution.input,
+            };
+          }
         }
         const { toolResult } = executedCall;
+        let readActivityContent = toolResult.content;
         if (
           toolResult.ok &&
           toolResult.artifacts?.length &&
@@ -2145,6 +2187,7 @@ export class AgentRuntime {
           request.documentArtifactObservations = [...artifactsByPath.values()];
         }
         if (
+          !cachedPaperEvidence &&
           toolResult.ok &&
           executedCall.toolDefinition?.spec.executionClass === "read" &&
           request.documentOutcomePolicy?.integrityPolicy === "research_grounded"
@@ -2179,6 +2222,47 @@ export class AgentRuntime {
             );
           }
         }
+        let paperEvidenceFrontierState:
+          | "advanced"
+          | "unchanged"
+          | "unavailable"
+          | undefined = cachedPaperEvidence?.frontier;
+        if (
+          !cachedPaperEvidence &&
+          toolResult.ok &&
+          call.name === "paper_read"
+        ) {
+          const originalContent = toolResult.content;
+          const processed = await paperEvidenceFrontier.processResult({
+            input: executedCall.input,
+            content: originalContent,
+            toolCallId: call.id,
+            resourceSignature: resourceContextPlan.resourceSignature,
+            persistOriginal: async (content) => {
+              const inputDigest = `sha256:${await sha256Text(
+                canonicalJson(executedCall.input),
+              )}`;
+              const record = createAgentToolResultHandleRecord({
+                conversationKey: request.conversationKey,
+                toolName: call.name,
+                toolCallId: call.id,
+                inputDigest,
+                resourceSignature: resourceContextPlan.resourceSignature,
+                content,
+                createdAt: this.now(),
+              });
+              if (!record) return undefined;
+              await persistToolResultHandles([record]);
+              preservedTurnHandleRecords.push(record);
+              toolResultReadAvailable = true;
+              setToolResultReadAvailability(request, true);
+              return record.handle;
+            },
+          });
+          toolResult.content = processed.content;
+          readActivityContent = processed.originalContent ?? originalContent;
+          paperEvidenceFrontierState = processed.frontier;
+        }
         toolExecutionRecords.push({
           name: toolResult.name,
           ok: toolResult.ok,
@@ -2193,19 +2277,21 @@ export class AgentRuntime {
         });
         if (toolResult.ok) {
           consecutiveToolErrors = 0;
-          pendingReadActivities.push({
-            toolName: toolResult.name,
-            toolLabel:
-              typeof executedCall.toolDefinition?.presentation?.label ===
-              "string"
-                ? executedCall.toolDefinition.presentation.label
-                : undefined,
-            input: executedCall.input,
-            content: toolResult.content,
-            artifacts: toolResult.artifacts,
-            request,
-            timestamp: this.now(),
-          });
+          if (paperEvidenceFrontierState !== "unchanged") {
+            pendingReadActivities.push({
+              toolName: toolResult.name,
+              toolLabel:
+                typeof executedCall.toolDefinition?.presentation?.label ===
+                "string"
+                  ? executedCall.toolDefinition.presentation.label
+                  : undefined,
+              input: executedCall.input,
+              content: readActivityContent,
+              artifacts: toolResult.artifacts,
+              request,
+              timestamp: this.now(),
+            });
+          }
         } else {
           const rawError = readToolError(toolResult);
           const userDenied =
@@ -2454,13 +2540,22 @@ export class AgentRuntime {
               reviewOutcome.call.name,
               reviewOutcome.call.arguments,
             );
+            const inheritedApproval = reviewOutcome.call.inheritedApproval
+              ? {
+                  ...reviewOutcome.call.inheritedApproval,
+                  approvedCallDigest: buildActionCallDigest(
+                    chainedCall.name,
+                    chainedCall.arguments,
+                  ),
+                }
+              : undefined;
             const chainedOutcome = await executeToolWorkflow(
               chainedCall,
               round,
               {
                 modelCallId: deliveryCallId,
                 suppressModelDelivery: Boolean(reviewOutcome.terminalText),
-                inheritedApproval: reviewOutcome.call.inheritedApproval,
+                inheritedApproval,
               },
             );
             if (reviewOutcome.terminalText) {

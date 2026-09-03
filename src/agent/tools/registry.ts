@@ -4,11 +4,13 @@ import type {
   AgentToolExecutionOutput,
   PreparedToolExecutionOptions,
   AgentRuntimeRequest,
+  AgentInvocationPlan,
   AgentToolCall,
   AgentToolContext,
   AgentToolDefinition,
   AgentToolEffect,
   PreparedToolExecution,
+  PreparedToolExecutionResult,
   ToolSpec,
 } from "../types";
 import { isAgentChangeJournalAvailable } from "../store/changeJournal";
@@ -29,10 +31,76 @@ import {
   parseActionConstraints,
 } from "../authorization/policy";
 import { authorizeOriginalAction } from "../authorization/policy";
-import { buildActionProposal } from "../authorization/proposal";
+import {
+  buildActionCallDigest,
+  buildActionProposal,
+} from "../authorization/proposal";
 import type { ActionProposal } from "../authorization/types";
 import { validateConfirmationResolution } from "./confirmationValidation";
 import { prepareActionExecution } from "../contracts/actionOperationEvidence";
+import { defaultInvocationPlan } from "../authorization/invocationPlan";
+import { canonicalJson } from "../services/libraryMutation/canonicalJson";
+
+type PreparedInvocationState = {
+  input: unknown;
+  plan: AgentInvocationPlan;
+  preparedAction?: PreparedActionExecution;
+  proposal: ActionProposal;
+};
+
+function isCompleteInvocationPlan(
+  value: unknown,
+): value is AgentInvocationPlan {
+  if (!value || typeof value !== "object") return false;
+  const plan = value as Record<string, unknown>;
+  return (
+    ["none", "shell", "zotero_script"].includes(String(plan.mechanism)) &&
+    ["read_only", "state_change", "ambiguous", "prohibited"].includes(
+      String(plan.impact),
+    ) &&
+    ["runtime_enforced", "statically_recognized", "unknown"].includes(
+      String(plan.assurance),
+    ) &&
+    Array.isArray(plan.domains) &&
+    Array.isArray(plan.effects) &&
+    Array.isArray(plan.targets) &&
+    Array.isArray(plan.riskSignals) &&
+    ["full", "partial", "none"].includes(String(plan.reversibility)) &&
+    typeof plan.reason === "string" &&
+    plan.reason.trim().length > 0
+  );
+}
+
+function invocationExpands(
+  displayed: AgentInvocationPlan,
+  candidate: AgentInvocationPlan,
+): boolean {
+  const impactRank = {
+    read_only: 0,
+    state_change: 1,
+    ambiguous: 2,
+    prohibited: 3,
+  } as const;
+  const assuranceRank = {
+    runtime_enforced: 0,
+    statically_recognized: 1,
+    unknown: 2,
+  } as const;
+  const reversibilityRank = { full: 0, partial: 1, none: 2 } as const;
+  const adds = <T>(before: readonly T[], after: readonly T[]) =>
+    after.some((entry) => !before.includes(entry));
+  return (
+    impactRank[candidate.impact] > impactRank[displayed.impact] ||
+    assuranceRank[candidate.assurance] > assuranceRank[displayed.assurance] ||
+    reversibilityRank[candidate.reversibility] >
+      reversibilityRank[displayed.reversibility] ||
+    candidate.mechanism !== displayed.mechanism ||
+    adds(displayed.domains, candidate.domains) ||
+    adds(displayed.effects, candidate.effects) ||
+    adds(displayed.targets, candidate.targets) ||
+    adds(displayed.riskSignals, candidate.riskSignals)
+  );
+}
 
 function createSyntheticErrorResult(
   call: AgentToolCall,
@@ -95,8 +163,60 @@ function createProposalConfirmationAction(
             },
           ]
         : []),
+      {
+        type: "text",
+        id: "invocationImpact",
+        label: "Impact and assurance",
+        value: `${proposal.invocationPlan.impact} (${proposal.invocationPlan.assurance})`,
+      },
+      ...(proposal.invocationPlan.mechanism !== "none"
+        ? [
+            {
+              type: "text" as const,
+              id: "invocationMechanism",
+              label: "Execution mechanism",
+              value: proposal.invocationPlan.mechanism,
+            },
+          ]
+        : []),
+      {
+        type: "text",
+        id: "invocationEffects",
+        label: "Effects",
+        value: proposal.effects.join(", ") || "none",
+      },
+      {
+        type: "text",
+        id: "invocationReversibility",
+        label: "Reversibility",
+        value: proposal.reversibility,
+      },
+      ...(proposal.riskSignals.length
+        ? [
+            {
+              type: "text" as const,
+              id: "invocationRisks",
+              label: "Risk signals",
+              value: proposal.riskSignals.join(", "),
+            },
+          ]
+        : []),
     ],
   };
+}
+
+function attachInvocationPlanFields(
+  action: import("../types").AgentPendingAction,
+  proposal: ActionProposal,
+): import("../types").AgentPendingAction {
+  const planAction = createProposalConfirmationAction(proposal);
+  const existingIds = new Set((action.fields || []).map((field) => field.id));
+  const planFields = planAction.fields.filter(
+    (field) => field.id.startsWith("invocation") && !existingIds.has(field.id),
+  );
+  return planFields.length
+    ? { ...action, fields: [...(action.fields || []), ...planFields] }
+    : action;
 }
 
 function withRecoveryWarning(
@@ -231,7 +351,13 @@ export class AgentToolRegistry {
   }
 
   register<TInput, TResult>(tool: AgentToolDefinition<TInput, TResult>): void {
-    this.tools.set(tool.spec.name, tool);
+    const registered = tool.planInvocation
+      ? tool
+      : {
+          ...tool,
+          planInvocation: () => defaultInvocationPlan(tool.spec.executionClass),
+        };
+    this.tools.set(tool.spec.name, registered);
   }
 
   unregister(name: string): boolean {
@@ -305,51 +431,82 @@ export class AgentToolRegistry {
       );
     }
 
-    const mutationPlan =
-      tool.spec.executionClass === "external_effect"
-        ? ((await tool.planMutation?.(validation.value, context)) ?? {
-            effect: "write" as const,
-            reversibility: "none" as const,
-            reason:
-              "This external-effect tool did not provide a durable operation-specific inverse plan.",
-          })
-        : {
-            effect: "none" as const,
-            reversibility: "none" as const,
-          };
-    const callerKind = options.callerKind || "model";
-    const enforceActionContract =
-      callerKind === "model" || Boolean(context.journalActionScope);
-    let preparedAction: PreparedActionExecution | undefined;
-    try {
-      if (tool.spec.executionClass === "external_effect") {
-        preparedAction = this.actionContracts
-          ? await this.actionContracts.prepare(tool, validation.value, context)
-          : await prepareActionExecution(tool, validation.value, context);
+    const prepareInvocationState = async (
+      input: typeof validation.value,
+      invocationContext: AgentToolContext,
+    ): Promise<PreparedInvocationState> => {
+      const plan = await (
+        tool.planInvocation ||
+        (() => defaultInvocationPlan(tool.spec.executionClass))
+      )(input, invocationContext);
+      if (!isCompleteInvocationPlan(plan)) {
+        throw new Error(
+          `${call.name} returned an incomplete AgentInvocationPlan. Execution was refused.`,
+        );
       }
+      const preparedAction =
+        tool.spec.executionClass === "external_effect"
+          ? this.actionContracts
+            ? await this.actionContracts.prepare(tool, input, invocationContext)
+            : await prepareActionExecution(tool, input, invocationContext)
+          : undefined;
+      const proposal = buildActionProposal({
+        tool,
+        input,
+        plan,
+        typedProposals: preparedAction?.proposals,
+        intentBinding: {
+          conversationKey: context.request.conversationKey,
+          conversationGeneration: context.request.conversationGeneration,
+          actionContractId: context.request.actionContract?.id,
+          userText: context.request.userText,
+        },
+      });
+      return { input, plan, preparedAction, proposal };
+    };
+    let preparedInvocation: PreparedInvocationState;
+    try {
+      preparedInvocation = await prepareInvocationState(
+        validation.value,
+        context,
+      );
     } catch (error) {
       return createSyntheticErrorResult(
         call,
         error instanceof Error ? error.message : String(error),
       );
     }
-    const proposal = buildActionProposal({
-      tool,
-      input: validation.value,
-      plan: mutationPlan,
-      typedProposals: preparedAction?.proposals,
-      intentBinding: {
-        conversationKey: context.request.conversationKey,
-        conversationGeneration: context.request.conversationGeneration,
-        actionContractId: context.request.actionContract?.id,
-        userText: context.request.userText,
-      },
-    });
+    const {
+      plan: invocationPlan,
+      preparedAction,
+      proposal,
+    } = preparedInvocation;
+    if (options.inheritedApproval) {
+      const expectedDigest = buildActionCallDigest(call.name, call.arguments);
+      const accepted =
+        options.inheritedApproval.approvedCallDigest === expectedDigest &&
+        Boolean(
+          await tool.acceptInheritedApproval?.(
+            validation.value,
+            options.inheritedApproval,
+            context,
+          ),
+        );
+      if (!accepted) {
+        return createSyntheticErrorResult(
+          call,
+          `Inherited approval for ${call.name} was refused because it was not bound to this exact invocation.`,
+        );
+      }
+    }
+    const callerKind = options.inheritedApproval
+      ? "action"
+      : options.callerKind || "model";
+    const enforceActionContract =
+      callerKind === "model" || Boolean(context.journalActionScope);
     const hasExternalEffect =
       tool.spec.executionClass === "external_effect" &&
-      proposal.effects.some((effect) =>
-        ["create", "modify", "delete", "execute", "egress"].includes(effect),
-      );
+      invocationPlan.impact !== "read_only";
     if (
       hasExternalEffect &&
       (!preparedAction?.hasExplicitAdapter || !preparedAction.proposals.length)
@@ -393,7 +550,7 @@ export class AgentToolRegistry {
     if (
       enforceActionContract &&
       context.request.actionContract &&
-      mutationPlan.effect === "write" &&
+      invocationPlan.impact !== "read_only" &&
       !this.actionContracts
     ) {
       return createSyntheticErrorResult(
@@ -468,6 +625,7 @@ export class AgentToolRegistry {
         actionEvidence?: AgentActionEvidence[];
       },
       prepared: PreparedActionExecution | undefined = preparedAction,
+      receiptInput: unknown = validation.value,
     ) => {
       let receipts =
         prepared && this.actionContracts
@@ -480,7 +638,8 @@ export class AgentToolRegistry {
           : createFallbackToolReceipts({
               toolName: call.name,
               executionClass: tool.spec.executionClass,
-              input: validation.value,
+              input: receiptInput,
+              actionContract: context.request.actionContract,
               ...params,
             });
       if (
@@ -492,7 +651,8 @@ export class AgentToolRegistry {
           ...createFallbackToolReceipts({
             toolName: call.name,
             executionClass: tool.spec.executionClass,
-            input: validation.value,
+            input: receiptInput,
+            actionContract: context.request.actionContract,
             ...params,
           }),
         ];
@@ -509,7 +669,9 @@ export class AgentToolRegistry {
     const runWithInput = async (
       resolvedInput: typeof validation.value,
       executionContext: AgentToolContext = context,
+      preparedState?: PreparedInvocationState,
     ) => {
+      let executionInvocation = preparedState;
       const lifecycleError = () => ({
         tool,
         input: resolvedInput,
@@ -517,10 +679,14 @@ export class AgentToolRegistry {
           callId: call.id,
           name: call.name,
           ok: false,
-          actionReceipts: finalizeReceipts({
-            ok: false,
-            reason: "Conversation lifecycle changed before execution.",
-          }),
+          actionReceipts: finalizeReceipts(
+            {
+              ok: false,
+              reason: "Conversation lifecycle changed before execution.",
+            },
+            executionInvocation?.preparedAction,
+            resolvedInput,
+          ),
           content: {
             error:
               "Conversation lifecycle changed before this tool could execute.",
@@ -530,32 +696,14 @@ export class AgentToolRegistry {
       if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
         return lifecycleError();
       }
-      const executionMutationPlan =
-        tool.spec.executionClass === "external_effect"
-          ? ((await tool.planMutation?.(resolvedInput, executionContext)) ?? {
-              effect: "write" as const,
-              reversibility: "none" as const,
-              reason:
-                "This external-effect tool did not provide a durable operation-specific inverse plan.",
-            })
-          : {
-              effect: "none" as const,
-              reversibility: "none" as const,
-            };
-      let executionPrepared = preparedAction;
       try {
-        if (preparedAction) {
-          executionPrepared = this.actionContracts
-            ? await this.actionContracts.prepare(
-                tool,
-                resolvedInput,
-                executionContext,
-              )
-            : await prepareActionExecution(
-                tool,
-                resolvedInput,
-                executionContext,
-              );
+        if (!executionInvocation) {
+          const reusesPreparedInvocation =
+            executionContext === context &&
+            canonicalJson(resolvedInput) === canonicalJson(validation.value);
+          executionInvocation = reusesPreparedInvocation
+            ? preparedInvocation
+            : await prepareInvocationState(resolvedInput, executionContext);
         }
       } catch (error) {
         return {
@@ -575,23 +723,34 @@ export class AgentToolRegistry {
           },
         };
       }
-      const executionProposal = buildActionProposal({
-        tool,
-        input: resolvedInput,
-        plan: executionMutationPlan,
-        typedProposals: executionPrepared?.proposals,
-        intentBinding: {
-          conversationKey: context.request.conversationKey,
-          conversationGeneration: context.request.conversationGeneration,
-          actionContractId: context.request.actionContract?.id,
-          userText: context.request.userText,
-        },
-      });
+      const executionInvocationPlan = executionInvocation.plan;
+      const executionPrepared = executionInvocation.preparedAction;
+      const executionProposal = executionInvocation.proposal;
+      const finalizeExecutionReceipts = (
+        params: Parameters<typeof finalizeReceipts>[0],
+      ) => finalizeReceipts(params, executionPrepared, resolvedInput);
       const hasExternalEffect =
         tool.spec.executionClass === "external_effect" &&
-        executionProposal.effects.some((effect) =>
-          ["create", "modify", "delete", "execute", "egress"].includes(effect),
-        );
+        executionInvocationPlan.impact !== "read_only";
+      if (hasExternalEffect && !isAgentChangeJournalAvailable()) {
+        return {
+          tool,
+          input: resolvedInput,
+          result: {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            actionReceipts: finalizeExecutionReceipts({
+              ok: false,
+              reason:
+                "The confirmed invocation requires effects, but the durable change journal is unavailable.",
+            }),
+            content: {
+              error: `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
+            },
+          },
+        };
+      }
       if (
         hasExternalEffect &&
         (!executionPrepared?.hasExplicitAdapter ||
@@ -622,7 +781,7 @@ export class AgentToolRegistry {
             callId: call.id,
             name: call.name,
             ok: false,
-            actionReceipts: finalizeReceipts({
+            actionReceipts: finalizeExecutionReceipts({
               ok: false,
               reason: `Plan mode blocked ${call.name} after confirmation input changed.`,
             }),
@@ -644,7 +803,7 @@ export class AgentToolRegistry {
             callId: call.id,
             name: call.name,
             ok: false,
-            actionReceipts: finalizeReceipts({
+            actionReceipts: finalizeExecutionReceipts({
               ok: false,
               reason: "The frozen action contract is unavailable.",
             }),
@@ -667,7 +826,7 @@ export class AgentToolRegistry {
               options.callerKind === "action" &&
               executionContext.journalActionScope,
             ),
-            concreteWrite: executionMutationPlan.effect === "write",
+            concreteWrite: executionInvocationPlan.impact !== "read_only",
             progress: context.request.actionProgress,
           },
         );
@@ -729,7 +888,7 @@ export class AgentToolRegistry {
             callId: call.id,
             name: call.name,
             ok: false,
-            actionReceipts: finalizeReceipts({
+            actionReceipts: finalizeExecutionReceipts({
               ok: false,
               reason: executionAuthorization.reason,
             }),
@@ -754,7 +913,7 @@ export class AgentToolRegistry {
               callId: call.id,
               name: call.name,
               ok: false,
-              actionReceipts: finalizeReceipts({
+              actionReceipts: finalizeExecutionReceipts({
                 ok: false,
                 reason:
                   "Action authorization could not be persisted before execution.",
@@ -795,7 +954,7 @@ export class AgentToolRegistry {
               callId: call.id,
               name: call.name,
               ok: false,
-              actionReceipts: finalizeReceipts({
+              actionReceipts: finalizeExecutionReceipts({
                 ok: false,
                 reason: error instanceof Error ? error.message : String(error),
               }),
@@ -813,8 +972,12 @@ export class AgentToolRegistry {
           return lifecycleError();
         }
         try {
+          const plannedExecutionContext = {
+            ...executionContext,
+            invocationPlan: executionInvocationPlan,
+          };
           const executionOutput = normalizeExecutionOutput(
-            await tool.execute(resolvedInput, executionContext),
+            await tool.execute(resolvedInput, plannedExecutionContext),
           );
           if (stagedGrant) stagedGrant.status = "executed";
           if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
@@ -831,13 +994,10 @@ export class AgentToolRegistry {
                 callId: call.id,
                 name: call.name,
                 ok: false,
-                actionReceipts: finalizeReceipts(
-                  {
-                    ok: false,
-                    reason: "Tool completed without an explicit write effect.",
-                  },
-                  executionPrepared,
-                ),
+                actionReceipts: finalizeExecutionReceipts({
+                  ok: false,
+                  reason: "Tool completed without an explicit write effect.",
+                }),
                 content: {
                   error: `${call.name} completed without the required explicit write effect. Its outcome is unknown; inspect current state before retrying.`,
                 },
@@ -859,18 +1019,15 @@ export class AgentToolRegistry {
                 tool.spec.executionClass === "external_effect"
                   ? executionOutput.effect
                   : undefined,
-              actionReceipts: finalizeReceipts(
-                {
-                  ok: true,
-                  effect:
-                    tool.spec.executionClass === "external_effect"
-                      ? executionOutput.effect
-                      : undefined,
-                  content: executionOutput.content,
-                  actionEvidence: executionOutput.actionEvidence,
-                },
-                executionPrepared,
-              ),
+              actionReceipts: finalizeExecutionReceipts({
+                ok: true,
+                effect:
+                  tool.spec.executionClass === "external_effect"
+                    ? executionOutput.effect
+                    : undefined,
+                content: executionOutput.content,
+                actionEvidence: executionOutput.actionEvidence,
+              }),
               content: executionOutput.content,
               artifacts: executionOutput.artifacts,
             },
@@ -887,14 +1044,10 @@ export class AgentToolRegistry {
               callId: call.id,
               name: call.name,
               ok: false,
-              actionReceipts: finalizeReceipts(
-                {
-                  ok: false,
-                  reason:
-                    error instanceof Error ? error.message : String(error),
-                },
-                executionPrepared,
-              ),
+              actionReceipts: finalizeExecutionReceipts({
+                ok: false,
+                reason: error instanceof Error ? error.message : String(error),
+              }),
               content: {
                 error: error instanceof Error ? error.message : String(error),
               },
@@ -902,7 +1055,8 @@ export class AgentToolRegistry {
           };
         }
       };
-      return executionMutationPlan.effect === "write" && options.executeWithLock
+      return executionInvocationPlan.impact !== "read_only" &&
+        options.executeWithLock
         ? options.executeWithLock(execute)
         : execute();
     };
@@ -910,7 +1064,9 @@ export class AgentToolRegistry {
     const runConfirmedExecution = async (
       resolution: import("../types").AgentConfirmationResolution,
       pendingAction: import("../types").AgentPendingAction,
-    ) => {
+      displayedInvocation: PreparedInvocationState = preparedInvocation,
+      applyToolResolution = true,
+    ): Promise<PreparedToolExecutionResult | PreparedToolExecution> => {
       const confirmation = validateConfirmationResolution(
         pendingAction,
         resolution,
@@ -918,15 +1074,19 @@ export class AgentToolRegistry {
       if (!confirmation.ok) {
         return {
           tool,
-          input: validation.value,
+          input: displayedInvocation.input,
           result: {
             callId: call.id,
             name: call.name,
             ok: false,
-            actionReceipts: finalizeReceipts({
-              ok: false,
-              reason: `Invalid confirmation for ${call.name}: ${confirmation.error}`,
-            }),
+            actionReceipts: finalizeReceipts(
+              {
+                ok: false,
+                reason: `Invalid confirmation for ${call.name}: ${confirmation.error}`,
+              },
+              displayedInvocation.preparedAction,
+              displayedInvocation.input,
+            ),
             content: {
               error: `Invalid confirmation for ${call.name}: ${confirmation.error}`,
             },
@@ -942,68 +1102,269 @@ export class AgentToolRegistry {
       ) {
         return {
           tool,
-          input: validation.value,
+          input: displayedInvocation.input,
           result: {
             callId: call.id,
             name: call.name,
             ok: false,
-            actionReceipts: finalizeReceipts({
-              ok: false,
-              cancelled: true,
-              reason: "User denied action",
-            }),
+            actionReceipts: finalizeReceipts(
+              {
+                ok: false,
+                cancelled: true,
+                reason: "User denied action",
+              },
+              displayedInvocation.preparedAction,
+              displayedInvocation.input,
+            ),
             content: { error: "User denied action" },
           },
         };
       }
-      if (planScopeFailure) {
-        approvedPlanScopeProposalDigest = proposal.payloadDigest;
-      }
-      if (tool.applyConfirmation) {
+      let resolvedInput = displayedInvocation.input as typeof validation.value;
+      if (tool.applyConfirmation && applyToolResolution) {
         const resolved = tool.applyConfirmation(
-          validation.value,
+          resolvedInput,
           confirmation.data,
           context,
         );
         if (!resolved.ok) {
           return {
             tool,
-            input: validation.value,
+            input: displayedInvocation.input,
             result: {
               callId: call.id,
               name: call.name,
               ok: false,
-              actionReceipts: finalizeReceipts({
-                ok: false,
-                reason: `Invalid confirmation input for ${call.name}: ${resolved.error}`,
-              }),
+              actionReceipts: finalizeReceipts(
+                {
+                  ok: false,
+                  reason: `Invalid confirmation input for ${call.name}: ${resolved.error}`,
+                },
+                displayedInvocation.preparedAction,
+                displayedInvocation.input,
+              ),
               content: {
                 error: `Invalid confirmation input for ${call.name}: ${resolved.error}`,
               },
             },
           };
         }
-        return runWithInput(
-          resolved.value,
-          journalUnavailable
-            ? { ...context, journalFallbackApproved: true }
-            : context,
-        );
+        resolvedInput = resolved.value;
       }
-      return runWithInput(
-        validation.value,
-        journalUnavailable
-          ? { ...context, journalFallbackApproved: true }
-          : context,
-      );
+      const executionContext = journalUnavailable
+        ? { ...context, journalFallbackApproved: true }
+        : context;
+      let confirmedInvocation: PreparedInvocationState;
+      try {
+        confirmedInvocation =
+          executionContext === context &&
+          canonicalJson(resolvedInput) ===
+            canonicalJson(displayedInvocation.input)
+            ? displayedInvocation
+            : await prepareInvocationState(resolvedInput, executionContext);
+      } catch (error) {
+        return {
+          tool,
+          input: resolvedInput,
+          result: {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            actionReceipts: finalizeReceipts(
+              {
+                ok: false,
+                reason: error instanceof Error ? error.message : String(error),
+              },
+              displayedInvocation.preparedAction,
+              resolvedInput,
+            ),
+            content: {
+              error: error instanceof Error ? error.message : String(error),
+            },
+          },
+        };
+      }
+      const confirmedHasExternalEffect =
+        tool.spec.executionClass === "external_effect" &&
+        confirmedInvocation.plan.impact !== "read_only";
+      if (confirmedHasExternalEffect && !isAgentChangeJournalAvailable()) {
+        return {
+          tool,
+          input: resolvedInput,
+          result: {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            actionReceipts: finalizeReceipts(
+              {
+                ok: false,
+                reason:
+                  "The confirmed invocation requires effects, but the durable change journal is unavailable.",
+              },
+              confirmedInvocation.preparedAction,
+              resolvedInput,
+            ),
+            content: {
+              error: `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
+            },
+          },
+        };
+      }
+      let confirmedScopeFailure: ScopeValidationFailure | null = null;
+      if (
+        confirmedInvocation.preparedAction &&
+        context.request.actionContract &&
+        this.actionContracts
+      ) {
+        confirmedScopeFailure = await this.actionContracts.validateScope(
+          context.request.actionContract,
+          confirmedInvocation.preparedAction,
+          {
+            allowPartialCoverage: Boolean(
+              options.callerKind === "action" && context.journalActionScope,
+            ),
+            concreteWrite: confirmedInvocation.plan.impact !== "read_only",
+            progress: context.request.actionProgress,
+          },
+        );
+        if (confirmedScopeFailure) {
+          const canRequestOneOffPlanApproval =
+            context.request.planContext?.phase === "executing" &&
+            !normalizeStoredActionConstraints(
+              context.request.actionContract.hardConstraints,
+            ).length &&
+            !/did not produce a typed action proposal/i.test(
+              confirmedScopeFailure.message,
+            );
+          if (!canRequestOneOffPlanApproval) {
+            return {
+              tool,
+              input: resolvedInput,
+              result: {
+                callId: call.id,
+                name: call.name,
+                ok: false,
+                actionReceipts: this.actionContracts.rejectionReceipts(
+                  context.request.actionContract,
+                  confirmedInvocation.preparedAction,
+                  confirmedScopeFailure,
+                ),
+                content: {
+                  error: confirmedScopeFailure.message,
+                  retryable: true,
+                  expectedCount: confirmedScopeFailure.expectedCount,
+                  proposedCount: confirmedScopeFailure.proposedCount,
+                  rejectedTargets: confirmedScopeFailure.rejectedTargets,
+                  missingTargets: confirmedScopeFailure.missingTargets,
+                },
+              },
+            };
+          }
+        }
+      }
+      const confirmedAuthorization =
+        callerKind === "model" &&
+        context.request.planContext?.phase === "executing" &&
+        !normalizeStoredActionConstraints(
+          context.request.actionContract?.hardConstraints,
+        ).length
+          ? ({ kind: "execute", authority: "plan_approval" } as const)
+          : callerKind === "model"
+            ? authorizeOriginalAction(confirmedInvocation.proposal, {
+                mode: writeMode,
+                userText: context.request.userText || "",
+                hasExplicitNoWrite: hasExplicitNoWriteConstraint(
+                  context.request.userText || "",
+                ),
+                constraints: [
+                  ...normalizeStoredActionConstraints(
+                    context.request.actionContract?.hardConstraints,
+                  ),
+                  ...parseActionConstraints(context.request.userText || ""),
+                ],
+              })
+            : ({ kind: "execute", authority: "auto_policy" } as const);
+      if (confirmedAuthorization.kind === "block") {
+        return {
+          tool,
+          input: resolvedInput,
+          result: {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            actionReceipts: finalizeReceipts(
+              {
+                ok: false,
+                reason: confirmedAuthorization.reason,
+              },
+              confirmedInvocation.preparedAction,
+              resolvedInput,
+            ),
+            content: { error: confirmedAuthorization.reason },
+          },
+        };
+      }
+      if (
+        invocationExpands(displayedInvocation.plan, confirmedInvocation.plan) ||
+        (confirmedScopeFailure !== null &&
+          confirmedInvocation.proposal.payloadDigest !==
+            displayedInvocation.proposal.payloadDigest)
+      ) {
+        const expandedAction = createProposalConfirmationAction({
+          ...confirmedInvocation.proposal,
+          summary: `${confirmedInvocation.proposal.summary}\n\nThe edited input expands the previously displayed targets, impact, or risk and requires a new confirmation.`,
+        });
+        return {
+          kind: "confirmation",
+          requestId: createRequestId(),
+          action: expandedAction,
+          execute: async (nextResolution) => {
+            const next = await runConfirmedExecution(
+              nextResolution,
+              expandedAction,
+              confirmedInvocation,
+              false,
+            );
+            return "kind" in next ? next : { kind: "result", execution: next };
+          },
+          deny: () => ({
+            tool,
+            input: confirmedInvocation.input,
+            result: {
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              actionReceipts: finalizeReceipts(
+                {
+                  ok: false,
+                  cancelled: true,
+                  reason: "User denied action",
+                },
+                confirmedInvocation.preparedAction,
+                confirmedInvocation.input,
+              ),
+              content: { error: "User denied action" },
+            },
+          }),
+        };
+      }
+      if (confirmedScopeFailure) {
+        approvedPlanScopeProposalDigest =
+          confirmedInvocation.proposal.payloadDigest;
+      }
+      return runWithInput(resolvedInput, executionContext, confirmedInvocation);
     };
 
     const toolWantsConfirmation =
-      (await tool.shouldRequireConfirmation?.(validation.value, context)) ??
-      tool.spec.requiresConfirmation;
+      tool.spec.interaction === "user_input"
+        ? ((await tool.shouldRequireConfirmation?.(
+            validation.value,
+            context,
+          )) ?? tool.spec.requiresConfirmation)
+        : false;
     const writeMode = getOriginalAgentPermissionMode();
     const journalUnavailable =
-      mutationPlan.effect === "write" && !isAgentChangeJournalAvailable();
+      invocationPlan.impact !== "read_only" && !isAgentChangeJournalAvailable();
     if (journalUnavailable) {
       return createSyntheticErrorResult(
         call,
@@ -1048,28 +1409,6 @@ export class AgentToolRegistry {
           : callerKind === "mcp"
             ? false
             : toolWantsConfirmation;
-    const acceptsInheritedApproval =
-      shouldRequireConfirmation &&
-      !journalUnavailable &&
-      options.inheritedApproval &&
-      Boolean(
-        await tool.acceptInheritedApproval?.(
-          validation.value,
-          options.inheritedApproval,
-          context,
-        ),
-      );
-    if (acceptsInheritedApproval) {
-      return {
-        kind: "result",
-        execution: await runWithInput(
-          validation.value,
-          journalUnavailable
-            ? { ...context, journalFallbackApproved: true }
-            : context,
-        ),
-      };
-    }
     if (shouldRequireConfirmation) {
       const requestId = createRequestId();
       const pendingAction = planScopeFailure
@@ -1080,18 +1419,26 @@ export class AgentToolRegistry {
         : tool.createPendingAction
           ? await tool.createPendingAction(validation.value, context)
           : createProposalConfirmationAction(proposal);
+      const plannedAction = attachInvocationPlanFields(pendingAction, proposal);
       const renderedAction = journalUnavailable
         ? withRecoveryWarning(
-            pendingAction,
+            plannedAction,
             "Zotero's durable journal is unavailable. If you continue, this change may not be recoverable after a restart.",
           )
-        : pendingAction;
+        : plannedAction;
       return {
         kind: "confirmation",
         requestId,
         action: renderedAction,
-        execute: (resolution) =>
-          runConfirmedExecution(resolution, renderedAction),
+        execute: async (resolution) => {
+          const executed = await runConfirmedExecution(
+            resolution,
+            renderedAction,
+          );
+          return "kind" in executed
+            ? executed
+            : { kind: "result", execution: executed };
+        },
         deny: () => ({
           tool,
           input: validation.value,
