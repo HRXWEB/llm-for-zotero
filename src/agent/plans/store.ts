@@ -300,6 +300,27 @@ export async function loadLatestPlanExecutionForPlan(
   return executionId ? loadPlanExecutionLedger(executionId) : null;
 }
 
+export async function loadLatestResumablePlanExecutionForConversation(
+  conversationKey: number,
+): Promise<PlanExecutionLedger | null> {
+  // Unit-test and non-Zotero utility callers can render/send without a host DB.
+  // Production Zotero always supplies this global; absence means there cannot
+  // be a durable execution to resume.
+  if (typeof Zotero === "undefined") return null;
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT execution_id AS executionId FROM ${PLAN_EXECUTIONS_TABLE}
+     WHERE conversation_key = ?
+       AND status IN ('pending', 'running', 'waiting_for_user', 'interrupted')
+     ORDER BY updated_at DESC LIMIT 1`,
+    [conversationKey],
+  )) as Array<{ executionId?: unknown }> | undefined;
+  const executionId =
+    typeof rows?.[0]?.executionId === "string"
+      ? rows[0].executionId.trim()
+      : "";
+  return executionId ? loadPlanExecutionLedger(executionId) : null;
+}
+
 export async function saveTaskEvidence(evidence: TaskEvidence): Promise<void> {
   decodeTaskEvidence(evidence);
   await Zotero.DB.queryAsync(

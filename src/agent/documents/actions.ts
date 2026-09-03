@@ -8,7 +8,11 @@ import {
   loadPlanDocument,
   saveDocumentActionState,
 } from "./store";
-import type { DocumentActionState, PlanDocument } from "./types";
+import {
+  getPlannedDocumentOrigin,
+  type DocumentActionState,
+  type PlanDocument,
+} from "./types";
 
 function resolveItemByKey(
   libraryID: number,
@@ -42,7 +46,7 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
   warnings: string[];
 }> {
   const document = await loadPlanDocument(documentId);
-  if (!document) throw new Error("Plan document not found");
+  if (!document) throw new Error("Document not found");
   const prior = await loadDocumentActionState(documentId);
   if (prior?.savedNote) {
     const existing = resolveItemByKey(
@@ -60,10 +64,10 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
     }
   }
 
-  const artifact = await loadPlanArtifact(
-    document.planId,
-    document.planRevision,
-  );
+  const planned = getPlannedDocumentOrigin(document);
+  const artifact = planned
+    ? await loadPlanArtifact(planned.planId, planned.planRevision)
+    : null;
   const cited = citedItems(document);
   const singleParent =
     cited.length === 1
@@ -191,7 +195,7 @@ export async function exportPlanDocumentMarkdown(
   requestedPath: string,
 ): Promise<string> {
   const document = await loadPlanDocument(documentId);
-  if (!document) throw new Error("Plan document not found");
+  if (!document) throw new Error("Document not found");
   const outputPath = /\.md$/i.test(requestedPath)
     ? requestedPath
     : `${requestedPath}.md`;

@@ -60,7 +60,10 @@ import { ActionContractService } from "../contracts/actionContract";
 import { createUpdatePlanTool } from "./plan/updatePlan";
 import { createTaskUpdateTool } from "./plan/taskUpdate";
 import { createRequestUserInputTool } from "./plan/requestUserInput";
-import { createSubmitPlanDocumentTool } from "./plan/submitPlanDocument";
+import {
+  createSubmitDocumentTool,
+  createSubmitPlanDocumentTool,
+} from "./plan/submitPlanDocument";
 import { createResearchUpdateTool } from "./plan/researchUpdate";
 import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
 import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
@@ -676,6 +679,7 @@ export function createBuiltInToolRegistry(
   registry.register(createUpdatePlanTool(deps.zoteroGateway));
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
+  registry.register(createSubmitDocumentTool(deps.zoteroGateway));
   registry.register(createSubmitPlanDocumentTool(deps.zoteroGateway));
   registry.register(createResearchUpdateTool(deps.zoteroGateway));
   registry.register(createApproveResearchExpansionTool());

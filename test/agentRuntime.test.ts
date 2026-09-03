@@ -385,6 +385,86 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("fails visibly instead of falling back to prose for a required document", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () =>
+          new MockAdapter([], {
+            streaming: false,
+            toolCalls: false,
+            multimodal: false,
+          }),
+      });
+      let failure = "";
+      try {
+        await runtime.runTurn({
+          request: {
+            conversationKey: 2,
+            libraryID: 1,
+            mode: "agent",
+            userText: "Write a report about this topic",
+          },
+        });
+      } catch (error) {
+        failure = String(error);
+      }
+
+      assert.match(failure, /does not support Agent tools/);
+      const run = [...restoreDb.runs.values()].find(
+        (entry) => Number(entry.conversationKey) === 2,
+      );
+      assert.equal(run?.status, "failed");
+      assert.match(String(run?.finalText), /cannot be produced/);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("finalizes a run row when the provider throws", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          runStep: async () => {
+            throw new Error("provider interrupted");
+          },
+        }),
+      });
+
+      let failure = "";
+      try {
+        await runtime.runTurn({
+          request: {
+            conversationKey: 3,
+            libraryID: 1,
+            mode: "agent",
+            userText: "Explain this topic",
+          },
+        });
+      } catch (error) {
+        failure = String(error);
+      }
+
+      assert.match(failure, /provider interrupted/);
+      const run = [...restoreDb.runs.values()].find(
+        (entry) => Number(entry.conversationKey) === 3,
+      );
+      assert.equal(run?.status, "failed");
+      assert.equal(run?.finalText, INTERRUPTED_AGENT_RUN_MARKER);
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("runs issue #393 from Agent request through an empty-target paper_read call", async function () {
     const restoreDb = installMockDb();
     const paperContext = {

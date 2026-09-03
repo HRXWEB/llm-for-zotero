@@ -3,6 +3,7 @@ import type {
   PlanProvider,
   PlanRuntimeContext,
 } from "../../agent/plans/types";
+import { loadLatestResumablePlanExecutionForConversation } from "../../agent/plans/store";
 
 export const PLAN_APPROVED_EVENT = "llm-plan-approved";
 export const PLAN_REVISE_EVENT = "llm-plan-revise";
@@ -105,12 +106,24 @@ export function stageApprovedPlanExecution(ledger: PlanExecutionLedger): void {
   disableComposePlanMode(ledger.conversationKey);
 }
 
-export function takePendingPlanExecution(
+export async function takePendingPlanExecution(
   conversationKey: number,
-): PlanRuntimeContext | undefined {
+): Promise<PlanRuntimeContext | undefined> {
   const context = pendingExecutions.get(conversationKey);
   if (context) pendingExecutions.delete(conversationKey);
-  return context;
+  if (context) return context;
+  const ledger =
+    await loadLatestResumablePlanExecutionForConversation(conversationKey);
+  if (!ledger) return undefined;
+  return {
+    phase: "executing",
+    planId: ledger.planId,
+    revision: ledger.revision,
+    executionId: ledger.executionId,
+    approvedDigest: ledger.planDigest,
+    activeTaskId: ledger.activeTaskId,
+    provider: ledger.provider,
+  };
 }
 
 export function restorePendingPlanExecution(

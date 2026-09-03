@@ -30,6 +30,93 @@ function acceptingActionSession(): AgentFinalActionSession {
 }
 
 describe("AgentFinalAnswerController", function () {
+  it("allows one required-document correction and then fails closed", async function () {
+    const controller = new AgentFinalAnswerController(
+      makeRequest({
+        documentOutcomePolicy: {
+          required: true,
+          documentKind: "report",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        },
+      }),
+      acceptingActionSession(),
+      [],
+    );
+
+    const first = await controller.evaluate({
+      candidateText: "A long prose answer that bypassed the artifact.",
+      canCorrect: true,
+      toolExecutionRecords: [],
+    });
+    assert.equal(first.kind, "correct");
+    if (first.kind === "correct") {
+      assert.include(first.correction, "call submit_document now");
+    }
+
+    const second = await controller.evaluate({
+      candidateText: "Another prose answer.",
+      canCorrect: true,
+      toolExecutionRecords: [],
+    });
+    assert.deepEqual(second, {
+      kind: "fail",
+      userMessage:
+        "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
+    });
+  });
+
+  it("accepts a required document only after submit_document succeeds", async function () {
+    const controller = new AgentFinalAnswerController(
+      makeRequest({
+        documentOutcomePolicy: {
+          required: true,
+          documentKind: "guide",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        },
+      }),
+      acceptingActionSession(),
+      [],
+    );
+    const decision = await controller.evaluate({
+      candidateText: "# Complete guide",
+      canCorrect: false,
+      toolExecutionRecords: [
+        { name: "submit_document", ok: true, content: { documentId: "d1" } },
+      ],
+    });
+    assert.equal(decision.kind, "accept");
+  });
+
+  it("accepts the persisted legacy submit_plan_document alias", async function () {
+    const request = makeRequest({
+      documentOutcomePolicy: {
+        required: true,
+        documentKind: "report",
+        integrityPolicy: "authored",
+        trigger: "plan_deliverable",
+      },
+    });
+    const controller = new AgentFinalAnswerController(
+      request,
+      acceptingActionSession(),
+      [],
+    );
+    const decision = await controller.evaluate({
+      candidateText: "Document body",
+      canCorrect: true,
+      toolExecutionRecords: [
+        {
+          name: "submit_plan_document",
+          ok: true,
+          content: { documentId: "legacy-d1" },
+        },
+      ],
+    });
+    assert.equal(decision.kind, "accept");
+  });
+
   it("returns an uncommitted action-contract correction before other quality gates", async function () {
     const controller = new AgentFinalAnswerController(
       makeRequest(),

@@ -1,4 +1,5 @@
 import type { ResearchCoverageStatus } from "../research/types";
+import type { SkillRoutingReceipt } from "../skills/routingTypes";
 
 export const PLAN_DOCUMENT_MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
 export const PLAN_DOCUMENT_ASSET_MAX_BYTES = 25 * 1024 * 1024;
@@ -23,6 +24,20 @@ export type DocumentSpec = Readonly<{
     styleTitle: string;
     locale: string;
   }>;
+}>;
+
+export type DocumentIntegrityPolicy = "research_grounded" | "authored";
+
+export type DocumentOutcomePolicy = Readonly<{
+  required: boolean;
+  documentKind: DocumentSpec["kind"];
+  integrityPolicy: DocumentIntegrityPolicy;
+  trigger:
+    | "plan_deliverable"
+    | "literature_review_skill"
+    | "literature_review_intent"
+    | "document_intent"
+    | "none";
 }>;
 
 export type PlanCitationSource = Readonly<{
@@ -123,16 +138,10 @@ export type PlanVerifiedQuote = Readonly<{
   }>;
 }>;
 
-export type PlanDocument = Readonly<{
-  version: 1;
+type DocumentArtifactFields = Readonly<{
   documentId: string;
   documentVersion: number;
-  planId: string;
-  planRevision: number;
-  executionId: string;
   conversationKey: number;
-  parentTaskId: string;
-  contractDigest: string;
   title: string;
   visibleMarkdown: string;
   visibleHtml: string;
@@ -145,6 +154,67 @@ export type PlanDocument = Readonly<{
   contentHash: string;
   createdAt: number;
 }>;
+
+export type LegacyPlanDocument = DocumentArtifactFields &
+  Readonly<{
+    version: 1;
+    planId: string;
+    planRevision: number;
+    executionId: string;
+    parentTaskId: string;
+    contractDigest: string;
+  }>;
+
+export type DocumentArtifactV2 = DocumentArtifactFields &
+  Readonly<{
+    version: 2;
+    documentKind: DocumentSpec["kind"];
+    integrityPolicy: DocumentIntegrityPolicy;
+    origin:
+      | Readonly<{
+          kind: "planned";
+          planId: string;
+          planRevision: number;
+          executionId: string;
+          parentTaskId: string;
+          contractDigest: string;
+        }>
+      | Readonly<{
+          kind: "direct";
+          runId: string;
+          sourceMessageTimestamp: number;
+          routingReceipt?: SkillRoutingReceipt;
+          /** @deprecated Compatibility with early DocumentArtifactV2 drafts. */
+          skillRoutingReceiptHash?: string;
+        }>;
+  }>;
+
+export type DocumentArtifact = LegacyPlanDocument | DocumentArtifactV2;
+
+/** Compatibility name retained while Plan-specific callers migrate. */
+export type PlanDocument = DocumentArtifact;
+
+export function getPlannedDocumentOrigin(document: DocumentArtifact):
+  | Readonly<{
+      planId: string;
+      planRevision: number;
+      executionId: string;
+      parentTaskId: string;
+      contractDigest: string;
+    }>
+  | undefined {
+  return document.version === 1
+    ? {
+        planId: document.planId,
+        planRevision: document.planRevision,
+        executionId: document.executionId,
+        parentTaskId: document.parentTaskId,
+        contractDigest: document.contractDigest,
+      }
+    : document.origin.kind === "planned"
+      ? document.origin
+      : undefined;
+}
 
 export type DocumentActionState = Readonly<{
   version: 1;

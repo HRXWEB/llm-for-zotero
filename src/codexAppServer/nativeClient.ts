@@ -31,6 +31,7 @@ import {
   registerScopedZoteroMcpScope,
   resolveConversationScopeToken,
   setActiveZoteroMcpScope,
+  updateScopedZoteroMcpScope,
   type ZoteroMcpActiveScope,
   type ZoteroMcpToolActivityEvent,
 } from "../agent/mcp/server";
@@ -101,6 +102,12 @@ export {
   resolveCodexNativeRuntimeCwd,
 } from "./runtimeCwd";
 import { getCanonicalSkillFilePath } from "../agent/skills/nativeSkillPaths";
+import { resolveDocumentOutcomePolicy } from "../agent/documents/outcomePolicy";
+import {
+  loadLatestDocumentForRun,
+  loadLatestPlanDocumentForExecution,
+} from "../agent/documents/store";
+import { loadPlanArtifact } from "../agent/plans/store";
 import { areEquivalentLocalPaths } from "../utils/localPath";
 import {
   acquireLocalDocumentPathLease,
@@ -168,9 +175,20 @@ export function resetCodexNativePathSafetyStateForTests(
 export type CodexNativeTurnResult = {
   text: string;
   threadId: string;
+  turnId?: string;
+  documentId?: string;
   resumed: boolean;
   diagnostics?: CodexNativeDiagnostics;
 };
+
+function buildNativeDocumentOutcomeInstruction(
+  policy: import("../agent/documents/types").DocumentOutcomePolicy,
+): string {
+  if (!policy.required) return "";
+  return policy.integrityPolicy === "research_grounded"
+    ? "This turn requires a first-class research-grounded document. Read Zotero sources, include Scope and limitations, use [[cite:C1]] tokens, copy documentEvidenceRefs from read tools into citation sources, and finish by calling submit_document exactly once. Ordinary prose is not a valid terminal answer."
+    : "This turn requires a first-class authored document. Produce complete structured Markdown and finish by calling submit_document exactly once. Citations are optional unless the requested content needs them; ordinary prose is not a valid terminal answer.";
+}
 
 export type CodexNativeApprovalRequest = {
   method: string;
@@ -1318,6 +1336,7 @@ function buildCodexNativeScopedMcpScope(params: {
   reasoning?: ReasoningConfig;
   planContext?: import("../agent/plans/types").PlanRuntimeContext;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
+  sourceMessageTimestamp?: number;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
   const resolvedRequest = buildCodexNativeSkillRequest({
@@ -1329,6 +1348,7 @@ function buildCodexNativeScopedMcpScope(params: {
   });
   return {
     runtimeAuthority: "codex",
+    sourceMessageTimestamp: params.sourceMessageTimestamp,
     profileSignature: params.profileSignature,
     conversationKey: params.scope.conversationKey,
     instanceID: params.scope.instanceID,
@@ -1365,6 +1385,7 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
   reasoning?: ReasoningConfig;
   planContext?: import("../agent/plans/types").PlanRuntimeContext;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
+  sourceMessageTimestamp?: number;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
   return buildCodexNativeScopedMcpScope(params);
@@ -2542,6 +2563,7 @@ export async function runCodexAppServerNativeTurn(params: {
   collaborationMode?: "default" | "plan";
   planContext?: import("../agent/plans/types").PlanRuntimeContext;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
+  sourceMessageTimestamp?: number;
   onPlanUpdated?: (event: {
     explanation?: string;
     steps: Array<{ content: string; status?: string }>;
@@ -2659,6 +2681,7 @@ export async function runCodexAppServerNativeTurn(params: {
         reasoning: params.reasoning,
         planContext: params.planContext,
         actionContract: params.actionContract,
+        sourceMessageTimestamp: params.sourceMessageTimestamp,
         skillContext,
       });
       // Raw-PDF turns always run on a fresh ephemeral thread, so they keep a
@@ -2805,6 +2828,7 @@ export async function runCodexAppServerNativeTurn(params: {
             },
           );
           let text = "";
+          let turnId = "";
           const streamRedactor = new LocalDocumentPathStreamRedactor(
             params.scope.conversationKey,
           );
@@ -2841,9 +2865,12 @@ export async function runCodexAppServerNativeTurn(params: {
                   }
                 : {}),
             });
-            const turnId = extractCodexAppServerTurnId(turnResult);
+            turnId = extractCodexAppServerTurnId(turnResult) || "";
             if (!turnId) {
               throw new Error("Codex app-server did not return a turn ID");
+            }
+            if (scopedMcp) {
+              updateScopedZoteroMcpScope(scopedMcp.token, { runId: turnId });
             }
             text = await waitForCodexAppServerTurnCompletion({
               proc,
@@ -2938,6 +2965,7 @@ export async function runCodexAppServerNativeTurn(params: {
           return {
             text: redactTerminalText(text),
             threadId: args.thread.threadId,
+            turnId,
             resumed: args.thread.resumed,
             diagnostics: redactedDiagnostics,
           };
@@ -2977,6 +3005,44 @@ export async function runCodexAppServerNativeTurn(params: {
                 skillContext,
               })
             : { matchedSkillIds: [], instructionBlock: "" };
+        const documentRequest =
+          "request" in resolvedSkills
+            ? resolvedSkills.request
+            : buildCodexNativeSkillRequest({
+                scope: scopeWithProfile,
+                userText: latestUserText,
+                model: params.model,
+                apiBase: params.codexPath,
+                skillContext,
+              });
+        documentRequest.planContext = params.planContext;
+        documentRequest.actionContract = params.actionContract;
+        const approvedPlanArtifact =
+          params.planContext?.phase === "executing"
+            ? await loadPlanArtifact(
+                params.planContext.planId,
+                params.planContext.revision,
+              )
+            : null;
+        const plannedSpec =
+          approvedPlanArtifact?.contract?.deliverable.kind === "document"
+            ? approvedPlanArtifact.contract.deliverable.spec
+            : undefined;
+        const documentOutcomePolicy = resolveDocumentOutcomePolicy({
+          request: documentRequest,
+          matchedSkillIds: resolvedSkills.matchedSkillIds,
+          plannedDocumentKind: plannedSpec?.kind,
+          plannedResearch: Boolean(
+            approvedPlanArtifact?.contract?.investigation,
+          ),
+        });
+        documentRequest.documentOutcomePolicy = documentOutcomePolicy;
+        scopedMcpScope.documentOutcomePolicy = documentOutcomePolicy;
+        if (scopedMcp) {
+          updateScopedZoteroMcpScope(scopedMcp.token, {
+            documentOutcomePolicy,
+          });
+        }
         const nativeSkillInputResolution = useNativeSkillInputs
           ? await resolveCodexNativeSkillInputItems({
               proc,
@@ -2999,10 +3065,14 @@ export async function runCodexAppServerNativeTurn(params: {
             )}. Remove the skill selection or update/restart Codex before retrying.`,
           );
         }
-        const skillInstructionBlock =
+        const skillInstructionBlock = [
           codexNativeSkillMode === "legacy"
             ? resolvedSkills.instructionBlock
-            : "";
+            : "",
+          buildNativeDocumentOutcomeInstruction(documentOutcomePolicy),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         const activatedSkillIds = currentTurnHasLocalPdfs
           ? explicitPdfSkillIds
           : resolvedSkills.matchedSkillIds;
@@ -3257,11 +3327,47 @@ export async function runCodexAppServerNativeTurn(params: {
               resolution: nativeSkillInputResolution,
             })
           : input;
-        const result = await executePreparedThread({
+        let result = await executePreparedThread({
           thread,
           input: nativeInput,
           skillIds: activatedSkillIds,
         });
+        const loadRequiredDocument = async (
+          candidate: CodexNativeTurnResult,
+        ) =>
+          params.planContext?.phase === "executing"
+            ? loadLatestPlanDocumentForExecution(params.planContext.executionId)
+            : candidate.turnId
+              ? loadLatestDocumentForRun(candidate.turnId)
+              : null;
+        let document = documentOutcomePolicy.required
+          ? await loadRequiredDocument(result)
+          : null;
+        if (documentOutcomePolicy.required && !document) {
+          result = await executePreparedThread({
+            thread,
+            input: [
+              {
+                type: "text",
+                text: "Host correction: this turn requires a finalized document artifact. Complete the requested document now and call the scoped Zotero submit_document tool exactly once. Do not return ordinary answer prose.",
+              },
+            ],
+            skillIds: activatedSkillIds,
+          });
+          document = await loadRequiredDocument(result);
+        }
+        if (documentOutcomePolicy.required && !document) {
+          throw new Error(
+            "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
+          );
+        }
+        if (document) {
+          result = {
+            ...result,
+            text: document.visibleMarkdown,
+            documentId: document.documentId,
+          };
+        }
         if (rawPdfMode && storedThreadId) {
           try {
             await proc.sendRequest("thread/archive", {

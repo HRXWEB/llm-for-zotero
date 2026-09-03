@@ -59,11 +59,11 @@ Prefer these sections unless the approved document contract says otherwise:
 6. Conclusion
 7. Scope and limitations
 
-In Plan mode, finish with `submit_plan_document`:
+In Agent mode, the literature-review outcome is always a document. Finish with `submit_document` whether or not Plan mode is active:
 
 - Write internal citation tokens such as `[[cite:C1]]` and provide item-key/evidence mappings.
 - Never hand-format author-year citations or References. Zotero's centralized CSL service resolves both with the approved style and locale.
 - Cite only frozen-corpus items backed by persisted evidence. Direct quotations also require strict quote verification.
 - Do not ask afterward whether to save a note. The finalized document card owns Copy Markdown, Save Note, Export, and Expand actions.
 
-Outside Plan mode, answer in chat using the same thematic structure and the ordinary chat ResearchPolicy profile. State the actual coverage frontier and limitations; never imply exhaustive review from sampled snippets.
+Outside Plan mode, use the ordinary ResearchPolicy profile, copy the host-issued evidence IDs returned by read tools into every citation mapping, and state the actual coverage frontier and limitations. Never imply exhaustive review from sampled snippets.

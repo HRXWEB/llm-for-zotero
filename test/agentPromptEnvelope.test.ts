@@ -132,7 +132,7 @@ describe("agent prompt envelope", function () {
       prompt,
       "Required sections: Findings; Scope and limitations",
     );
-    assert.include(prompt, "submit_plan_document.title must match");
+    assert.include(prompt, "submit_document.title must match");
   });
 
   it("distinguishes omitted transcript history from an explicit empty override", async function () {

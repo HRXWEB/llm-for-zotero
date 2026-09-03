@@ -37,7 +37,11 @@ import type {
   AgentActionReceipt,
   AgentToolActionDescriptor,
 } from "./contracts/types";
-import type { PlanEvent, PlanRuntimeContext } from "./plans/types";
+import type {
+  PlanEvent,
+  PlanRuntimeContext,
+  TrustedReadObservation,
+} from "./plans/types";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
 
 export type {
@@ -457,6 +461,8 @@ export type AgentEvent =
       type: "final";
       text: string;
       /** Immutable host-finalized document rendered for this visible answer. */
+      documentId?: string;
+      /** @deprecated Legacy Plan-only field. */
       planDocumentId?: string;
       answerStartedAt?: number;
       webSourceAnchors?: WebSourceAnchor[];
@@ -616,6 +622,8 @@ export type ExhaustiveReadBackend =
  */
 export type ClassifiedTurnIntent = {
   retrievalIntent: "enumerate" | "verify" | "summarize" | "none";
+  deliverableIntent?: "chat" | "document" | "unspecified";
+  documentKind?: import("./documents/types").DocumentSpec["kind"];
   paperTargetIntent?: "active" | "added" | "all_visible" | "unspecified";
   externalSearchIntent?: "none" | "web" | "literature" | "both";
   wantedSections: Array<"methods" | "results" | "limitations">;
@@ -638,6 +646,12 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
+  /** Host-resolved visible outcome contract for this Agent turn. */
+  documentOutcomePolicy?: import("./documents/types").DocumentOutcomePolicy;
+  /** Host-issued read attestations available to a direct document finalizer. */
+  documentReadObservations?: readonly TrustedReadObservation[];
+  /** Host-observed tool artifacts eligible for direct document embedding. */
+  documentArtifactObservations?: readonly AgentToolArtifact[];
   item?: Zotero.Item | null;
   history?: ChatMessage[];
   authMode?: ModelProviderAuthMode;
@@ -726,6 +740,8 @@ export type AgentRuntimeOutcome =
       kind: "completed";
       runId: string;
       text: string;
+      documentId?: string;
+      /** @deprecated Legacy Plan-only field. */
       planDocumentId?: string;
       usedFallback: false;
     }
@@ -1023,12 +1039,16 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
   ) =>
     | {
         finalText: string;
+        documentId?: string;
+        /** @deprecated Legacy Plan-only field. */
         planDocumentId?: string;
         providerTranscript: "tool_only";
       }
     | null
     | Promise<{
         finalText: string;
+        documentId?: string;
+        /** @deprecated Legacy Plan-only field. */
         planDocumentId?: string;
         providerTranscript: "tool_only";
       } | null>;

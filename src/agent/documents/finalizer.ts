@@ -21,7 +21,11 @@ import type {
 } from "../research/types";
 import { getResearchItemFingerprints } from "../research/scopeSnapshot";
 import type { ZoteroGateway } from "../services/zoteroGateway";
-import { formatPlanDocumentCitations } from "./citationService";
+import {
+  formatDocumentCitations,
+  formatPlanDocumentCitations,
+  type DocumentCitationEvidence,
+} from "./citationService";
 import {
   PLAN_DOCUMENT_ASSET_MAX_BYTES,
   PLAN_DOCUMENT_ASSETS_MAX_BYTES,
@@ -32,10 +36,12 @@ import {
   type PlanDocumentAsset,
   type PlanDocumentOutboxRecord,
   type PlanVerifiedQuote,
+  getPlannedDocumentOrigin,
 } from "./types";
 import {
   listPlanDocumentOutboxForConversation,
   loadLatestPlanDocumentForExecution,
+  loadLatestDocumentForRun,
   loadPlanDocument,
   loadPlanDocumentOutbox,
   markPlanDocumentDelivered,
@@ -43,7 +49,16 @@ import {
   nextPlanDocumentVersion,
   savePlanDocumentInTransaction,
 } from "./store";
-import type { PlanExecutionLedger, TaskEvidence } from "../plans/types";
+import type {
+  PlanExecutionLedger,
+  TaskEvidence,
+  TrustedReadObservation,
+} from "../plans/types";
+import {
+  assertTaskCompletionEvidence,
+  planExecutionCoordinator,
+} from "../plans/coordinator";
+import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
 
 export type SubmitPlanDocumentInput = Readonly<{
   title: string;
@@ -113,7 +128,10 @@ function validateVisibleDocumentPrivacy(markdown: string): void {
   }
 }
 
-function validateAssets(assets: readonly PlanDocumentAsset[]): void {
+function validateAssets(
+  assets: readonly PlanDocumentAsset[],
+  requireEvidence = true,
+): void {
   let total = 0;
   const ids = new Set<string>();
   for (const asset of assets) {
@@ -152,6 +170,7 @@ function validateAssets(assets: readonly PlanDocumentAsset[]): void {
       throw new Error(`Document asset ${asset.assetId} requires a caption`);
     }
     if (
+      requireEvidence &&
       asset.provenance.origin === "generated" &&
       !asset.provenance.evidenceRefs.length
     ) {
@@ -408,6 +427,34 @@ function addEvidenceToLedger(
   };
 }
 
+async function assertPlanDocumentPredecessorsComplete(
+  ledger: PlanExecutionLedger,
+  documentTaskId: string,
+): Promise<void> {
+  const otherTasks = ledger.tasks.filter(
+    (entry) => entry.taskId !== documentTaskId,
+  );
+  const unresolvedTasks = otherTasks.filter(
+    (entry) =>
+      entry.status !== "completed" &&
+      !(entry.kind === "required_step" && entry.status === "skipped") &&
+      !(entry.kind === "supporting_child" && entry.status === "cancelled"),
+  );
+  if (unresolvedTasks.length) {
+    throw new Error(
+      "The formal document must be the final active plan task after all other approved work is verified complete",
+    );
+  }
+  for (const completedTask of otherTasks.filter(
+    (entry) => entry.status === "completed",
+  )) {
+    assertTaskCompletionEvidence(
+      completedTask,
+      await listTaskEvidence(ledger.executionId, completedTask.taskId),
+    );
+  }
+}
+
 export class PlanDocumentFinalizer {
   constructor(private readonly gateway: ZoteroGateway) {}
 
@@ -424,6 +471,17 @@ export class PlanDocumentFinalizer {
       params.executionId,
     );
     if (priorDocument) {
+      const priorOrigin = getPlannedDocumentOrigin(priorDocument);
+      if (
+        !priorOrigin ||
+        priorOrigin.executionId !== ledger.executionId ||
+        priorOrigin.parentTaskId !== params.activeTaskId
+      ) {
+        throw new Error(
+          "The prior document does not belong to the active Plan task",
+        );
+      }
+      await assertPlanDocumentPredecessorsComplete(ledger, params.activeTaskId);
       const priorOutbox = await loadPlanDocumentOutbox(
         priorDocument.documentId,
       );
@@ -513,18 +571,7 @@ export class PlanDocumentFinalizer {
     ) {
       throw new Error("Research coverage is not terminal yet");
     }
-    const otherOpenTasks = ledger.tasks.filter(
-      (entry) =>
-        entry.taskId !== task.taskId &&
-        !["completed", "skipped", "cancelled", "blocked", "failed"].includes(
-          entry.status,
-        ),
-    );
-    if (otherOpenTasks.length) {
-      throw new Error(
-        "The formal document must be the final active plan task after all other approved work is terminal",
-      );
-    }
+    await assertPlanDocumentPredecessorsComplete(ledger, task.taskId);
     const corpusSnapshot = artifact.contract.investigation?.scopeSnapshot
       ? await listScopeSnapshotItems(
           artifact.contract.investigation.scopeSnapshot.snapshotId,
@@ -713,15 +760,22 @@ export class PlanDocumentFinalizer {
       }),
     )}`;
     const document: PlanDocument = {
-      version: 1,
+      version: 2,
       documentId,
       documentVersion,
-      planId: artifact.planId,
-      planRevision: artifact.revision,
-      executionId: ledger.executionId,
+      documentKind: spec.kind,
+      integrityPolicy: artifact.contract.investigation
+        ? "research_grounded"
+        : "authored",
+      origin: {
+        kind: "planned",
+        planId: artifact.planId,
+        planRevision: artifact.revision,
+        executionId: ledger.executionId,
+        parentTaskId: task.taskId,
+        contractDigest: artifact.contractDigest,
+      },
       conversationKey: ledger.conversationKey,
-      parentTaskId: task.taskId,
-      contractDigest: artifact.contractDigest,
       title,
       visibleMarkdown: formatted.visibleMarkdown,
       visibleHtml: renderMarkdownForNote(formatted.visibleMarkdown),
@@ -780,6 +834,318 @@ export class PlanDocumentFinalizer {
   }
 }
 
+function directDocumentSpec(params: {
+  request: AgentRuntimeRequest;
+  title: string;
+  hasCitations: boolean;
+}) {
+  const policy = params.request.documentOutcomePolicy;
+  if (!policy?.required)
+    throw new Error("This turn does not require a document");
+  const researchGrounded = policy.integrityPolicy === "research_grounded";
+  return {
+    kind: policy.documentKind,
+    title: params.title,
+    requiredSections: researchGrounded ? ["Scope and limitations"] : [],
+    requiresReferences: researchGrounded || params.hasCitations,
+    requiresCoverageSection: researchGrounded,
+    allowFigures: true,
+    citationStyle: {
+      styleId: "http://www.zotero.org/styles/apa",
+      styleTitle: "APA",
+      locale: params.request.classifiedIntent?.queryLanguage || "en-US",
+    },
+  } as const;
+}
+
+function evidenceFromObservations(
+  observations: readonly TrustedReadObservation[],
+): DocumentCitationEvidence[] {
+  return observations.map((observation) => ({
+    version: 2,
+    evidenceRef: observation.observationId,
+    observationId: observation.observationId,
+    libraryID: observation.libraryID,
+    itemKey: observation.itemKey,
+    locator:
+      observation.attachmentItemKey &&
+      observation.pageIndex !== undefined &&
+      observation.sourceFingerprint
+        ? {
+            kind: "pdf_page",
+            attachmentItemKey: observation.attachmentItemKey,
+            pageIndex: observation.pageIndex,
+            sourceFingerprint: observation.sourceFingerprint,
+          }
+        : undefined,
+  }));
+}
+
+function coverageFromObservations(
+  observations: readonly TrustedReadObservation[],
+): DocumentCoverageItem[] {
+  const byItem = new Map<string, DocumentCoverageItem>();
+  for (const observation of observations) {
+    const key = `${observation.libraryID}:${observation.itemKey}`;
+    const item =
+      Zotero.Items.getByLibraryAndKey(
+        observation.libraryID,
+        observation.itemKey,
+      ) || null;
+    const depth = observation.capabilities.includes("body")
+      ? "body"
+      : observation.capabilities.includes("abstract")
+        ? "abstract"
+        : observation.capabilities.includes("metadata")
+          ? "metadata"
+          : "none";
+    const prior = byItem.get(key);
+    const rank = { none: 0, metadata: 1, abstract: 2, body: 3 } as const;
+    if (prior && rank[prior.evidenceDepth] >= rank[depth]) continue;
+    byItem.set(key, {
+      libraryID: observation.libraryID,
+      itemKey: observation.itemKey,
+      title:
+        String(
+          item?.getField?.("title") || item?.getDisplayTitle?.() || "",
+        ).trim() || undefined,
+      status: "included",
+      evidenceDepth: depth,
+    });
+  }
+  return [...byItem.values()];
+}
+
+function normalizeAssetHash(value: string | undefined): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^sha256:/, "");
+}
+
+function validateDirectAssetProvenance(params: {
+  assets: readonly PlanDocumentAsset[];
+  artifacts: readonly AgentToolArtifact[];
+  observations: readonly TrustedReadObservation[];
+  researchGrounded: boolean;
+}): void {
+  const observationIds = new Set(
+    params.observations.map((entry) => entry.observationId),
+  );
+  for (const asset of params.assets) {
+    const artifact = params.artifacts.find(
+      (entry) =>
+        entry.kind === "image" &&
+        entry.storedPath === asset.durablePath &&
+        entry.mimeType.toLowerCase() === asset.mimeType.toLowerCase() &&
+        (!entry.contentHash ||
+          normalizeAssetHash(entry.contentHash) ===
+            normalizeAssetHash(asset.contentHash)),
+    );
+    if (!artifact) {
+      throw new Error(
+        `Document asset ${asset.assetId} was not emitted by a successful host tool call`,
+      );
+    }
+    if (asset.provenance.origin === "generated") {
+      if (
+        params.researchGrounded &&
+        asset.provenance.evidenceRefs.some((ref) => !observationIds.has(ref))
+      ) {
+        throw new Error(
+          `Generated asset ${asset.assetId} has an invalid evidence reference`,
+        );
+      }
+      continue;
+    }
+    const provenance = asset.provenance;
+    const sourceObservation = params.observations.some(
+      (entry) =>
+        entry.libraryID === provenance.libraryID &&
+        entry.itemKey === provenance.itemKey &&
+        entry.attachmentItemKey === provenance.attachmentItemKey &&
+        entry.sourceFingerprint === provenance.sourceFingerprint &&
+        entry.pageIndex === provenance.pageIndex &&
+        entry.capabilities.includes("figure"),
+    );
+    if (!sourceObservation) {
+      throw new Error(
+        `Extracted asset ${asset.assetId} is not backed by a host-verified figure observation`,
+      );
+    }
+  }
+}
+
+export class DirectDocumentFinalizer {
+  constructor(private readonly gateway: ZoteroGateway) {}
+
+  async finalize(params: {
+    request: AgentRuntimeRequest;
+    runId: string;
+    input: SubmitPlanDocumentInput;
+    now?: number;
+  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
+    const policy = params.request.documentOutcomePolicy;
+    if (
+      !policy?.required ||
+      params.request.planContext?.phase === "executing"
+    ) {
+      throw new Error("Direct document finalization is not authorized");
+    }
+    const prior = await loadLatestDocumentForRun(params.runId);
+    if (prior) {
+      const priorOutbox = await loadPlanDocumentOutbox(prior.documentId);
+      if (!priorOutbox)
+        throw new Error("The document exists without its outbox");
+      return { document: prior, outbox: priorOutbox };
+    }
+    const now = params.now ?? Date.now();
+    const title = params.input.title.trim();
+    if (!title) throw new Error("Document title is required");
+    if (utf8Bytes(params.input.markdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES) {
+      throw new Error("Document Markdown exceeds the 2 MiB limit");
+    }
+    const observations = params.request.documentReadObservations || [];
+    const researchGrounded = policy.integrityPolicy === "research_grounded";
+    if (
+      researchGrounded &&
+      !observations.some((entry) =>
+        entry.capabilities.some((capability) =>
+          ["abstract", "body", "figure", "quote"].includes(capability),
+        ),
+      )
+    ) {
+      throw new Error(
+        "A literature-review document requires host-verified abstract or body evidence",
+      );
+    }
+    if (researchGrounded && !params.input.citations.length) {
+      throw new Error(
+        "A literature-review document requires grounded citations",
+      );
+    }
+    const spec = directDocumentSpec({
+      request: params.request,
+      title,
+      hasCitations: params.input.citations.length > 0,
+    });
+    validateSections({
+      markdown: params.input.markdown,
+      requiredSections: spec.requiredSections,
+      requiresCoverageSection: spec.requiresCoverageSection,
+    });
+    if (
+      !researchGrounded &&
+      collectHeadings(params.input.markdown).size === 0
+    ) {
+      throw new Error("A document must contain at least one Markdown heading");
+    }
+    validateVisibleDocumentPrivacy(params.input.markdown);
+    validateAssets(params.input.assets, researchGrounded);
+    validateDirectAssetProvenance({
+      assets: params.input.assets,
+      artifacts: params.request.documentArtifactObservations || [],
+      observations,
+      researchGrounded,
+    });
+    if (
+      params.input.groundingReviewed === "passed_with_limitations" &&
+      !params.input.groundingIssues.length
+    ) {
+      throw new Error(
+        "A grounding review with limitations must record the detected issues",
+      );
+    }
+    if (params.input.quotes.length) {
+      throw new Error(
+        "Direct document quote mappings are not yet supported; paraphrase with a grounded citation instead",
+      );
+    }
+    const evidence = evidenceFromObservations(observations);
+    const corpus = researchGrounded
+      ? coverageFromObservations(observations)
+      : params.input.citations.flatMap((cluster) => cluster.sources);
+    const formatted = formatDocumentCitations({
+      gateway: this.gateway,
+      draftMarkdown: params.input.markdown,
+      clusters: params.input.citations,
+      corpus,
+      evidence,
+      spec,
+      requireEvidence: researchGrounded,
+    });
+    const durableAssets = await materializePlanDocumentAssets(
+      params.input.assets,
+    );
+    const coverageItems = researchGrounded
+      ? coverageFromObservations(observations)
+      : [];
+    const validation: PlanDocument["validation"] = {
+      integrityValidated: true,
+      groundingReviewed: researchGrounded
+        ? params.input.groundingReviewed
+        : "not_run",
+      quoteVerified: "not_applicable",
+      issues: [...params.input.groundingIssues],
+    };
+    const documentId = `${params.runId}:document:1`;
+    const contentHash = `sha256:${await sha256Text(
+      canonicalJson({
+        title,
+        markdown: formatted.visibleMarkdown,
+        citations: formatted.citationBundle,
+        assets: durableAssets,
+        coverageItems,
+        validation,
+      }),
+    )}`;
+    const document: PlanDocument = {
+      version: 2,
+      documentId,
+      documentVersion: 1,
+      documentKind: policy.documentKind,
+      integrityPolicy: policy.integrityPolicy,
+      origin: {
+        kind: "direct",
+        runId: params.runId,
+        sourceMessageTimestamp:
+          Number(params.request.metadata?.sourceMessageTimestamp) || now,
+        routingReceipt: params.request.skillRoutingReceipt,
+        skillRoutingReceiptHash:
+          params.request.skillRoutingReceipt?.routerIdentityHash,
+      },
+      conversationKey: params.request.conversationKey,
+      title,
+      visibleMarkdown: formatted.visibleMarkdown,
+      visibleHtml: renderMarkdownForNote(formatted.visibleMarkdown),
+      citationBundle: formatted.citationBundle,
+      verifiedQuotes: [],
+      assets: durableAssets,
+      coverageStatus: researchGrounded ? "partial" : undefined,
+      coverageItems,
+      validation,
+      contentHash,
+      createdAt: now,
+    };
+    const outbox: PlanDocumentOutboxRecord = {
+      version: 1,
+      outboxId: `${documentId}:message`,
+      documentId,
+      conversationKey: document.conversationKey,
+      messageTimestamp: now,
+      visibleMarkdown: document.visibleMarkdown,
+      status: "pending",
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await Zotero.DB.executeTransaction(async () => {
+      await savePlanDocumentInTransaction({ document, outbox });
+    });
+    return { document, outbox };
+  }
+}
+
 export async function attachPublishedDocumentEvidence(params: {
   document: PlanDocument;
   deliveredAt?: number;
@@ -787,10 +1153,14 @@ export async function attachPublishedDocumentEvidence(params: {
   alreadyInTransaction?: boolean;
 }): Promise<PlanExecutionLedger> {
   const now = params.deliveredAt ?? Date.now();
-  const ledger = await loadPlanExecutionLedger(params.document.executionId);
+  const origin = getPlannedDocumentOrigin(params.document);
+  if (!origin) {
+    throw new Error("Direct documents do not have Plan publication evidence");
+  }
+  const ledger = await loadPlanExecutionLedger(origin.executionId);
   if (!ledger) throw new Error("Plan execution ledger not found");
   const task = ledger.tasks.find(
-    (entry) => entry.taskId === params.document.parentTaskId,
+    (entry) => entry.taskId === origin.parentTaskId,
   );
   const requirement = task?.completionRequirements?.find(
     (entry) => entry.kind === "document_published",
@@ -865,10 +1235,31 @@ export async function deliverPendingPlanDocumentMessage(params: {
     document.visibleMarkdown !== outbox.visibleMarkdown
   ) {
     throw new Error(
-      "Pending plan document does not match the persisted assistant message",
+      "Pending document does not match the persisted assistant message",
     );
   }
-  if (outbox.status === "delivered") return document;
+  const origin = getPlannedDocumentOrigin(document);
+  if (outbox.status === "delivered") {
+    // Recover histories produced before delivery and the terminal task
+    // transition became one transaction. A crash in that old gap left the
+    // document visible while its progress ledger remained non-terminal.
+    if (origin) {
+      const ledger = await loadPlanExecutionLedger(origin.executionId);
+      const task = ledger?.tasks.find(
+        (entry) => entry.taskId === origin.parentTaskId,
+      );
+      if (task?.status === "in_progress") {
+        await planExecutionCoordinator.requestTransition({
+          executionId: origin.executionId,
+          taskId: origin.parentTaskId,
+          toStatus: "completed",
+          evidenceIds: task.evidenceIds,
+          requestedBy: "host",
+        });
+      }
+    }
+    return document;
+  }
   if (outbox.status !== "pending") return null;
   await Zotero.DB.executeTransaction(async () => {
     await markPlanDocumentDelivered({
@@ -876,25 +1267,30 @@ export async function deliverPendingPlanDocumentMessage(params: {
       deliveredAt: Date.now(),
       messageTimestamp: params.messageTimestamp,
     });
-    await attachPublishedDocumentEvidence({
-      document,
-      messageTimestamp: params.messageTimestamp,
-      alreadyInTransaction: true,
-    });
+    if (origin) {
+      await attachPublishedDocumentEvidence({
+        document,
+        messageTimestamp: params.messageTimestamp,
+        alreadyInTransaction: true,
+      });
+      const ledger = await loadPlanExecutionLedger(origin.executionId);
+      const task = ledger?.tasks.find(
+        (entry) => entry.taskId === origin.parentTaskId,
+      );
+      if (task?.status === "in_progress") {
+        await planExecutionCoordinator.requestTransition(
+          {
+            executionId: origin.executionId,
+            taskId: origin.parentTaskId,
+            toStatus: "completed",
+            evidenceIds: task.evidenceIds,
+            requestedBy: "host",
+          },
+          Date.now(),
+          { alreadyInTransaction: true },
+        );
+      }
+    }
   });
-  const { planExecutionCoordinator } = await import("../plans/coordinator");
-  const ledger = await loadPlanExecutionLedger(document.executionId);
-  const task = ledger?.tasks.find(
-    (entry) => entry.taskId === document.parentTaskId,
-  );
-  if (task?.status === "in_progress") {
-    await planExecutionCoordinator.requestTransition({
-      executionId: document.executionId,
-      taskId: document.parentTaskId,
-      toStatus: "completed",
-      evidenceIds: task.evidenceIds,
-      requestedBy: "host",
-    });
-  }
   return document;
 }

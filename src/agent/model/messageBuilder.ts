@@ -225,7 +225,7 @@ function buildFullUserMessage(
               `- References required: ${approvedContract.deliverable.spec.requiresReferences ? "yes" : "no"}`,
               `- Coverage section required: ${approvedContract.deliverable.spec.requiresCoverageSection ? "yes" : "no"}`,
               `- Citation style: ${approvedContract.deliverable.spec.citationStyle.styleTitle} (${approvedContract.deliverable.spec.citationStyle.locale})`,
-              "submit_plan_document.title must match the exact approved title above.",
+              "submit_document.title must match the exact approved title above.",
             ]
           : [`Approved deliverable: ${approvedContract.deliverable.kind}.`]
         : [];

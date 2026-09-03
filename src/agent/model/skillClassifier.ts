@@ -219,6 +219,8 @@ export async function detectTurnIntent(
   }
   const classifiedIntent: ClassifiedTurnIntent = {
     retrievalIntent: routerResponse.retrievalIntent,
+    deliverableIntent: routerResponse.deliverableIntent,
+    documentKind: routerResponse.documentKind,
     paperTargetIntent: routerResponse.paperTargetIntent,
     externalSearchIntent: routerResponse.externalSearchIntent,
     wantedSections: [...routerResponse.wantedSections],
@@ -338,7 +340,9 @@ function buildClassifierPrompt(
     request.userText,
     `"""`,
     "",
-    `Reply with ONLY JSON: {"schemaVersion":${SKILL_ROUTER_SCHEMA_VERSION},"taskKind":"read|write|mixed","queryLanguage":"en","requestedScopes":["none|single-paper|paper-set|library-corpus|note|visual-input"],"selections":[{"skillId":"id","requestedScope":"single-paper","evidenceText":"exact copied text","occurrence":0}],"retrievalIntent":"enumerate|verify|summarize|none","paperTargetIntent":"active|added|all_visible|unspecified","externalSearchIntent":"none|web|literature|both","wantedSections":[]}`,
+    '• deliverableIntent: "document" only when the user explicitly asks Agent to write/create/draft a document, report, guide, manuscript, or literature review; "chat" for ordinary questions and summaries; "unspecified" only when genuinely ambiguous. Do not infer document intent from answer length.',
+    "• documentKind: for document outcomes choose research_brief, literature_review, comparison, report, guide, or custom. Omit it for chat.",
+    `Reply with ONLY JSON: {"schemaVersion":${SKILL_ROUTER_SCHEMA_VERSION},"taskKind":"read|write|mixed","queryLanguage":"en","requestedScopes":["none|single-paper|paper-set|library-corpus|note|visual-input"],"selections":[{"skillId":"id","requestedScope":"single-paper","evidenceText":"exact copied text","occurrence":0}],"retrievalIntent":"enumerate|verify|summarize|none","deliverableIntent":"chat|document|unspecified","documentKind":"research_brief|literature_review|comparison|report|guide|custom","paperTargetIntent":"active|added|all_visible|unspecified","externalSearchIntent":"none|web|literature|both","wantedSections":[]}`,
   ].join("\n");
 }
 
@@ -436,6 +440,27 @@ export function parseSkillRouterResponse(
           SkillRouterResponseV1["externalSearchIntent"]
         >)
       : undefined;
+  const deliverableIntent = ["chat", "document", "unspecified"].includes(
+    String(record.deliverableIntent),
+  )
+    ? (record.deliverableIntent as NonNullable<
+        SkillRouterResponseV1["deliverableIntent"]
+      >)
+    : undefined;
+  const documentKinds = new Set([
+    "research_brief",
+    "literature_review",
+    "comparison",
+    "report",
+    "guide",
+    "custom",
+  ]);
+  const documentKind = documentKinds.has(String(record.documentKind))
+    ? (record.documentKind as NonNullable<
+        SkillRouterResponseV1["documentKind"]
+      >)
+    : undefined;
+  if (deliverableIntent === "document" && !documentKind) return null;
   const wantedSections = Array.isArray(record.wantedSections)
     ? record.wantedSections.filter(
         (value): value is "methods" | "results" | "limitations" =>
@@ -452,6 +477,8 @@ export function parseSkillRouterResponse(
     requestedScopes,
     selections,
     retrievalIntent,
+    deliverableIntent,
+    documentKind,
     paperTargetIntent,
     externalSearchIntent,
     wantedSections,
@@ -773,6 +800,8 @@ export function parseClassifiedTurnIntent(
     retrievalIntent?: unknown;
     paperTargetIntent?: unknown;
     externalSearchIntent?: unknown;
+    deliverableIntent?: unknown;
+    documentKind?: unknown;
     wantedSections?: unknown;
     queryLanguage?: unknown;
     writeDisposition?: unknown;
@@ -797,6 +826,24 @@ export function parseClassifiedTurnIntent(
           ClassifiedTurnIntent["externalSearchIntent"]
         >)
       : undefined;
+  const deliverableIntent = ["chat", "document", "unspecified"].includes(
+    String(record.deliverableIntent),
+  )
+    ? (record.deliverableIntent as NonNullable<
+        ClassifiedTurnIntent["deliverableIntent"]
+      >)
+    : undefined;
+  const documentKind = [
+    "research_brief",
+    "literature_review",
+    "comparison",
+    "report",
+    "guide",
+    "custom",
+  ].includes(String(record.documentKind))
+    ? (record.documentKind as NonNullable<ClassifiedTurnIntent["documentKind"]>)
+    : undefined;
+  if (deliverableIntent === "document" && !documentKind) return null;
   const wantedSections = Array.isArray(record.wantedSections)
     ? record.wantedSections
         .map((value) => (typeof value === "string" ? value.trim() : ""))
@@ -822,6 +869,8 @@ export function parseClassifiedTurnIntent(
     retrievalIntent: retrievalIntent as ClassifiedTurnIntent["retrievalIntent"],
     ...(paperTargetIntent ? { paperTargetIntent } : {}),
     ...(externalSearchIntent ? { externalSearchIntent } : {}),
+    ...(deliverableIntent ? { deliverableIntent } : {}),
+    ...(documentKind ? { documentKind } : {}),
     wantedSections,
     queryLanguage,
     writeDisposition,

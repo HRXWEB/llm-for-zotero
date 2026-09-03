@@ -293,12 +293,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const requestIsActive = () =>
       deps.isRequestOwner(request.conversationKey, request.requestId) &&
       !request.signal.aborted;
-    const pendingPlanExecution = takePendingPlanExecution(
-      request.conversationKey,
-    );
-    const planContext =
-      pendingPlanExecution ||
-      getPlanningRuntimeContext(request.conversationKey);
+    let planContext = getPlanningRuntimeContext(request.conversationKey);
+    let pendingPlanExecution: Awaited<
+      ReturnType<typeof takePendingPlanExecution>
+    >;
     const shouldClearDraft = !options?.preserveInputDraft;
     let submittedInputRestored = false;
     let providerDispatchStarted = false;
@@ -319,6 +317,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         deps.onComposerDraftCleared?.();
         deps.persistDraftInput();
       }
+      pendingPlanExecution = await takePendingPlanExecution(
+        request.conversationKey,
+      );
+      planContext = pendingPlanExecution || planContext;
       deps.closeSlashMenu();
       deps.closePaperPicker();
       deps.autoLockGlobalChat();

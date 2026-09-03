@@ -65,7 +65,9 @@ export interface Message {
   timestamp: number;
   runMode?: "chat" | "agent";
   agentRunId?: string;
-  /** Session hint used to bind the exact durable document outbox row. */
+  /** Durable identity of the document artifact rendered for this message. */
+  documentId?: string;
+  /** @deprecated Session-only Plan document hint. */
   planDocumentId?: string;
   selectedText?: string;
   selectedTextExpanded?: boolean;

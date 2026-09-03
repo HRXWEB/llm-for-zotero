@@ -43,7 +43,7 @@ describe("MCP tool surface has not drifted from the registry", function () {
       "task_update",
       "undo_last_action",
       "update_plan",
-      "submit_plan_document",
+      "submit_document",
       "zotero_script",
     ];
 

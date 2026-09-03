@@ -10,6 +10,21 @@ import type {
 
 const CITATION_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
 
+export type DocumentCitationEvidence = Pick<
+  ResearchEvidenceRecord,
+  | "version"
+  | "evidenceRef"
+  | "observationId"
+  | "libraryID"
+  | "itemKey"
+  | "locator"
+>;
+
+export type DocumentCitationCorpusItem = Pick<
+  ResearchScopeSnapshotItem,
+  "libraryID" | "itemKey"
+>;
+
 function sourceKey(source: Pick<PlanCitationSource, "libraryID" | "itemKey">) {
   return `${source.libraryID}:${source.itemKey}`;
 }
@@ -56,7 +71,7 @@ function normalizeOutput(value: string): string {
 
 function validateLocator(params: {
   source: PlanCitationSource;
-  evidence: readonly ResearchEvidenceRecord[];
+  evidence: readonly DocumentCitationEvidence[];
 }): void {
   if (!params.source.locator) return;
   const trusted = params.evidence.some(
@@ -79,13 +94,14 @@ function validateLocator(params: {
   }
 }
 
-export function formatPlanDocumentCitations(params: {
+export function formatDocumentCitations(params: {
   gateway: ZoteroGateway;
   draftMarkdown: string;
   clusters: readonly PlanCitationCluster[];
-  corpus: readonly ResearchScopeSnapshotItem[];
-  evidence: readonly ResearchEvidenceRecord[];
+  corpus: readonly DocumentCitationCorpusItem[];
+  evidence: readonly DocumentCitationEvidence[];
   spec: DocumentSpec;
+  requireEvidence?: boolean;
 }): {
   visibleMarkdown: string;
   citationBundle: FormattedCitationBundle;
@@ -115,7 +131,7 @@ export function formatPlanDocumentCitations(params: {
           `Citation ${cluster.citationId} references an item outside the approved corpus`,
         );
       }
-      if (!source.evidenceRefs.length) {
+      if (params.requireEvidence !== false && !source.evidenceRefs.length) {
         throw new Error(
           `Citation ${cluster.citationId} requires at least one evidence reference`,
         );
@@ -134,7 +150,9 @@ export function formatPlanDocumentCitations(params: {
           );
         }
       }
-      validateLocator({ source, evidence: params.evidence });
+      if (params.requireEvidence !== false || source.locator) {
+        validateLocator({ source, evidence: params.evidence });
+      }
       const item = itemByLibraryAndKey(source.libraryID, source.itemKey);
       if (!item || item.isNote?.()) {
         throw new Error(
@@ -271,3 +289,6 @@ export function formatPlanDocumentCitations(params: {
     },
   };
 }
+
+/** Compatibility alias for the original Plan-only API. */
+export const formatPlanDocumentCitations = formatDocumentCitations;

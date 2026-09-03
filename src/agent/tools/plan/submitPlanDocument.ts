@@ -4,6 +4,7 @@ import type {
   AgentToolResult,
 } from "../../types";
 import {
+  DirectDocumentFinalizer,
   PlanDocumentFinalizer,
   type SubmitPlanDocumentInput,
 } from "../../documents/finalizer";
@@ -51,9 +52,6 @@ function parseSource(value: unknown, label: string): PlanCitationSource {
         requiredString(entry, `${label}.evidenceRefs[${index}]`),
       )
     : [];
-  if (!evidenceRefs.length) {
-    throw new Error(`${label}.evidenceRefs must contain trusted evidence IDs`);
-  }
   let locator: PlanCitationSource["locator"];
   if (value.locator !== undefined) {
     if (!validateObject<Record<string, unknown>>(value.locator)) {
@@ -201,7 +199,7 @@ function validateSubmitPlanDocument(
 ): AgentToolInputValidation<SubmitPlanDocumentInput> {
   try {
     if (!validateObject<Record<string, unknown>>(args)) {
-      return fail("submit_plan_document expects an object");
+      return fail("submit_document expects an object");
     }
     if (
       !Array.isArray(args.citations) ||
@@ -235,15 +233,16 @@ function validateSubmitPlanDocument(
   }
 }
 
-export function createSubmitPlanDocumentTool(
+export function createSubmitDocumentTool(
   gateway: ZoteroGateway,
 ): AgentToolDefinition<SubmitPlanDocumentInput, SubmitPlanDocumentResult> {
-  const finalizer = new PlanDocumentFinalizer(gateway);
+  const planFinalizer = new PlanDocumentFinalizer(gateway);
+  const directFinalizer = new DirectDocumentFinalizer(gateway);
   return {
     spec: {
-      name: "submit_plan_document",
+      name: "submit_document",
       description:
-        "Finalize the approved formal document. Use internal [[cite:C1]] tokens in Markdown and provide their Zotero item/evidence mappings. This terminal tool resolves CSL citations, validates provenance and coverage, and publishes the exact finalized document as the visible answer.",
+        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This terminal tool validates, persists, and publishes the exact document as the visible answer.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -273,13 +272,12 @@ export function createSubmitPlanDocumentTool(
                   items: {
                     type: "object",
                     additionalProperties: false,
-                    required: ["libraryID", "itemKey", "evidenceRefs"],
+                    required: ["libraryID", "itemKey"],
                     properties: {
                       libraryID: { type: "number" },
                       itemKey: { type: "string" },
                       evidenceRefs: {
                         type: "array",
-                        minItems: 1,
                         items: { type: "string" },
                       },
                       locator: {
@@ -354,28 +352,42 @@ export function createSubmitPlanDocumentTool(
       executionClass: "control",
       requiresConfirmation: false,
     },
-    isAvailable: (request) => request.planContext?.phase === "executing",
+    isAvailable: (request) => request.documentOutcomePolicy?.required === true,
     guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
+      matches: (request) => request.documentOutcomePolicy?.required === true,
       instruction:
-        "When the approved deliverable is a document, finish research and grounding review, then call submit_plan_document exactly once from the active document task. Write complete Markdown with the approved headings and a natural Scope and limitations section. Put [[cite:C1]] tokens at supported claims and map every token to frozen-corpus item keys and persisted evidence IDs. Use [[quote:Q1]] only for exact direct quotations and provide a quote mapping; the source PDF must be open so the host can issue a strict PDF.js location certificate. Record grounding review concerns in groundingIssues and disclose them in Scope and limitations. Do not hand-write References; the host generates them through Zotero CSL. Never place citation or quote tokens in prose outside this terminal submission.",
+        "This turn requires a document artifact, so do not stop with ordinary answer text. Finish the requested work and call submit_document exactly once. Write complete Markdown with natural headings. For a literature review include a Scope and limitations section, put [[cite:C1]] tokens at supported claims, and copy the host-issued evidence IDs returned by read tools into each citation source. For other authored documents, citations and evidence IDs are optional. Record grounding concerns in groundingIssues. Do not hand-write References; the host generates them through Zotero CSL. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
     execute: async (input, context) => {
+      const policy = context.request.documentOutcomePolicy;
+      if (!policy?.required) {
+        throw new Error("submit_document is not authorized for this turn");
+      }
       const plan = context.request.planContext;
-      if (!plan || plan.phase !== "executing") {
-        throw new Error(
-          "submit_plan_document is available only during approved execution",
-        );
-      }
-      if (!plan.activeTaskId) {
-        throw new Error("No active plan task can accept the document");
-      }
-      const { document } = await finalizer.finalize({
-        executionId: plan.executionId,
-        activeTaskId: plan.activeTaskId,
-        input,
-      });
+      const { document } =
+        plan?.phase === "executing"
+          ? await (async () => {
+              if (!plan.activeTaskId) {
+                throw new Error("No active plan task can accept the document");
+              }
+              return planFinalizer.finalize({
+                executionId: plan.executionId,
+                activeTaskId: plan.activeTaskId,
+                input,
+              });
+            })()
+          : await directFinalizer.finalize({
+              request: context.request,
+              runId:
+                context.runId ||
+                (() => {
+                  throw new Error(
+                    "Direct document run identity is unavailable",
+                  );
+                })(),
+              input,
+            });
       return {
         documentId: document.documentId,
         contentHash: document.contentHash,
@@ -395,9 +407,26 @@ export function createSubmitPlanDocumentTool(
       if (!documentId || !finalText) return null;
       return {
         finalText,
-        planDocumentId: documentId,
+        documentId,
         providerTranscript: "tool_only",
       };
     },
+  };
+}
+
+/** Legacy factory retained for tests and old integrations; new registries use
+ * submit_document exclusively. */
+export function createSubmitPlanDocumentTool(
+  gateway: ZoteroGateway,
+): AgentToolDefinition<SubmitPlanDocumentInput, SubmitPlanDocumentResult> {
+  const tool = createSubmitDocumentTool(gateway);
+  return {
+    ...tool,
+    spec: {
+      ...tool.spec,
+      name: "submit_plan_document",
+      exposure: "internal",
+    },
+    isAvailable: (request) => request.planContext?.phase === "executing",
   };
 }

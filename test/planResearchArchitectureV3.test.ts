@@ -77,7 +77,7 @@ describe("Plan Mode research architecture v3", function () {
       "The document task is incomplete",
       true,
     );
-    assert.include(correction, "Call submit_plan_document now");
+    assert.include(correction, "Call submit_document now");
     assert.include(correction, "do not try to complete");
     assert.include(correction, "host finalizer owns References");
     assert.notInclude(
@@ -164,12 +164,21 @@ describe("Plan Mode research architecture v3", function () {
       "batch up to 25 papers",
     );
     const taskUpdate = createTaskUpdateTool();
+    assert.isFalse(
+      taskUpdate.validate({
+        tasks: [
+          { taskId: "task-1", status: "completed" },
+          { taskId: "task-2", status: "in_progress" },
+        ],
+      }).ok,
+      "multi-task updates must be rejected before execution",
+    );
     assert.include(
       taskUpdate.guidance?.instruction || "",
       "include reasoningAssertion",
     );
     assert.match(
-      (taskUpdate.spec.inputSchema as any).properties.tasks.items.properties
+      (taskUpdate.spec.inputSchema as any).properties.task.properties
         .reasoningAssertion.description,
       /required when completing a reasoning task/i,
     );
@@ -789,6 +798,47 @@ describe("Plan Mode research architecture v3", function () {
         }),
       /research stage/,
     );
+  });
+
+  it("decodes direct DocumentArtifactV2 origins without inventing Plan IDs", function () {
+    const decoded = decodePlanDocument({
+      version: 2,
+      documentId: "run-1:document:1",
+      documentVersion: 1,
+      documentKind: "report",
+      integrityPolicy: "authored",
+      origin: {
+        kind: "direct",
+        runId: "run-1",
+        sourceMessageTimestamp: 10,
+      },
+      conversationKey: 1,
+      title: "Report",
+      visibleMarkdown: "# Report\n\nComplete.",
+      visibleHtml: "<h1>Report</h1><p>Complete.</p>",
+      citationBundle: {
+        clusters: [],
+        bibliographyEntries: [],
+        style: { id: "apa", title: "APA" },
+        locale: "en-US",
+      },
+      verifiedQuotes: [],
+      assets: [],
+      coverageItems: [],
+      validation: {
+        integrityValidated: true,
+        groundingReviewed: "not_run",
+        quoteVerified: "not_applicable",
+        issues: [],
+      },
+      contentHash: "sha256:document",
+      createdAt: 10,
+    });
+    assert.equal(decoded.version, 2);
+    if (decoded.version === 2) {
+      assert.equal(decoded.origin.kind, "direct");
+      assert.notProperty(decoded.origin, "planId");
+    }
   });
 
   it("keeps quote verification host-owned and deeply decodes certificates", function () {

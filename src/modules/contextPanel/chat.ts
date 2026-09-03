@@ -402,6 +402,7 @@ import {
   getAgentRunTrace,
 } from "../../agent/store/traceStore";
 import { deliverPendingPlanDocumentMessage } from "../../agent/documents/finalizer";
+import { loadDocumentIdForMessageOwner } from "../../agent/documents/store";
 import {
   applyHistoryCompression,
   scheduleLLMSummary,
@@ -1788,6 +1789,7 @@ async function publishPersistedPlanDocumentIfPresent(params: {
   text?: string;
   timestamp?: number;
   agentRunId?: string;
+  documentId?: string;
   planDocumentId?: string;
 }): Promise<void> {
   const visibleMarkdown = params.text || "";
@@ -1798,25 +1800,35 @@ async function publishPersistedPlanDocumentIfPresent(params: {
     messageTimestamp: Number.isFinite(Number(params.timestamp))
       ? Math.floor(Number(params.timestamp))
       : Date.now(),
-    documentId: params.planDocumentId,
+    documentId: params.documentId || params.planDocumentId,
   });
   if (!document) return;
+  // Delivery may complete the final durable Plan task. Re-render even when
+  // this backend has no local trace-run row so the progress card reloads the
+  // committed ledger instead of remaining at its pre-publication count.
+  refreshAllActiveConversationPanels();
   const runId = params.agentRunId?.trim();
   if (!runId) return;
   const persistedTrace = await getAgentRunTrace(runId);
   if (
     persistedTrace.events.some(
       (entry) =>
-        entry.payload.type === "plan_document_ready" &&
+        (entry.payload.type === "document_ready" ||
+          entry.payload.type === "plan_document_ready") &&
         entry.payload.documentId === document.documentId,
     )
   ) {
     return;
   }
   const event = {
-    type: "plan_document_ready" as const,
+    type: "document_ready" as const,
     documentId: document.documentId,
-    executionId: document.executionId,
+    executionId:
+      document.version === 1
+        ? document.executionId
+        : document.origin.kind === "planned"
+          ? document.origin.executionId
+          : undefined,
     title: document.title,
     contentHash: document.contentHash,
   };
@@ -1825,13 +1837,12 @@ async function publishPersistedPlanDocumentIfPresent(params: {
   if (!cached.some((entry) => entry.seq === record.seq)) {
     agentRunTraceCache.set(runId, [...cached, record]);
   }
-  refreshAllActiveConversationPanels();
 }
 
 async function updateStoredLatestAssistantMessageByConversationUnlocked(
   conversationKey: number,
   message: Parameters<typeof updateStoredLatestAssistantMessage>[1] &
-    Pick<StoredChatMessage, "planDocumentId"> & {
+    Pick<StoredChatMessage, "documentId" | "planDocumentId"> & {
       conversationGeneration?: number;
     },
   conversationSystem?: ConversationSystem | null,
@@ -1874,6 +1885,7 @@ async function updateStoredLatestAssistantMessageByConversationUnlocked(
       text: message.text,
       timestamp: message.timestamp,
       agentRunId: message.agentRunId,
+      documentId: message.documentId,
       planDocumentId: message.planDocumentId,
     });
     return;
@@ -1898,6 +1910,7 @@ async function updateStoredLatestAssistantMessageByConversationUnlocked(
       text: message.text,
       timestamp: message.timestamp,
       agentRunId: message.agentRunId,
+      documentId: message.documentId,
       planDocumentId: message.planDocumentId,
     });
     return;
@@ -1908,6 +1921,7 @@ async function updateStoredLatestAssistantMessageByConversationUnlocked(
     text: message.text,
     timestamp: message.timestamp,
     agentRunId: message.agentRunId,
+    documentId: message.documentId,
     planDocumentId: message.planDocumentId,
   });
 }
@@ -1993,6 +2007,7 @@ async function persistConversationMessage(
           text: message.text,
           timestamp: message.timestamp,
           agentRunId: message.agentRunId,
+          documentId: message.documentId,
           planDocumentId: message.planDocumentId,
         });
       }
@@ -2407,6 +2422,20 @@ export async function ensureConversationLoaded(
         PERSISTED_HISTORY_LIMIT,
         conversationSystem,
       );
+      for (const storedMessage of storedMessages) {
+        if (
+          storedMessage.role !== "assistant" ||
+          storedMessage.documentId ||
+          !Number.isFinite(storedMessage.timestamp)
+        ) {
+          continue;
+        }
+        storedMessage.documentId =
+          (await loadDocumentIdForMessageOwner({
+            conversationKey,
+            sourceMessageTimestamp: Math.floor(storedMessage.timestamp),
+          })) || undefined;
+      }
       // Recover the application-level document outbox after a crash between
       // durable message insertion and publication evidence/event delivery.
       for (const storedMessage of storedMessages) {
@@ -2416,6 +2445,8 @@ export async function ensureConversationLoaded(
           text: storedMessage.text,
           timestamp: storedMessage.timestamp,
           agentRunId: storedMessage.agentRunId,
+          documentId: storedMessage.documentId,
+          planDocumentId: storedMessage.planDocumentId,
         });
       }
       if (isFrozen()) {
@@ -3810,6 +3841,7 @@ async function finalizeCodexPlanExecution(params: {
   );
   if (document) {
     params.assistantMessage.text = document.visibleMarkdown;
+    params.assistantMessage.documentId = document.documentId;
     params.assistantMessage.planDocumentId = document.documentId;
     return;
   }
@@ -6986,7 +7018,10 @@ function createCodexNativeActivityTraceController(
       sync();
       return;
     }
-    if (event.type === "plan_document_ready") {
+    if (
+      event.type === "document_ready" ||
+      event.type === "plan_document_ready"
+    ) {
       events.push(createEvent(event));
       sync();
       return;
@@ -8522,6 +8557,8 @@ export async function retryLatestAssistantResponse(
         timestamp: assistantMessage.timestamp,
         runMode: assistantMessage.runMode,
         agentRunId: assistantMessage.agentRunId,
+        documentId: assistantMessage.documentId,
+        planDocumentId: assistantMessage.planDocumentId,
         interrupted: assistantMessage.interrupted,
         modelName: assistantMessage.modelName,
         modelEntryId: assistantMessage.modelEntryId,
@@ -8797,10 +8834,11 @@ export async function retryLatestAssistantResponse(
     if (stopRetryPreparation()) return;
     notifyProviderDispatch(body, ui, onProviderDispatch);
     const answer = isCodexNativeTurn
-      ? (
-          await runCodexAppServerNativeTurn({
+      ? await (async () => {
+          const result = await runCodexAppServerNativeTurn({
             scope: codexScope!,
             conversationGeneration,
+            sourceMessageTimestamp: retryPair.userMessage.timestamp,
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -8840,8 +8878,12 @@ export async function retryLatestAssistantResponse(
               conversationKey,
               conversationGeneration,
             }),
-          })
-        ).text
+          });
+          if (result.documentId) {
+            assistantMessage.documentId = result.documentId;
+          }
+          return result.text;
+        })()
       : await callLLMStream(
           {
             ...requestParams,
@@ -8865,7 +8907,7 @@ export async function retryLatestAssistantResponse(
       assistantMessage.generatedImages,
     ).length;
     assistantMessage.text =
-      (assistantMessage.planDocumentId
+      (assistantMessage.documentId || assistantMessage.planDocumentId
         ? assistantMessage.text
         : sanitizeText(answer)) ||
       responseStreamCoalescer?.getFullText() ||
@@ -8903,6 +8945,8 @@ export async function retryLatestAssistantResponse(
         timestamp: assistantMessage.timestamp,
         runMode: assistantMessage.runMode,
         agentRunId: assistantMessage.agentRunId,
+        documentId: assistantMessage.documentId,
+        planDocumentId: assistantMessage.planDocumentId,
         interrupted: assistantMessage.interrupted,
         modelName: assistantMessage.modelName,
         modelEntryId: assistantMessage.modelEntryId,
@@ -9645,6 +9689,7 @@ export async function editUserTurnAndRetry(opts: {
 export type BuildAgentRuntimeRequestParams = {
   conversationKey: number;
   conversationGeneration?: number;
+  sourceMessageTimestamp?: number;
   item: Zotero.Item;
   activePaperContext?: PaperContextRef;
   userText: string;
@@ -10104,6 +10149,7 @@ async function buildAgentRuntimeRequest(
     libraryID: params.item.libraryID,
     activeNoteContext: buildActiveNoteRuntimeContext(params.item),
     metadata: {
+      sourceMessageTimestamp: params.sourceMessageTimestamp,
       claudeAutoCompactEligible:
         params.effectiveRequestConfig.modelProviderLabel === "Claude Code" &&
         isClaudeAutoCompactEnabled() &&
@@ -11179,6 +11225,8 @@ export async function sendQuestion(
         timestamp: assistantMessage.timestamp,
         runMode: assistantMessage.runMode,
         agentRunId: assistantMessage.agentRunId,
+        documentId: assistantMessage.documentId,
+        planDocumentId: assistantMessage.planDocumentId,
         modelName: assistantMessage.modelName,
         modelEntryId: assistantMessage.modelEntryId,
         modelProviderLabel: assistantMessage.modelProviderLabel,
@@ -11553,6 +11601,7 @@ export async function sendQuestion(
             const planRequest = await buildAgentRuntimeRequest({
               conversationKey,
               conversationGeneration,
+              sourceMessageTimestamp: userMessage.timestamp,
               item,
               userText: shownQuestion,
               selectedTextContexts: selectedTextContextsForMessage,
@@ -11581,10 +11630,11 @@ export async function sendQuestion(
     if (await stopInactiveRequest()) return;
     notifyProviderDispatch(body, ui, opts.onProviderDispatch);
     const answer = isCodexNativeTurn
-      ? (
-          await runCodexAppServerNativeTurn({
+      ? await (async () => {
+          const result = await runCodexAppServerNativeTurn({
             scope: codexScope!,
             conversationGeneration,
+            sourceMessageTimestamp: userMessage.timestamp,
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -11628,8 +11678,12 @@ export async function sendQuestion(
               planContext: opts.planContext,
               actionContract: codexPlanActionContract,
             }),
-          })
-        ).text
+          });
+          if (result.documentId) {
+            assistantMessage.documentId = result.documentId;
+          }
+          return result.text;
+        })()
       : await callLLMStream(
           {
             ...requestParams,

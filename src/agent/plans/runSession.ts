@@ -22,7 +22,7 @@ export function buildPlanFinalCorrection(
   requiresDocument: boolean,
 ): string {
   return requiresDocument
-    ? `${failure}. This approved plan requires a published document. Do not stop with ordinary answer text and do not try to complete the document task with task_update. Call submit_plan_document now with the model-authored Markdown plus its citation and evidence mappings. If validation rejects the submission, correct the reported fields and call submit_plan_document again; the host finalizer owns References, publication evidence, and completion of the document task.`
+    ? `${failure}. This approved plan requires a published document. Do not stop with ordinary answer text and do not try to complete the document task with task_update. Call submit_document now with the model-authored Markdown plus its citation and evidence mappings. If validation rejects the submission, correct the reported fields and call submit_document again; the host finalizer owns References, publication evidence, and completion of the document task.`
     : `${failure}. Continue the approved plan. Use task_update only after the current task has verified evidence; do not claim completion from model judgment alone.`;
 }
 
@@ -225,8 +225,7 @@ export class PlanExecutionRunSession {
   }): Promise<void> {
     const plan = this.request.planContext;
     if (!plan || plan.phase !== "executing") return;
-    let ledger =
-      this.ledger || (await loadPlanExecutionLedger(plan.executionId));
+    let ledger = await loadPlanExecutionLedger(plan.executionId);
     const taskId = ledger?.activeTaskId;
     if (!ledger || !taskId) return;
     if (params.result.actionReceipts.length) {
@@ -328,8 +327,7 @@ export class PlanExecutionRunSession {
   async interrupt(reason: string): Promise<void> {
     const plan = this.request.planContext;
     if (!plan || plan.phase !== "executing") return;
-    let ledger =
-      this.ledger || (await loadPlanExecutionLedger(plan.executionId));
+    let ledger = await loadPlanExecutionLedger(plan.executionId);
     const task = ledger?.tasks.find(
       (entry) => entry.taskId === ledger?.activeTaskId,
     );
@@ -372,6 +370,7 @@ export class PlanExecutionRunSession {
       };
     }
     try {
+      this.ledger = await loadPlanExecutionLedger(plan.executionId);
       const document = await loadLatestPlanDocumentForExecution(
         plan.executionId,
       );

@@ -68,7 +68,10 @@ import {
   stageApprovedPlanExecution,
 } from "../planModeState";
 import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
-import { loadPlanDocument } from "../../../agent/documents/store";
+import {
+  loadPlanDocument,
+  loadPlanDocumentOutbox,
+} from "../../../agent/documents/store";
 import {
   exportPlanDocumentMarkdown,
   savePlanDocumentAsNote,
@@ -91,6 +94,7 @@ const INTERNAL_PLAN_TOOL_NAMES = new Set([
   "task_update",
   "request_user_input",
   "submit_plan_document",
+  "submit_document",
   "research_update",
   "approve_research_expansion",
   "approve_research_mutation",
@@ -5222,7 +5226,12 @@ function renderPlanContainer(params: {
 function getPlanDocumentId(events: AgentRunEventRecord[]): string | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index].payload;
-    if (event.type === "plan_document_ready") return event.documentId;
+    if (
+      event.type === "document_ready" ||
+      event.type === "plan_document_ready"
+    ) {
+      return event.documentId;
+    }
   }
   return null;
 }
@@ -5355,7 +5364,7 @@ async function pickMarkdownExportPath(
   if (!Constructor) throw new Error("Zotero file picker is unavailable");
   const picker = new Constructor();
   const parent = Zotero.getMainWindow?.() || doc.defaultView;
-  picker.init?.(parent, "Export plan document", picker.modeSave ?? 0);
+  picker.init?.(parent, "Export document", picker.modeSave ?? 0);
   picker.defaultString = defaultName.endsWith(".md")
     ? defaultName
     : `${defaultName}.md`;
@@ -5386,6 +5395,7 @@ async function pickMarkdownExportPath(
 function renderPlanDocumentCard(params: {
   doc: Document;
   documentId: string;
+  onReady?: () => void;
 }): HTMLElement {
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container llm-plan-document-card";
@@ -5497,12 +5507,24 @@ function renderPlanDocumentCard(params: {
     const figures = renderPlanDocumentFigures(params.doc, document);
     if (figures) root.appendChild(figures);
     if (coverage) root.appendChild(coverage);
+    params.onReady?.();
   };
 
-  void loadPlanDocument(params.documentId)
-    .then((document) => {
-      if (document) paint(document);
-      else root.textContent = "Document is unavailable";
+  void Promise.all([
+    loadPlanDocument(params.documentId),
+    loadPlanDocumentOutbox(params.documentId),
+  ])
+    .then(([document, outbox]) => {
+      if (!document) {
+        root.textContent = "Document is unavailable";
+      } else if (outbox?.status !== "delivered") {
+        // submit_document persists before the assistant message. Do not expose
+        // that durable draft as a finished outcome until message publication
+        // and (for Plans) the terminal ledger transition commit together.
+        root.textContent = "Publishing document…";
+      } else {
+        paint(document);
+      }
     })
     .catch((error) => {
       root.textContent = error instanceof Error ? error.message : String(error);
@@ -5819,15 +5841,25 @@ export function renderAgentTrace({
     wrap.appendChild(planContainer);
   }
 
-  const planDocumentId = getPlanDocumentId(events);
+  const planDocumentId =
+    message.documentId || message.planDocumentId || getPlanDocumentId(events);
   if (planDocumentId) {
     // The immutable card is the visible deliverable. The message text remains
     // byte-identical durable history and future-model context, but rendering it
     // again below the card would create two apparent answers.
     onInterleavedText?.();
-    wrap.appendChild(
-      renderPlanDocumentCard({ doc, documentId: planDocumentId }),
-    );
+    const caption = doc.createElement("p");
+    caption.className = "llm-plan-document-completion-caption";
+    caption.textContent = "Document completed and verified.";
+    caption.hidden = true;
+    const card = renderPlanDocumentCard({
+      doc,
+      documentId: planDocumentId,
+      onReady: () => {
+        caption.hidden = false;
+      },
+    });
+    wrap.append(card, caption);
   }
 
   // The rule separates the activity trace from the answer, so visible answer

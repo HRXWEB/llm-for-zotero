@@ -10,6 +10,7 @@ import type {
   PlanDocument,
   PlanDocumentOutboxRecord,
 } from "./types";
+import { getPlannedDocumentOrigin } from "./types";
 import {
   PLAN_DOCUMENT_GLOBAL_ASSETS_MAX_BYTES,
   type PlanDocumentAsset,
@@ -33,6 +34,45 @@ export const PLAN_DOCUMENT_ASSET_CLEANUP_TABLE =
 
 type JsonRow = { payloadJson?: unknown };
 
+async function createDocumentsTable(tableName: string): Promise<void> {
+  await Zotero.DB.queryAsync(
+    `CREATE TABLE IF NOT EXISTS ${tableName} (
+      document_id TEXT PRIMARY KEY,
+      origin_kind TEXT NOT NULL,
+      plan_id TEXT,
+      plan_revision INTEGER,
+      execution_id TEXT,
+      run_id TEXT,
+      conversation_key INTEGER NOT NULL,
+      parent_task_id TEXT,
+      content_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+  );
+}
+
+async function migrateDocumentsTableV2(): Promise<void> {
+  const columns = (await Zotero.DB.queryAsync(
+    `PRAGMA table_info(${PLAN_DOCUMENTS_TABLE})`,
+  )) as Array<{ name?: unknown }> | undefined;
+  if ((columns || []).some((column) => column.name === "origin_kind")) return;
+  const legacyTable = `${PLAN_DOCUMENTS_TABLE}_v1_migration`;
+  await Zotero.DB.queryAsync(
+    `ALTER TABLE ${PLAN_DOCUMENTS_TABLE} RENAME TO ${legacyTable}`,
+  );
+  await createDocumentsTable(PLAN_DOCUMENTS_TABLE);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${PLAN_DOCUMENTS_TABLE}
+      (document_id, origin_kind, plan_id, plan_revision, execution_id, run_id,
+       conversation_key, parent_task_id, content_hash, payload_json, created_at)
+     SELECT document_id, 'planned', plan_id, plan_revision, execution_id, NULL,
+            conversation_key, parent_task_id, content_hash, payload_json, created_at
+     FROM ${legacyTable}`,
+  );
+  await Zotero.DB.queryAsync(`DROP TABLE ${legacyTable}`);
+}
+
 function parse<T>(
   row: JsonRow | undefined,
   decoder: (value: unknown) => T,
@@ -43,22 +83,19 @@ function parse<T>(
 
 export async function initPlanDocumentStore(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
-    await Zotero.DB.queryAsync(
-      `CREATE TABLE IF NOT EXISTS ${PLAN_DOCUMENTS_TABLE} (
-        document_id TEXT PRIMARY KEY,
-        plan_id TEXT NOT NULL,
-        plan_revision INTEGER NOT NULL,
-        execution_id TEXT NOT NULL,
-        conversation_key INTEGER NOT NULL,
-        parent_task_id TEXT NOT NULL,
-        content_hash TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )`,
-    );
+    await createDocumentsTable(PLAN_DOCUMENTS_TABLE);
+    await migrateDocumentsTableV2();
     await Zotero.DB.queryAsync(
       `CREATE INDEX IF NOT EXISTS llm_plan_documents_conversation_idx
        ON ${PLAN_DOCUMENTS_TABLE} (conversation_key, created_at DESC)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_plan_documents_execution_idx
+       ON ${PLAN_DOCUMENTS_TABLE} (execution_id, created_at DESC)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_documents_run_idx
+       ON ${PLAN_DOCUMENTS_TABLE} (run_id, created_at DESC)`,
     );
     await Zotero.DB.queryAsync(
       `CREATE TABLE IF NOT EXISTS ${PLAN_DOCUMENT_COVERAGE_TABLE} (
@@ -239,18 +276,25 @@ export async function savePlanDocumentInTransaction(params: {
   const document = decodePlanDocument(params.document);
   const outbox = decodePlanDocumentOutbox(params.outbox);
   const storedDocument = { ...document, coverageItems: [] };
+  const planned = getPlannedDocumentOrigin(document);
+  const direct =
+    document.version === 2 && document.origin.kind === "direct"
+      ? document.origin
+      : undefined;
   await Zotero.DB.queryAsync(
     `INSERT INTO ${PLAN_DOCUMENTS_TABLE}
-     (document_id, plan_id, plan_revision, execution_id, conversation_key,
-      parent_task_id, content_hash, payload_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (document_id, origin_kind, plan_id, plan_revision, execution_id, run_id,
+      conversation_key, parent_task_id, content_hash, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       document.documentId,
-      document.planId,
-      document.planRevision,
-      document.executionId,
+      planned ? "planned" : "direct",
+      planned?.planId || null,
+      planned?.planRevision ?? null,
+      planned?.executionId || null,
+      direct?.runId || null,
       document.conversationKey,
-      document.parentTaskId,
+      planned?.parentTaskId || null,
       document.contentHash,
       JSON.stringify(storedDocument),
       document.createdAt,
@@ -324,7 +368,7 @@ async function loadCoverageItems(
   )) as JsonRow[] | undefined;
   return (rows || []).map((row) => {
     if (typeof row.payloadJson !== "string") {
-      throw new Error("Plan document coverage row has no payload");
+      throw new Error("Document coverage row has no payload");
     }
     return decodeDocumentCoverageItem(JSON.parse(row.payloadJson));
   });
@@ -350,6 +394,19 @@ export async function loadLatestPlanDocumentForExecution(
     `SELECT document_id AS documentId FROM ${PLAN_DOCUMENTS_TABLE}
      WHERE execution_id = ? ORDER BY created_at DESC LIMIT 1`,
     [executionId],
+  )) as Array<{ documentId?: unknown }> | undefined;
+  const documentId =
+    typeof rows?.[0]?.documentId === "string" ? rows[0].documentId : "";
+  return documentId ? loadPlanDocument(documentId) : null;
+}
+
+export async function loadLatestDocumentForRun(
+  runId: string,
+): Promise<PlanDocument | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT document_id AS documentId FROM ${PLAN_DOCUMENTS_TABLE}
+     WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`,
+    [runId],
   )) as Array<{ documentId?: unknown }> | undefined;
   const documentId =
     typeof rows?.[0]?.documentId === "string" ? rows[0].documentId : "";
@@ -492,6 +549,26 @@ export async function addPlanDocumentOwner(params: {
      VALUES (?, ?, ?)`,
     [params.documentId, params.conversationKey, params.sourceMessageTimestamp],
   );
+}
+
+export async function loadDocumentIdForMessageOwner(params: {
+  conversationKey: number;
+  sourceMessageTimestamp: number;
+}): Promise<string | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT document_id AS documentId
+     FROM ${PLAN_DOCUMENT_OWNERS_TABLE}
+     WHERE conversation_key = ? AND source_message_timestamp = ?
+     ORDER BY document_id DESC LIMIT 1`,
+    [params.conversationKey, params.sourceMessageTimestamp],
+  ).catch((error) => {
+    if (/no such table|no table/i.test(String(error))) return [];
+    throw error;
+  })) as Array<{ documentId?: unknown }> | undefined;
+  const documentId = rows?.[0]?.documentId;
+  return typeof documentId === "string" && documentId.trim()
+    ? documentId.trim()
+    : null;
 }
 
 export async function copyPlanDocumentOwnersForFork(params: {

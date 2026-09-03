@@ -77,6 +77,8 @@ import { AgentRunContinuationSession } from "./continuation/runContinuationSessi
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import { getAllSkills, getMatchedSkillIds } from "./skills";
 import { loadPlanArtifact } from "./plans/store";
+import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
+import { createTrustedReadObservations } from "./plans/readObservation";
 import {
   buildAgentResourceContextPlan,
   commitAgentReadActivities,
@@ -456,7 +458,7 @@ type ToolWorkflowOutcome = {
   delivery?: ToolWorkflowDelivery;
   stopRun?: boolean;
   finalText?: string;
-  planDocumentId?: string;
+  documentId?: string;
   preserveToolOnlyTranscript?: boolean;
 };
 
@@ -639,6 +641,7 @@ type ExecutedToolCall = {
   toolResult: AgentToolResult;
   toolDefinition?: import("./types").AgentToolDefinition<any, any>;
   input?: unknown;
+  documentEvidenceRefs?: unknown[];
 };
 
 function buildSyntheticToolCall(name: string, args: unknown): AgentToolCall {
@@ -890,6 +893,8 @@ export class AgentRuntime {
       request.localDocuments?.map((entry) => entry.resource),
     );
     let webSourceRunId: string | undefined;
+    let runTerminalized = false;
+    let redactRunTerminalText = (value: string) => value;
     try {
       const latestPriorRun = await getLatestAgentRunForConversation(
         request.conversationKey,
@@ -909,6 +914,8 @@ export class AgentRuntime {
       const turnPathRedactor = new LocalDocumentPathStreamRedactor(
         request.conversationKey,
       );
+      redactRunTerminalText = (value) =>
+        turnPathRedactor.redactTerminalText(value);
       const persistToolResultHandles = async (
         records: AgentToolResultHandleRecord[],
       ): Promise<void> => {
@@ -952,22 +959,6 @@ export class AgentRuntime {
       });
       const planSession = new PlanExecutionRunSession(request, emit);
 
-      if (!adapter.supportsTools(request)) {
-        const reason =
-          "Agent tools unavailable for this model; used direct response instead.";
-        await emit({
-          type: "fallback",
-          reason,
-        });
-        await persistIfLive(() => finishAgentRun(runId, "completed"));
-        return {
-          kind: "fallback",
-          runId,
-          reason,
-          usedFallback: true,
-        };
-      }
-
       const context: AgentToolContext = {
         request,
         runId,
@@ -994,6 +985,111 @@ export class AgentRuntime {
         request.conversationKey,
       );
       setToolResultReadAvailability(request, false);
+      // Resolve routing and the visible outcome contract before enumerating
+      // tools. This keeps submit_document absent from ordinary Agent turns and
+      // makes the transcript compatibility key include the terminal tool when
+      // a document is mandatory.
+      const preclassifiedIntent = request.classifiedIntent;
+      let turnIntent: Awaited<ReturnType<typeof detectTurnIntent>>;
+      let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
+        null;
+      if (request.planContext?.phase === "executing") {
+        approvedPlanArtifact = await loadPlanArtifact(
+          request.planContext.planId,
+          request.planContext.revision,
+        );
+        const reused = await resolvePlanSkillRoutingReceipt(
+          approvedPlanArtifact?.skillRoutingReceipt,
+          getAllSkills(),
+        );
+        if (reused.changedExplicitSkillIds.length) {
+          throw new Error(
+            `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
+          );
+        }
+        if (reused.changedAutomaticSkillIds.length) {
+          await emit({
+            type: "provider_event",
+            providerType: "plan_skill_routing",
+            payload: {
+              status: "changed_automatic_skills_omitted",
+              skillIds: reused.changedAutomaticSkillIds,
+            },
+          });
+        }
+        turnIntent = {
+          skillIds: reused.skillIds,
+          classifiedIntent: null,
+          degraded: false,
+        };
+      } else {
+        turnIntent = await detectTurnIntent(request, getAllSkills(), {
+          signal: params.signal,
+        });
+      }
+      if (!preclassifiedIntent && turnIntent.classifiedIntent) {
+        request.classifiedIntent = turnIntent.classifiedIntent;
+      } else if (!preclassifiedIntent && !turnIntent.classifiedIntent) {
+        const fallbackActions = inferActionIntentsFromRequest(request);
+        if (fallbackActions.length) {
+          request.classifiedIntent = {
+            retrievalIntent: "none",
+            wantedSections: [],
+            writeDisposition: fallbackActions.some(
+              (intent) => intent.operation !== "read_full",
+            )
+              ? "required"
+              : "none",
+            actionInterpretationSource: "deterministic_fallback",
+            actionIntents: fallbackActions,
+          };
+        }
+      }
+      request.skillRoutingReceipt = turnIntent.routingReceipt;
+      if (turnIntent.degraded) {
+        await emit({
+          type: "provider_event",
+          providerType: "turn_intent_classifier",
+          payload: {
+            status: "degraded_no_automatic_skills",
+            reason: turnIntent.failureReason,
+          },
+        });
+      }
+      const matchedSkills = getMatchedSkillIds(request, turnIntent.skillIds);
+      const plannedSpec =
+        approvedPlanArtifact?.contract?.deliverable.kind === "document"
+          ? approvedPlanArtifact.contract.deliverable.spec
+          : undefined;
+      request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
+        request,
+        matchedSkillIds: matchedSkills,
+        plannedDocumentKind: plannedSpec?.kind,
+        plannedResearch: Boolean(approvedPlanArtifact?.contract?.investigation),
+      });
+      if (!adapter.supportsTools(request)) {
+        if (request.documentOutcomePolicy.required) {
+          const failure =
+            "The requested document cannot be produced because this model does not support Agent tools. Choose a tool-capable model and retry.";
+          await persistIfLive(() => finishAgentRun(runId, "failed", failure));
+          runTerminalized = true;
+          throw new Error(failure);
+        }
+        const reason =
+          "Agent tools unavailable for this model; used direct response instead.";
+        await emit({
+          type: "fallback",
+          reason,
+        });
+        await persistIfLive(() => finishAgentRun(runId, "completed"));
+        runTerminalized = true;
+        return {
+          kind: "fallback",
+          runId,
+          reason,
+          usedFallback: true,
+        };
+      }
       const toolDefinitions =
         this.registry.listToolDefinitionsForRequest(request);
       const toolSpecs = filterTransientRecoveryTool(
@@ -1130,6 +1226,7 @@ export class AgentRuntime {
         }
         await emit({ type: "final", text });
         await persistIfLive(() => finishAgentRun(runId, "completed", text));
+        runTerminalized = true;
         return {
           kind: "completed",
           runId,
@@ -1175,89 +1272,6 @@ export class AgentRuntime {
         }
       }
 
-      // Intent/skill selection runs ONCE per user turn, before the system
-      // prompt is built. The flow:
-      //   1. detectTurnIntent — one bounded LLM call against the primary
-      //      model, returns which skills apply plus the language-independent
-      //      retrieval intent (stored on request.classifiedIntent as a
-      //      default for retrieval/routing). Context and evidence validation
-      //      fail closed to no automatic skills on any error.
-      //   2. getMatchedSkillIds — unions validated semantic output with
-      //      explicit forcedSkillIds (slash menu).
-      //   3. matchedSkills is threaded into renderAgentPromptEnvelope so
-      //      only those skills' instructions ship in current-turn guidance,
-      //      and emitted as trace events for UI visibility.
-      // The resulting prompt package is reused across every model inference
-      // inside the agent loop — no per-step classification cost.
-      const preclassifiedIntent = request.classifiedIntent;
-      let turnIntent: Awaited<ReturnType<typeof detectTurnIntent>>;
-      if (request.planContext?.phase === "executing") {
-        const artifact = await loadPlanArtifact(
-          request.planContext.planId,
-          request.planContext.revision,
-        );
-        const reused = await resolvePlanSkillRoutingReceipt(
-          artifact?.skillRoutingReceipt,
-          getAllSkills(),
-        );
-        if (reused.changedExplicitSkillIds.length) {
-          throw new Error(
-            `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
-          );
-        }
-        if (reused.changedAutomaticSkillIds.length) {
-          await emit({
-            type: "provider_event",
-            providerType: "plan_skill_routing",
-            payload: {
-              status: "changed_automatic_skills_omitted",
-              skillIds: reused.changedAutomaticSkillIds,
-            },
-          });
-        }
-        turnIntent = {
-          skillIds: reused.skillIds,
-          classifiedIntent: null,
-          degraded: false,
-        };
-      } else {
-        turnIntent = await detectTurnIntent(request, getAllSkills(), {
-          signal: params.signal,
-        });
-      }
-      if (!preclassifiedIntent && turnIntent.classifiedIntent) {
-        request.classifiedIntent = turnIntent.classifiedIntent;
-      } else if (!preclassifiedIntent && !turnIntent.classifiedIntent) {
-        const fallbackActions = inferActionIntentsFromRequest(request);
-        if (fallbackActions.length) {
-          request.classifiedIntent = {
-            retrievalIntent: "none",
-            wantedSections: [],
-            writeDisposition: fallbackActions.some(
-              (intent) => intent.operation !== "read_full",
-            )
-              ? "required"
-              : "none",
-            actionInterpretationSource: "deterministic_fallback",
-            actionIntents: fallbackActions,
-          };
-        }
-      }
-      request.skillRoutingReceipt = turnIntent.routingReceipt;
-      if (turnIntent.degraded) {
-        // Surface the silent-regression case: a usable model config was
-        // present but classification failed. Automatic skill guidance is
-        // intentionally omitted for this turn.
-        await emit({
-          type: "provider_event",
-          providerType: "turn_intent_classifier",
-          payload: {
-            status: "degraded_no_automatic_skills",
-            reason: turnIntent.failureReason,
-          },
-        });
-      }
-      const matchedSkills = getMatchedSkillIds(request, turnIntent.skillIds);
       const requestIntent = classifyRequest(request);
       const noteDestination = writeNoteDestinationForRequest(
         request,
@@ -1322,6 +1336,7 @@ export class AgentRuntime {
         const text = planInitialization.userMessage;
         await emit({ type: "final", text });
         await persistIfLive(() => finishAgentRun(runId, "failed", text));
+        runTerminalized = true;
         return {
           kind: "completed",
           runId,
@@ -1337,6 +1352,7 @@ export class AgentRuntime {
         const text = actionContractInitialization.userMessage;
         await emit({ type: "final", text });
         await persistIfLive(() => finishAgentRun(runId, "failed", text));
+        runTerminalized = true;
         return {
           kind: "completed",
           runId,
@@ -1606,7 +1622,7 @@ export class AgentRuntime {
         options: {
           emitFinalEvent?: boolean;
           webAttribution?: WebAttributionAssessment;
-          planDocumentId?: string;
+          documentId?: string;
         } = {},
       ): Promise<AgentRuntimeOutcome> => {
         const redactedFinalText =
@@ -1621,9 +1637,7 @@ export class AgentRuntime {
           await emit({
             type: "final",
             text: redactedFinalText,
-            ...(options.planDocumentId
-              ? { planDocumentId: options.planDocumentId }
-              : {}),
+            ...(options.documentId ? { documentId: options.documentId } : {}),
             ...(options.webAttribution?.status === "valid" &&
             options.webAttribution.anchors.length
               ? {
@@ -1635,6 +1649,7 @@ export class AgentRuntime {
         await persistIfLive(() =>
           finishAgentRun(runId, status, redactedFinalText),
         );
+        runTerminalized = true;
         // The transcript and the read/coverage ledgers record what this run
         // DID. Gating them on a clean finish meant a run that exhausted its
         // rounds -- or was failed by three cancellations -- threw away its own
@@ -1673,9 +1688,7 @@ export class AgentRuntime {
           kind: "completed",
           runId,
           text: redactedFinalText,
-          ...(options.planDocumentId
-            ? { planDocumentId: options.planDocumentId }
-            : {}),
+          ...(options.documentId ? { documentId: options.documentId } : {}),
           usedFallback: false,
         } as const;
       };
@@ -1729,6 +1742,7 @@ export class AgentRuntime {
               turnPathRedactor.redactTerminalText(currentAnswerText),
             ),
           );
+          runTerminalized = true;
           throw new Error("Aborted");
         }
         await emit({
@@ -2089,6 +2103,7 @@ export class AgentRuntime {
           toolResult: AgentToolResult;
           toolDefinition?: import("./types").AgentToolDefinition<any, any>;
           input?: unknown;
+          documentEvidenceRefs?: unknown[];
         };
         if (execution.kind === "confirmation") {
           const { resolution } = await requestActionResolution(
@@ -2113,6 +2128,57 @@ export class AgentRuntime {
           };
         }
         const { toolResult } = executedCall;
+        if (
+          toolResult.ok &&
+          toolResult.artifacts?.length &&
+          request.documentOutcomePolicy?.required
+        ) {
+          const artifactsByPath = new Map(
+            (request.documentArtifactObservations || []).map((artifact) => [
+              artifact.storedPath,
+              artifact,
+            ]),
+          );
+          for (const artifact of toolResult.artifacts) {
+            artifactsByPath.set(artifact.storedPath, artifact);
+          }
+          request.documentArtifactObservations = [...artifactsByPath.values()];
+        }
+        if (
+          toolResult.ok &&
+          executedCall.toolDefinition?.spec.executionClass === "read" &&
+          request.documentOutcomePolicy?.integrityPolicy === "research_grounded"
+        ) {
+          const observations = await createTrustedReadObservations({
+            toolName: toolResult.name,
+            callId: toolResult.callId,
+            input: executedCall.input,
+            result: toolResult.content,
+          });
+          if (observations.length) {
+            const merged = new Map(
+              (request.documentReadObservations || []).map((entry) => [
+                entry.observationId,
+                entry,
+              ]),
+            );
+            for (const observation of observations) {
+              merged.set(observation.observationId, observation);
+            }
+            request.documentReadObservations = [...merged.values()];
+            executedCall.documentEvidenceRefs = observations.map(
+              (observation) => ({
+                evidenceRef: observation.observationId,
+                libraryID: observation.libraryID,
+                itemKey: observation.itemKey,
+                capabilities: observation.capabilities,
+                attachmentItemKey: observation.attachmentItemKey,
+                pageIndex: observation.pageIndex,
+                sourceFingerprint: observation.sourceFingerprint,
+              }),
+            );
+          }
+        }
         toolExecutionRecords.push({
           name: toolResult.name,
           ok: toolResult.ok,
@@ -2276,8 +2342,19 @@ export class AgentRuntime {
         const executedCall = await executePreparedToolCall(call, round, {
           inheritedApproval: options.inheritedApproval,
         });
-        const { toolResult, toolDefinition, input } = executedCall;
+        const { toolResult, toolDefinition, input, documentEvidenceRefs } =
+          executedCall;
         const deliveryCallId = options.modelCallId || call.id;
+        const contentForModel = documentEvidenceRefs?.length
+          ? toolResult.content &&
+            typeof toolResult.content === "object" &&
+            !Array.isArray(toolResult.content)
+            ? {
+                ...(toolResult.content as Record<string, unknown>),
+                documentEvidenceRefs,
+              }
+            : { content: toolResult.content, documentEvidenceRefs }
+          : undefined;
 
         if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
           const terminal = await toolDefinition.resolveTerminalResult(
@@ -2294,10 +2371,11 @@ export class AgentRuntime {
                     toolResult,
                     deliveryCallId,
                     toolDefinition,
+                    contentForModel,
                   ),
               stopRun: true,
               finalText: terminal.finalText,
-              planDocumentId: terminal.planDocumentId,
+              documentId: terminal.documentId || terminal.planDocumentId,
               preserveToolOnlyTranscript:
                 terminal.providerTranscript === "tool_only",
             };
@@ -2330,6 +2408,7 @@ export class AgentRuntime {
                   currentResult,
                   deliveryCallId,
                   toolDefinition,
+                  contentForModel,
                 ),
               };
             }
@@ -2409,6 +2488,7 @@ export class AgentRuntime {
             toolResult,
             deliveryCallId,
             toolDefinition,
+            contentForModel,
           ),
         };
       };
@@ -2459,7 +2539,7 @@ export class AgentRuntime {
             return completeRun(
               terminalOutcome.finalText || currentAnswerText,
               "completed",
-              { planDocumentId: terminalOutcome.planDocumentId },
+              { documentId: terminalOutcome.documentId },
             );
           }
           if (step.kind === "final") {
@@ -2603,7 +2683,7 @@ export class AgentRuntime {
               }
               await persistTranscriptCheckpoint();
               return completeRun(stopFinalText, "completed", {
-                planDocumentId: outcome.planDocumentId,
+                documentId: outcome.documentId,
               });
             }
             if (consecutiveToolErrors >= 3) {
@@ -2649,6 +2729,20 @@ export class AgentRuntime {
         });
         segment += 1;
       }
+    } catch (error) {
+      if (webSourceRunId && !runTerminalized) {
+        const message = redactRunTerminalText(
+          error instanceof Error ? error.message : String(error),
+        );
+        await persistIfLive(() =>
+          finishAgentRun(
+            webSourceRunId!,
+            params.signal?.aborted ? "cancelled" : "failed",
+            params.signal?.aborted ? message : INTERRUPTED_AGENT_RUN_MARKER,
+          ),
+        ).catch(() => undefined);
+      }
+      throw error;
     } finally {
       if (webSourceRunId) clearWebSourcesForRun(webSourceRunId);
       pathLease.release();

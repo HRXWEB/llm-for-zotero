@@ -41,7 +41,7 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
   "literature-review.md": [
     "central ResearchPolicy owns corpus budgets",
     "inventory every frozen item",
-    "finish with `submit_plan_document`",
+    "Finish with `submit_document`",
   ],
   "simple-paper-qa.md": [
     "one read, then answer",

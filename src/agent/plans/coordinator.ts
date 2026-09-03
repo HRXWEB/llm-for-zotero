@@ -1125,6 +1125,7 @@ export class PlanExecutionCoordinator {
   async requestTransition(
     request: TaskTransitionRequest,
     now = Date.now(),
+    options: { alreadyInTransaction?: boolean } = {},
   ): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(request.executionId);
     const task = ledger.tasks.find((entry) => entry.taskId === request.taskId);
@@ -1178,12 +1179,124 @@ export class PlanExecutionCoordinator {
       updatedAt: now,
       completedAt: terminal ? now : ledger.completedAt,
     };
-    await savePlanExecutionLedger(updated, {
-      taskId: task.taskId,
-      fromStatus: task.status,
-      toStatus: request.toStatus,
-      payload: { requestedBy: request.requestedBy, reason: request.reason },
-      createdAt: now,
+    await savePlanExecutionLedger(
+      updated,
+      {
+        taskId: task.taskId,
+        fromStatus: task.status,
+        toStatus: request.toStatus,
+        payload: { requestedBy: request.requestedBy, reason: request.reason },
+        createdAt: now,
+      },
+      options,
+    );
+    return updated;
+  }
+
+  /** Commits host-validated evidence and its single task transition as one
+   * transaction. This is used for bounded reasoning, whose evidence is born
+   * in the same task_update call and must never survive a rolled-back status
+   * change on its own. */
+  async requestTransitionWithEvidence(params: {
+    request: TaskTransitionRequest;
+    evidence: TaskEvidence;
+    now?: number;
+  }): Promise<PlanExecutionLedger> {
+    const now = params.now ?? Date.now();
+    const ledger = await this.requireLedger(params.request.executionId);
+    const task = ledger.tasks.find(
+      (entry) => entry.taskId === params.request.taskId,
+    );
+    if (!task) throw new Error("Execution task not found");
+    if (
+      params.evidence.executionId !== ledger.executionId ||
+      params.evidence.taskId !== task.taskId ||
+      !params.evidence.verified
+    ) {
+      throw new Error("Transition evidence does not match the active task");
+    }
+    assertTaskTransitionRequest({ ledger, task, request: params.request });
+    const evidenceIds = task.evidenceIds.includes(params.evidence.evidenceId)
+      ? task.evidenceIds
+      : [...task.evidenceIds, params.evidence.evidenceId];
+    const taskWithEvidence: ExecutionTask = {
+      ...task,
+      evidenceIds,
+      updatedAt: now,
+    };
+    if (params.request.toStatus === "completed") {
+      const persistedEvidence = await listTaskEvidence(
+        ledger.executionId,
+        task.taskId,
+      );
+      assertTaskCompletionEvidence(taskWithEvidence, [
+        ...persistedEvidence,
+        params.evidence,
+      ]);
+    }
+    const updatedTask: ExecutionTask = {
+      ...taskWithEvidence,
+      status: params.request.toStatus,
+      attemptCount:
+        params.request.toStatus === "in_progress"
+          ? task.attemptCount + 1
+          : task.attemptCount,
+      failureReasons:
+        params.request.reason &&
+        ["blocked", "failed"].includes(params.request.toStatus)
+          ? [...task.failureReasons, params.request.reason]
+          : task.failureReasons,
+      startedAt:
+        params.request.toStatus === "in_progress"
+          ? task.startedAt || now
+          : task.startedAt,
+      completedAt:
+        params.request.toStatus === "completed" ||
+        params.request.toStatus === "skipped"
+          ? now
+          : task.completedAt,
+    };
+    const tasks = ledger.tasks.map((entry) =>
+      entry.taskId === task.taskId ? updatedTask : entry,
+    );
+    const status = taskStatusAfterTransition(ledger, tasks);
+    const terminal = [
+      "completed",
+      "completed_with_exceptions",
+      "blocked",
+      "failed",
+      "cancelled",
+    ].includes(status);
+    const updated: PlanExecutionLedger = {
+      ...ledger,
+      tasks,
+      status,
+      activeTaskId:
+        params.request.toStatus === "in_progress"
+          ? task.taskId
+          : ledger.activeTaskId === task.taskId
+            ? undefined
+            : ledger.activeTaskId,
+      updatedAt: now,
+      completedAt: terminal ? now : ledger.completedAt,
+    };
+    await Zotero.DB.executeTransaction(async () => {
+      await saveTaskEvidence(params.evidence);
+      await savePlanExecutionLedger(
+        updated,
+        {
+          taskId: task.taskId,
+          fromStatus: task.status,
+          toStatus: params.request.toStatus,
+          payload: {
+            requestedBy: params.request.requestedBy,
+            reason: params.request.reason,
+            evidenceId: params.evidence.evidenceId,
+          },
+          createdAt: now,
+        },
+        { alreadyInTransaction: true },
+      );
     });
     return updated;
   }

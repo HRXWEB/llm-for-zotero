@@ -90,7 +90,7 @@ export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "research_update",
   "approve_research_expansion",
   "approve_research_mutation",
-  "submit_plan_document",
+  "submit_document",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
   "approve_research_expansion",
@@ -187,6 +187,9 @@ const RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES = new Set(["literature_search"]);
 
 type ZoteroMcpScopeMetadata = {
   runtimeAuthority?: "claude" | "codex";
+  /** Durable provider run that owns direct document artifacts. */
+  runId?: string;
+  sourceMessageTimestamp?: number;
   profileSignature?: string;
   conversationKey?: number;
   instanceID?: string;
@@ -208,6 +211,10 @@ type ZoteroMcpScopeMetadata = {
   reasoning?: ReasoningConfig;
   planContext?: AgentRuntimeRequest["planContext"];
   actionContract?: AgentRuntimeRequest["actionContract"];
+  documentOutcomePolicy?: AgentRuntimeRequest["documentOutcomePolicy"];
+  documentReadObservations?: AgentRuntimeRequest["documentReadObservations"];
+  documentArtifactObservations?: AgentRuntimeRequest["documentArtifactObservations"];
+  skillRoutingReceipt?: AgentRuntimeRequest["skillRoutingReceipt"];
   exhaustiveReadBackend?: Extract<
     ExhaustiveReadBackend,
     "codex_responses" | "unavailable"
@@ -724,6 +731,10 @@ function normalizeActiveScope(
       scope.runtimeAuthority === "claude" || scope.runtimeAuthority === "codex"
         ? scope.runtimeAuthority
         : undefined,
+    runId: normalizeText(scope.runId, 256),
+    sourceMessageTimestamp: Number.isFinite(scope.sourceMessageTimestamp)
+      ? Math.floor(Number(scope.sourceMessageTimestamp))
+      : undefined,
     profileSignature: normalizeText(scope.profileSignature, 128),
     conversationKey,
     instanceID: normalizeText(scope.instanceID, 128),
@@ -750,6 +761,16 @@ function normalizeActiveScope(
     model: normalizeText(scope.model, 256),
     codexPath: normalizeText(scope.codexPath, 4096),
     reasoning: normalizeReasoningConfig(scope.reasoning),
+    planContext: scope.planContext,
+    actionContract: scope.actionContract,
+    documentOutcomePolicy: scope.documentOutcomePolicy,
+    documentReadObservations: scope.documentReadObservations
+      ? cloneTrustedReadObservations(scope.documentReadObservations)
+      : undefined,
+    documentArtifactObservations: scope.documentArtifactObservations
+      ? cloneToolArtifacts(scope.documentArtifactObservations)
+      : undefined,
+    skillRoutingReceipt: scope.skillRoutingReceipt,
     exhaustiveReadBackend:
       scope.exhaustiveReadBackend === "codex_responses"
         ? "codex_responses"
@@ -810,6 +831,25 @@ export function registerScopedZoteroMcpScope(
       clearMcpReadDedupeCacheForScopeToken(token);
     },
   };
+}
+
+/** Refreshes the mutable per-turn authority carried by an already-issued
+ * scope token. The token remains stable while the provider reports its run ID
+ * and while verified read attestations accumulate between MCP calls. */
+export function updateScopedZoteroMcpScope(
+  token: string,
+  update: Partial<ZoteroMcpScopeMetadata>,
+): boolean {
+  const normalizedToken = normalizeText(token, 256);
+  if (!normalizedToken) return false;
+  pruneExpiredScopedMcpScopes();
+  const entry = scopedZoteroMcpScopes.get(normalizedToken);
+  if (!entry) return false;
+  entry.scope = normalizeActiveScope({
+    ...entry.scope,
+    ...update,
+  } as ZoteroMcpActiveScope);
+  return true;
 }
 
 /**
@@ -997,6 +1037,17 @@ function cloneTrustedReadObservations(
   return observations.map((observation) => ({
     ...observation,
     capabilities: [...observation.capabilities],
+  }));
+}
+
+function cloneToolArtifacts(
+  artifacts: readonly AgentToolArtifact[],
+): AgentToolArtifact[] {
+  return artifacts.map((artifact) => ({
+    ...artifact,
+    paperContext: artifact.paperContext
+      ? { ...artifact.paperContext }
+      : undefined,
   }));
 }
 
@@ -1275,6 +1326,9 @@ function isMcpToolVisibleInScope(
 ): boolean {
   if (!isMcpExposedTool(tool)) return false;
   if (CURATED_PLAN_TOOL_NAMES.has(tool.name)) {
+    if (tool.name === "submit_document") {
+      return scope?.documentOutcomePolicy?.required === true;
+    }
     const phase = scope?.planContext?.phase;
     if (tool.name === "update_plan") return phase === "planning";
     if (phase !== "executing") return false;
@@ -1622,8 +1676,15 @@ function createToolContext(
     reasoning: scope?.reasoning,
     planContext: scope?.planContext,
     actionContract: scope?.actionContract,
+    documentOutcomePolicy: scope?.documentOutcomePolicy,
+    documentReadObservations: scope?.documentReadObservations,
+    documentArtifactObservations: scope?.documentArtifactObservations,
+    skillRoutingReceipt: scope?.skillRoutingReceipt,
     exhaustiveReadBackend,
     activeNoteContext,
+    metadata: {
+      sourceMessageTimestamp: scope?.sourceMessageTimestamp,
+    },
   };
   const request: AgentRuntimeRequest = scope?.turnPaperScope
     ? {
@@ -1662,6 +1723,7 @@ function createToolContext(
       );
   return {
     request,
+    runId: scope?.runId,
     item,
     currentAnswerText: "",
     modelName: scope?.model || "external-mcp",
@@ -1714,6 +1776,79 @@ function formatToolResult(
     ],
     ...(result.ok ? {} : { isError: true }),
   };
+}
+
+function rememberDocumentReadObservations(
+  headers: Record<string, string> | undefined,
+  observations: readonly TrustedReadObservation[],
+): void {
+  if (!observations.length) return;
+  const scope = resolveScopedMcpScope(headers);
+  if (!scope?.documentOutcomePolicy?.required) return;
+  const merged = new Map(
+    (scope.documentReadObservations || []).map((entry) => [
+      entry.observationId,
+      entry,
+    ]),
+  );
+  for (const observation of observations) {
+    merged.set(observation.observationId, observation);
+  }
+  scope.documentReadObservations = cloneTrustedReadObservations([
+    ...merged.values(),
+  ]);
+}
+
+function rememberDocumentArtifacts(
+  headers: Record<string, string> | undefined,
+  artifacts: readonly AgentToolArtifact[],
+): void {
+  if (!artifacts.length) return;
+  const scope = resolveScopedMcpScope(headers);
+  if (!scope?.documentOutcomePolicy?.required) return;
+  const merged = new Map(
+    (scope.documentArtifactObservations || []).map((artifact) => [
+      artifact.storedPath,
+      artifact,
+    ]),
+  );
+  for (const artifact of artifacts) merged.set(artifact.storedPath, artifact);
+  scope.documentArtifactObservations = cloneToolArtifacts([...merged.values()]);
+}
+
+function appendDocumentEvidenceRefs(
+  result: McpToolCallResult,
+  observations: readonly TrustedReadObservation[],
+): McpToolCallResult {
+  if (!observations.length || !result.content.length) return result;
+  const content = result.content.map((part, index) => {
+    if (index !== 0 || part.type !== "text") return part;
+    try {
+      const parsed = JSON.parse(part.text) as Record<string, unknown>;
+      return {
+        ...part,
+        text: JSON.stringify(
+          {
+            ...parsed,
+            documentEvidenceRefs: observations.map((observation) => ({
+              evidenceRef: observation.observationId,
+              libraryID: observation.libraryID,
+              itemKey: observation.itemKey,
+              capabilities: observation.capabilities,
+              attachmentItemKey: observation.attachmentItemKey,
+              pageIndex: observation.pageIndex,
+              sourceFingerprint: observation.sourceFingerprint,
+            })),
+          },
+          null,
+          2,
+        ),
+      };
+    } catch {
+      return part;
+    }
+  });
+  return { ...result, content };
 }
 
 function extractArtifactsFromMcpToolCallResult(
@@ -1893,6 +2028,11 @@ async function handleToolsCall(
         : null;
     const cachedReadResult = getCachedMcpReadResult(readDedupeKey);
     if (cachedReadResult) {
+      rememberDocumentReadObservations(headers, cachedReadResult.observations);
+      rememberDocumentArtifacts(
+        headers,
+        extractArtifactsFromMcpToolCallResult(cachedReadResult.result) || [],
+      );
       completeActivity({
         ok: true,
         quoteCitations: extractQuoteCitationsFromToolContent(
@@ -1968,7 +2108,7 @@ async function handleToolsCall(
       clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
       return result;
     }
-    const result = formatToolResult(prepared.execution);
+    let result = formatToolResult(prepared.execution);
     const readObservations =
       tool.spec.executionClass === "read" && !result.isError
         ? await createTrustedReadObservations({
@@ -1978,6 +2118,12 @@ async function handleToolsCall(
             result: prepared.execution.result.content,
           })
         : [];
+    rememberDocumentReadObservations(headers, readObservations);
+    rememberDocumentArtifacts(
+      headers,
+      prepared.execution.result.artifacts || [],
+    );
+    result = appendDocumentEvidenceRefs(result, readObservations);
     completeActivity({
       ok: !result.isError,
       error: extractToolCallErrorText(result),

@@ -1,5 +1,6 @@
 import type {
   DocumentCoverageItem,
+  DocumentArtifact,
   DocumentActionState,
   FormattedCitationBundle,
   FormattedCitationCluster,
@@ -10,6 +11,7 @@ import type {
   PlanDocumentValidation,
   PlanVerifiedQuote,
 } from "./types";
+import type { SkillRoutingReceipt } from "../skills/routingTypes";
 
 type Row = Record<string, unknown>;
 
@@ -45,6 +47,67 @@ function nonNegativeInteger(value: unknown, label: string): number {
 function strings(value: unknown, label: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value.map((entry, index) => string(entry, `${label}[${index}]`));
+}
+
+function decodeRoutingReceipt(value: unknown): SkillRoutingReceipt | undefined {
+  if (value === undefined) return undefined;
+  const input = object(value, "origin.routingReceipt");
+  if (!Array.isArray(input.skills)) {
+    throw new Error("origin.routingReceipt.skills must be an array");
+  }
+  const scopes = new Set([
+    "none",
+    "single-paper",
+    "paper-set",
+    "library-corpus",
+    "note",
+    "visual-input",
+  ]);
+  return {
+    routerSchemaVersion: nonNegativeInteger(
+      input.routerSchemaVersion,
+      "origin.routingReceipt.routerSchemaVersion",
+    ),
+    routerIdentityHash: string(
+      input.routerIdentityHash,
+      "origin.routingReceipt.routerIdentityHash",
+    ),
+    skillManifestHash: string(
+      input.skillManifestHash,
+      "origin.routingReceipt.skillManifestHash",
+    ),
+    skills: input.skills.map((value, index) => {
+      const label = `origin.routingReceipt.skills[${index}]`;
+      const skill = object(value, label);
+      if (skill.source !== "automatic" && skill.source !== "explicit") {
+        throw new Error(`${label}.source is invalid`);
+      }
+      if (!scopes.has(String(skill.requestedScope))) {
+        throw new Error(`${label}.requestedScope is invalid`);
+      }
+      let evidence: { text: string; start: number; end: number } | undefined;
+      if (skill.evidence !== undefined) {
+        const raw = object(skill.evidence, `${label}.evidence`);
+        evidence = {
+          text: string(raw.text, `${label}.evidence.text`),
+          start: nonNegativeInteger(raw.start, `${label}.evidence.start`),
+          end: nonNegativeInteger(raw.end, `${label}.evidence.end`),
+        };
+      }
+      return {
+        id: string(skill.id, `${label}.id`),
+        source: skill.source,
+        requestedScope:
+          skill.requestedScope as SkillRoutingReceipt["skills"][number]["requestedScope"],
+        evidence,
+        version: nonNegativeInteger(skill.version, `${label}.version`),
+        instructionHash: string(
+          skill.instructionHash,
+          `${label}.instructionHash`,
+        ),
+      };
+    }),
+  };
 }
 
 function decodeCitationSource(
@@ -309,7 +372,9 @@ function decodeValidation(value: unknown): PlanDocumentValidation {
 
 export function decodePlanDocument(value: unknown): PlanDocument {
   const input = object(value, "plan document");
-  if (input.version !== 1) throw new Error("Unsupported plan document version");
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error("Unsupported document version");
+  }
   if (
     !Array.isArray(input.assets) ||
     !Array.isArray(input.coverageItems) ||
@@ -325,18 +390,12 @@ export function decodePlanDocument(value: unknown): PlanDocument {
       String(input.coverageStatus),
     )
   ) {
-    throw new Error("Plan document coverage status is invalid");
+    throw new Error("Document coverage status is invalid");
   }
-  return {
-    version: 1,
+  const common = {
     documentId: string(input.documentId, "documentId"),
     documentVersion: number(input.documentVersion, "documentVersion"),
-    planId: string(input.planId, "planId"),
-    planRevision: number(input.planRevision, "planRevision"),
-    executionId: string(input.executionId, "executionId"),
     conversationKey: number(input.conversationKey, "conversationKey"),
-    parentTaskId: string(input.parentTaskId, "parentTaskId"),
-    contractDigest: string(input.contractDigest, "contractDigest"),
     title: string(input.title, "title"),
     visibleMarkdown: string(input.visibleMarkdown, "visibleMarkdown"),
     visibleHtml: string(input.visibleHtml, "visibleHtml"),
@@ -345,11 +404,79 @@ export function decodePlanDocument(value: unknown): PlanDocument {
       ? input.verifiedQuotes.map(decodeVerifiedQuote)
       : [],
     assets: input.assets.map(decodeAsset),
-    coverageStatus: input.coverageStatus as PlanDocument["coverageStatus"],
+    coverageStatus: input.coverageStatus as DocumentArtifact["coverageStatus"],
     coverageItems: input.coverageItems.map(decodeDocumentCoverageItem),
     validation: decodeValidation(input.validation),
     contentHash: string(input.contentHash, "contentHash"),
     createdAt: number(input.createdAt, "createdAt"),
+  };
+  if (input.version === 2) {
+    const origin = object(input.origin, "origin");
+    const documentKinds = [
+      "research_brief",
+      "literature_review",
+      "comparison",
+      "report",
+      "guide",
+      "custom",
+    ];
+    if (!documentKinds.includes(String(input.documentKind))) {
+      throw new Error("documentKind is invalid");
+    }
+    if (
+      input.integrityPolicy !== "research_grounded" &&
+      input.integrityPolicy !== "authored"
+    ) {
+      throw new Error("integrityPolicy is invalid");
+    }
+    const decodedOrigin =
+      origin.kind === "planned"
+        ? {
+            kind: "planned" as const,
+            planId: string(origin.planId, "origin.planId"),
+            planRevision: number(origin.planRevision, "origin.planRevision"),
+            executionId: string(origin.executionId, "origin.executionId"),
+            parentTaskId: string(origin.parentTaskId, "origin.parentTaskId"),
+            contractDigest: string(
+              origin.contractDigest,
+              "origin.contractDigest",
+            ),
+          }
+        : origin.kind === "direct"
+          ? {
+              kind: "direct" as const,
+              runId: string(origin.runId, "origin.runId"),
+              sourceMessageTimestamp: nonNegativeInteger(
+                origin.sourceMessageTimestamp,
+                "origin.sourceMessageTimestamp",
+              ),
+              routingReceipt: decodeRoutingReceipt(origin.routingReceipt),
+              skillRoutingReceiptHash:
+                typeof origin.skillRoutingReceiptHash === "string"
+                  ? origin.skillRoutingReceiptHash
+                  : undefined,
+            }
+          : null;
+    if (!decodedOrigin) throw new Error("document origin is invalid");
+    return {
+      version: 2,
+      documentKind: input.documentKind as Extract<
+        DocumentArtifact,
+        { version: 2 }
+      >["documentKind"],
+      integrityPolicy: input.integrityPolicy,
+      origin: decodedOrigin,
+      ...common,
+    };
+  }
+  return {
+    version: 1,
+    planId: string(input.planId, "planId"),
+    planRevision: number(input.planRevision, "planRevision"),
+    executionId: string(input.executionId, "executionId"),
+    parentTaskId: string(input.parentTaskId, "parentTaskId"),
+    contractDigest: string(input.contractDigest, "contractDigest"),
+    ...common,
   };
 }
 

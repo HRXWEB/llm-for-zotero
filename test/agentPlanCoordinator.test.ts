@@ -101,17 +101,23 @@ function evidence(
 }
 
 describe("PlanExecutionCoordinator invariants", function () {
-  it("accepts a partial task status update instead of requiring the full ledger", function () {
+  it("accepts exactly one task transition per committed call", function () {
     const validated = createTaskUpdateTool().validate({
-      tasks: [{ taskId: "execution-1:step-1", status: "completed" }],
+      task: { taskId: "execution-1:step-1", status: "completed" },
     });
     assert.isTrue(validated.ok);
     if (validated.ok) {
-      assert.deepEqual(
-        validated.value.tasks.map(({ taskId, status }) => ({ taskId, status })),
-        [{ taskId: "execution-1:step-1", status: "completed" }],
-      );
+      assert.equal(validated.value.task.taskId, "execution-1:step-1");
+      assert.equal(validated.value.task.status, "completed");
     }
+    assert.isFalse(
+      createTaskUpdateTool().validate({
+        tasks: [
+          { taskId: "execution-1:step-1", status: "completed" },
+          { taskId: "execution-1:step-2", status: "in_progress" },
+        ],
+      }).ok,
+    );
   });
 
   it("carries approved exhaustive-read authority into the synthetic execution turn", function () {

@@ -134,7 +134,9 @@ export type StoredChatMessage = {
   timestamp: number;
   runMode?: "chat" | "agent";
   agentRunId?: string;
-  /** Session-only outbox binding; durable recovery also verifies exact text. */
+  /** Durable document artifact identity for rendering after restart. */
+  documentId?: string;
+  /** @deprecated Legacy session-only Plan document hint. */
   planDocumentId?: string;
   selectedText?: string;
   selectedTextContexts?: SelectedTextContext[];
@@ -214,6 +216,7 @@ const CHAT_MESSAGE_SELECT_COLUMNS_SQL = `id,
             timestamp,
             run_mode AS runMode,
             agent_run_id AS agentRunId,
+            document_id AS documentId,
             selected_text AS selectedText,
             selected_text_contexts_json AS selectedTextContextsJson,
             selected_texts_json AS selectedTextsJson,
@@ -466,6 +469,7 @@ const CHAT_MESSAGE_COPY_COLUMNS = [
   "timestamp",
   "run_mode",
   "agent_run_id",
+  "document_id",
   "selected_text",
   "selected_text_contexts_json",
   "selected_texts_json",
@@ -1357,6 +1361,7 @@ export async function initChatStore(): Promise<void> {
         timestamp INTEGER NOT NULL,
         run_mode TEXT CHECK(run_mode IN ('chat', 'agent')),
         agent_run_id TEXT,
+        document_id TEXT,
         selected_text TEXT,
         selected_text_contexts_json TEXT,
         selected_texts_json TEXT,
@@ -1501,6 +1506,12 @@ export async function initChatStore(): Promise<void> {
          ADD COLUMN agent_run_id TEXT`,
       );
     }
+    await ensureColumn(
+      CHAT_MESSAGES_TABLE,
+      messageColumns,
+      "document_id",
+      "document_id TEXT",
+    );
     const hasSelectedTextColumn = Boolean(
       columns?.some((column) => column?.name === "selected_text"),
     );
@@ -2150,6 +2161,7 @@ export async function loadConversation(
         selectedText?: unknown;
         runMode?: unknown;
         agentRunId?: unknown;
+        documentId?: unknown;
         selectedTextContextsJson?: unknown;
         selectedTextsJson?: unknown;
         selectedTextSourcesJson?: unknown;
@@ -2449,6 +2461,10 @@ export async function loadConversation(
         typeof row.agentRunId === "string" && row.agentRunId.trim()
           ? row.agentRunId.trim()
           : undefined,
+      documentId:
+        typeof row.documentId === "string" && row.documentId.trim()
+          ? row.documentId.trim()
+          : undefined,
       selectedText:
         selectedTextContexts[0]?.text ||
         (typeof row.selectedText === "string" ? row.selectedText : undefined),
@@ -2643,8 +2659,8 @@ export async function appendMessage(
         const identityPlaceholder = identityAvailable ? ", ?" : "";
         await Zotero.DB.queryAsync(
           `INSERT INTO ${CHAT_MESSAGES_TABLE}
-        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_text_contexts_json, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, forced_skill_ids_json, paper_contexts_json, pdf_paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, collection_contexts_json, tag_contexts_json, screenshot_images, attachments_json, model_attachments_json, generated_images_json, model_name, model_entry_id, model_provider_label, interrupted, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, context_tokens, context_window${identityColumn})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${identityPlaceholder})`,
+        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_text_contexts_json, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, forced_skill_ids_json, paper_contexts_json, pdf_paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, collection_contexts_json, tag_contexts_json, screenshot_images, attachments_json, model_attachments_json, generated_images_json, model_name, model_entry_id, model_provider_label, interrupted, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, context_tokens, context_window, document_id${identityColumn})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${identityPlaceholder})`,
           [
             conversationID,
             normalizedKey,
@@ -2705,6 +2721,7 @@ export async function appendMessage(
             Number.isFinite(Number(message.contextWindow))
               ? Math.floor(Number(message.contextWindow))
               : null,
+            message.documentId || message.planDocumentId || null,
             ...(identityAvailable ? [appendIdentity.instanceID] : []),
           ],
         );
@@ -2896,6 +2913,8 @@ export async function updateLatestAssistantMessage(
     | "timestamp"
     | "runMode"
     | "agentRunId"
+    | "documentId"
+    | "planDocumentId"
     | "modelName"
     | "modelEntryId"
     | "modelProviderLabel"
@@ -2926,6 +2945,7 @@ export async function updateLatestAssistantMessage(
            timestamp = ?,
            run_mode = ?,
            agent_run_id = ?,
+           document_id = ?,
            model_name = ?,
            model_entry_id = ?,
            model_provider_label = ?,
@@ -2950,6 +2970,7 @@ export async function updateLatestAssistantMessage(
         Number.isFinite(timestamp) ? Math.floor(timestamp) : Date.now(),
         message.runMode || null,
         message.agentRunId || null,
+        message.documentId || message.planDocumentId || null,
         message.modelName || null,
         message.modelEntryId || null,
         message.modelProviderLabel || null,

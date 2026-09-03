@@ -133,7 +133,7 @@ describe("chatStore note contexts", function () {
     });
 
     const insert = findChatMessageInsert(queries);
-    assert.lengthOf(insert.params, 35);
+    assert.lengthOf(insert.params, 36);
     assert.equal(insert.params[33], 1234);
     assert.equal(insert.params[34], 200000);
   });

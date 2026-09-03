@@ -156,6 +156,19 @@ describe("parseClassifierResponse unmatched pseudo-skill", function () {
 });
 
 describe("parseClassifiedTurnIntent", function () {
+  it("parses a typed document outcome and rejects an untyped one", function () {
+    const parsed = parseClassifiedTurnIntent(
+      '{"retrievalIntent":"none","deliverableIntent":"document","documentKind":"report","wantedSections":[]}',
+    );
+    assert.equal(parsed?.deliverableIntent, "document");
+    assert.equal(parsed?.documentKind, "report");
+    assert.isNull(
+      parseClassifiedTurnIntent(
+        '{"retrievalIntent":"none","deliverableIntent":"document","wantedSections":[]}',
+      ),
+    );
+  });
+
   it("parses a valid full intent object", function () {
     const result = parseClassifiedTurnIntent(
       '{"skillIds":[],"retrievalIntent":"summarize","paperTargetIntent":"all_visible","externalSearchIntent":"both","wantedSections":["methods"],"queryLanguage":"zh"}',

@@ -359,6 +359,13 @@ export type PlanEvent =
       progress: ResearchProgress;
     }
   | {
+      type: "document_ready";
+      documentId: string;
+      executionId?: string;
+      title: string;
+      contentHash: string;
+    }
+  | {
       type: "plan_document_ready";
       documentId: string;
       executionId: string;

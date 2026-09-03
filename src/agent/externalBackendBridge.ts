@@ -34,6 +34,7 @@ import {
   addZoteroMcpToolActivityObserver,
   registerScopedZoteroMcpScope,
   setActiveZoteroMcpScope,
+  updateScopedZoteroMcpScope,
   type ZoteroMcpActiveScope,
   type ZoteroMcpToolActivityEvent,
 } from "./mcp/server";
@@ -92,7 +93,16 @@ import {
 } from "./plans/coordinator";
 import { loadPlanArtifact, loadPlanExecutionLedger } from "./plans/store";
 import { loadResearchJobForExecution } from "./research/store";
-import { loadLatestPlanDocumentForExecution } from "./documents/store";
+import {
+  loadLatestDocumentForRun,
+  loadLatestPlanDocumentForExecution,
+} from "./documents/store";
+import {
+  detectTurnIntent,
+  resolvePlanSkillRoutingReceipt,
+} from "./model/skillClassifier";
+import { getAllSkills, getMatchedSkillIds } from "./skills";
+import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import {
   PlanExecutionRunSession,
   recordMcpPlanEvidence,
@@ -706,6 +716,20 @@ function buildClaudeBridgeCustomInstruction(
     .join("\n\n");
 }
 
+function buildDocumentOutcomeInstruction(request: AgentRuntimeRequest): string {
+  const policy = request.documentOutcomePolicy;
+  if (!policy?.required) return "";
+  const validation =
+    policy.integrityPolicy === "research_grounded"
+      ? "This is a research-grounded document. Read Zotero sources first, include a Scope and limitations section, use [[cite:C1]] tokens for supported claims, and copy the host-issued documentEvidenceRefs from successful read tools into the corresponding citation sources."
+      : "This is an authored document. Give it a complete Markdown structure; citations are optional unless the requested content needs them.";
+  return [
+    "The host requires a first-class document artifact for this turn. Ordinary prose is not a valid terminal answer.",
+    validation,
+    "Call the scoped Zotero MCP submit_document tool exactly once when the document is complete. Do not write a References section manually; Zotero generates it from citation mappings.",
+  ].join(" ");
+}
+
 export function buildClaudeBridgeCustomInstructionForTests(
   rawPdfMode = false,
 ): string {
@@ -1060,6 +1084,7 @@ async function runExternalBridgeTurn(
         params.request.planContext?.phase === "planning"
           ? "Plan mode is active. Research and draft a structured plan only. Do not mutate Zotero, files, settings, processes, or external systems. Exit plan mode only when the plan is ready for explicit user approval."
           : "",
+        buildDocumentOutcomeInstruction(params.request),
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -1287,8 +1312,13 @@ function buildClaudeZoteroMcpScope(
   const libraryID = resolveFallbackLibraryId(request);
   return {
     runtimeAuthority: "claude",
+    sourceMessageTimestamp: Number(request.metadata?.sourceMessageTimestamp),
     planContext: request.planContext,
     actionContract: request.actionContract,
+    documentOutcomePolicy: request.documentOutcomePolicy,
+    documentReadObservations: request.documentReadObservations,
+    documentArtifactObservations: request.documentArtifactObservations,
+    skillRoutingReceipt: request.skillRoutingReceipt,
     profileSignature,
     conversationKey: normalizePositiveInt(request.conversationKey),
     libraryID,
@@ -2992,6 +3022,64 @@ export function createExternalBackendBridgeRuntime(options: {
           makeProfilingEvent("frontend.run_turn.enter"),
         );
         await notifyIfLive(makeProfilingEvent("frontend.run_turn.enter"));
+        let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
+          null;
+        let routedSkillIds: string[] = [];
+        if (params.request.planContext?.phase === "executing") {
+          approvedPlanArtifact = await loadPlanArtifact(
+            params.request.planContext.planId,
+            params.request.planContext.revision,
+          );
+          const reused = await resolvePlanSkillRoutingReceipt(
+            approvedPlanArtifact?.skillRoutingReceipt,
+            getAllSkills(),
+          );
+          if (reused.changedExplicitSkillIds.length) {
+            throw new Error(
+              `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
+            );
+          }
+          routedSkillIds = reused.skillIds;
+        } else {
+          const intent = await detectTurnIntent(
+            params.request,
+            getAllSkills(),
+            { signal: params.signal },
+          );
+          routedSkillIds = intent.skillIds;
+          if (!params.request.classifiedIntent && intent.classifiedIntent) {
+            params.request.classifiedIntent = intent.classifiedIntent;
+          }
+          params.request.skillRoutingReceipt = intent.routingReceipt;
+          if (intent.degraded) {
+            const degradedEvent: AgentEvent = {
+              type: "provider_event",
+              providerType: "turn_intent_classifier",
+              payload: {
+                status: "degraded_no_automatic_skills",
+                reason: intent.failureReason,
+              },
+            };
+            await appendPersistedEvent(degradedEvent);
+            await notifyIfLive(degradedEvent);
+          }
+        }
+        const matchedSkillIds = getMatchedSkillIds(
+          params.request,
+          routedSkillIds,
+        );
+        const plannedSpec =
+          approvedPlanArtifact?.contract?.deliverable.kind === "document"
+            ? approvedPlanArtifact.contract.deliverable.spec
+            : undefined;
+        params.request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
+          request: params.request,
+          matchedSkillIds,
+          plannedDocumentKind: plannedSpec?.kind,
+          plannedResearch: Boolean(
+            approvedPlanArtifact?.contract?.investigation,
+          ),
+        });
         const contextEnvelope = buildContextEnvelope(params.request);
         await appendPersistedEvent(
           makeProfilingEvent("frontend.context_envelope.ready"),
@@ -3183,6 +3271,7 @@ export function createExternalBackendBridgeRuntime(options: {
         let clearScopedMcpScope: () => void = () => undefined;
         let clearActiveMcpScope: () => void = () => undefined;
         let unregisterMcpToolActivity: () => void = () => undefined;
+        let scopedMcpToken = "";
         try {
           if (isNativeZoteroMcpToolsEnabled()) {
             const rawPdfMode = requestLocalDocuments(params.request).length > 0;
@@ -3192,6 +3281,7 @@ export function createExternalBackendBridgeRuntime(options: {
               profileSignature,
             );
             const scopedMcp = registerScopedZoteroMcpScope(mcpScope);
+            scopedMcpToken = scopedMcp.token;
             clearScopedMcpScope = scopedMcp.clear;
             clearActiveMcpScope = setActiveZoteroMcpScope(mcpScope);
             unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
@@ -3204,6 +3294,23 @@ export function createExternalBackendBridgeRuntime(options: {
                   !profileSignature ||
                   event.profileSignature === profileSignature;
                 if (!sameConversation || !sameProfile) return;
+                if (
+                  event.phase === "completed" &&
+                  event.ok &&
+                  event.readObservations?.length
+                ) {
+                  const merged = new Map(
+                    (params.request.documentReadObservations || []).map(
+                      (entry) => [entry.observationId, entry],
+                    ),
+                  );
+                  for (const observation of event.readObservations) {
+                    merged.set(observation.observationId, observation);
+                  }
+                  params.request.documentReadObservations = [
+                    ...merged.values(),
+                  ];
+                }
                 const pending = (async () => {
                   await emitTurnEvent(buildClaudeMcpToolActivityEvent(event));
                   if (
@@ -3295,21 +3402,8 @@ export function createExternalBackendBridgeRuntime(options: {
               }),
             );
           }
-          let outcome = await runExternalBridgeTurn(bridgeUrl, {
-            ...params,
-            onStart: async (runId) => {
-              await ensurePersistedRun(runId);
-              if (writeAllowed()) await params.onStart?.(runId);
-            },
-            onEvent: emitTurnEvent,
-            contextEnvelope,
-            runtimeRequest,
-            allowedTools,
-            mcpServers,
-            scope,
-            registerPendingConfirmation: (requestId, resolve) =>
-              coreRuntime.registerPendingConfirmation(requestId, resolve),
-            resolveExternalConfirmation: async (requestId, resolution) => {
+          const resolveExternalConfirmation: ResolveExternalConfirmation =
+            async (requestId, resolution) => {
               const response = await fetch(
                 `${normalizeBaseUrl(bridgeUrl)}/resolve-confirmation`,
                 {
@@ -3356,21 +3450,88 @@ export function createExternalBackendBridgeRuntime(options: {
                         ? undefined
                         : "backend returned ok=false",
               };
-            },
-          });
+            };
+          const runBridge = async (
+            request: AgentRuntimeRequest,
+            bridgeRuntimeRequest: BridgeRuntimeRequest,
+            correctionAttempt = false,
+          ): Promise<AgentRuntimeOutcome> =>
+            runExternalBridgeTurn(bridgeUrl, {
+              ...params,
+              request,
+              onStart: async (runId) => {
+                const hadPersistedRun = Boolean(persistedRunId);
+                const logicalRunId =
+                  correctionAttempt && persistedRunId ? persistedRunId : runId;
+                if (scopedMcpToken) {
+                  updateScopedZoteroMcpScope(scopedMcpToken, {
+                    runId: logicalRunId,
+                  });
+                }
+                if (!correctionAttempt || !hadPersistedRun) {
+                  await ensurePersistedRun(runId);
+                  if (writeAllowed()) await params.onStart?.(runId);
+                }
+              },
+              onEvent: emitTurnEvent,
+              contextEnvelope,
+              runtimeRequest: bridgeRuntimeRequest,
+              allowedTools,
+              mcpServers,
+              scope,
+              registerPendingConfirmation: (requestId, resolve) =>
+                coreRuntime.registerPendingConfirmation(requestId, resolve),
+              resolveExternalConfirmation,
+            });
+          const loadFinalizedDocument = async () =>
+            params.request.planContext?.phase === "executing"
+              ? loadLatestPlanDocumentForExecution(
+                  params.request.planContext.executionId,
+                )
+              : loadLatestDocumentForRun(persistedRunId);
+
+          let outcome = await runBridge(params.request, runtimeRequest);
           await Promise.all(Array.from(pendingPlanEvidence));
+          let terminalRunStatus: "completed" | "failed" =
+            outcome.kind === "completed" ? "completed" : "failed";
+          let finalizedDocument = null;
+          if (outcome.kind === "completed") {
+            finalizedDocument = await loadFinalizedDocument();
+          }
           if (
             outcome.kind === "completed" &&
-            params.request.planContext?.phase === "executing"
+            params.request.documentOutcomePolicy?.required &&
+            !finalizedDocument
           ) {
-            const document = await loadLatestPlanDocumentForExecution(
-              params.request.planContext.executionId,
+            const correctionText =
+              "Host correction: this turn requires a finalized document artifact. Complete the requested document now and call the scoped Zotero submit_document tool exactly once. Do not return ordinary answer prose.";
+            const correctionRequest: AgentRuntimeRequest = {
+              ...params.request,
+              userText: correctionText,
+              metadata: {
+                ...(params.request.metadata || {}),
+                documentCorrectionAttempt: 1,
+              },
+            };
+            outcome = await runBridge(
+              correctionRequest,
+              { ...runtimeRequest, userText: correctionText },
+              true,
             );
+            terminalRunStatus =
+              outcome.kind === "completed" ? "completed" : "failed";
+            await Promise.all(Array.from(pendingPlanEvidence));
+            if (outcome.kind === "completed") {
+              finalizedDocument = await loadFinalizedDocument();
+            }
+          }
+          if (outcome.kind === "completed") {
+            const document = finalizedDocument;
             if (document) {
               outcome = {
                 ...outcome,
                 text: document.visibleMarkdown,
-                planDocumentId: document.documentId,
+                documentId: document.documentId,
               };
             }
           }
@@ -3378,10 +3539,24 @@ export function createExternalBackendBridgeRuntime(options: {
             canCorrect: false,
           });
           if (planDecision.kind === "fail") {
+            terminalRunStatus = "failed";
             outcome = {
               kind: "completed",
               runId: outcome.runId,
               text: planDecision.failure,
+              usedFallback: false,
+            };
+          }
+          if (
+            outcome.kind === "completed" &&
+            params.request.documentOutcomePolicy?.required &&
+            !finalizedDocument
+          ) {
+            terminalRunStatus = "failed";
+            outcome = {
+              kind: "completed",
+              runId: outcome.runId,
+              text: "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
               usedFallback: false,
             };
           }
@@ -3405,7 +3580,7 @@ export function createExternalBackendBridgeRuntime(options: {
             await persistIfLive(() =>
               finishAgentRun(
                 finalRunId,
-                safeOutcome.kind === "completed" ? "completed" : "failed",
+                terminalRunStatus,
                 safeOutcome.kind === "completed"
                   ? safeOutcome.text
                   : safeOutcome.reason,
@@ -3414,11 +3589,14 @@ export function createExternalBackendBridgeRuntime(options: {
           }
           return safeOutcome;
         } catch (error) {
+          const failedRunStatus = params.signal?.aborted
+            ? "cancelled"
+            : "failed";
           if (persistedRunId) {
             await persistIfLive(() =>
               finishAgentRun(
                 persistedRunId,
-                "failed",
+                failedRunStatus,
                 turnPathRedactor.redactTerminalText(
                   error instanceof Error ? error.message : String(error),
                 ),
@@ -3458,7 +3636,7 @@ export function createExternalBackendBridgeRuntime(options: {
           await appendPersistedEvent(fallbackEvent);
           await notifyIfLive(fallbackEvent);
           await persistIfLive(() =>
-            finishAgentRun(fallbackRunId, "failed", message),
+            finishAgentRun(fallbackRunId, failedRunStatus, message),
           );
           if (
             typeof ztoolkit !== "undefined" &&

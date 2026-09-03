@@ -60,6 +60,7 @@ const LIBRARY_EVIDENCE_CORRECTION =
 export class AgentFinalAnswerController {
   private shallowLibraryCorrectionUsed = false;
   private webAttributionCorrectionUsed = false;
+  private documentCorrectionUsed = false;
 
   constructor(
     private readonly request: AgentRuntimeRequest,
@@ -103,6 +104,27 @@ export class AgentFinalAnswerController {
       return planDecision.kind === "correct"
         ? { kind: "correct", correction: planDecision.correction }
         : { kind: "fail", userMessage: planDecision.failure };
+    }
+
+    if (
+      this.request.documentOutcomePolicy?.required &&
+      !params.toolExecutionRecords.some(
+        (record) =>
+          (record.name === "submit_document" ||
+            record.name === "submit_plan_document") &&
+          record.ok,
+      )
+    ) {
+      const failure =
+        "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.";
+      if (params.canCorrect && !this.documentCorrectionUsed) {
+        this.documentCorrectionUsed = true;
+        return {
+          kind: "correct",
+          correction: `${failure} Complete the document and call submit_document now.`,
+        };
+      }
+      return { kind: "fail", userMessage: failure };
     }
 
     if (this.shouldCorrectShallowLibraryAnswer(params)) {

@@ -217,6 +217,47 @@ describe("Zotero MCP server", function () {
     });
   });
 
+  it("shows submit_document only for a host-required document outcome", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createReadTool("library_search"));
+    registry.register(createReadTool("submit_document"));
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const ordinary = registerScopedZoteroMcpScope({
+      conversationKey: 7001,
+      libraryID: 1,
+      kind: "global",
+    });
+    const required = registerScopedZoteroMcpScope({
+      conversationKey: 7002,
+      libraryID: 1,
+      kind: "global",
+      documentOutcomePolicy: {
+        required: true,
+        documentKind: "literature_review",
+        integrityPolicy: "research_grounded",
+        trigger: "literature_review_skill",
+      },
+    });
+    const token = getOrCreateZoteroMcpBearerToken();
+    try {
+      const listedNames = async (scopeToken: string) => {
+        const response = await invokeMcpEndpoint({
+          token,
+          headers: { [ZOTERO_MCP_SCOPE_HEADER]: scopeToken },
+          body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        });
+        return JSON.parse(response[2]).result.tools.map(
+          (tool: { name: string }) => tool.name,
+        );
+      };
+      assert.notInclude(await listedNames(ordinary.token), "submit_document");
+      assert.include(await listedNames(required.token), "submit_document");
+    } finally {
+      ordinary.clear();
+      required.clear();
+    }
+  });
+
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {
     let executionCount = 0;
     const registry = new AgentToolRegistry();

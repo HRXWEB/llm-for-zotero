@@ -535,9 +535,12 @@ function createAgentTurnEventHandler(
         return;
       }
       case "final":
+        assistantMessage.documentId = event.documentId || event.planDocumentId;
         assistantMessage.planDocumentId = event.planDocumentId;
         assistantMessage.text =
-          (event.planDocumentId ? event.text : deps.sanitizeText(event.text)) ||
+          (assistantMessage.documentId
+            ? event.text
+            : deps.sanitizeText(event.text)) ||
           assistantMessage.pendingFinalText ||
           assistantMessage.text;
         assistantMessage.pendingFinalText = undefined;
@@ -602,6 +605,10 @@ async function finalizeAgentTurnOutcome(ctx: {
 
   assistantMessage.agentRunId = outcome.runId;
   assistantMessage.runMode = "agent";
+  assistantMessage.documentId =
+    outcome.kind === "completed"
+      ? outcome.documentId || outcome.planDocumentId
+      : undefined;
   assistantMessage.planDocumentId =
     outcome.kind === "completed" ? outcome.planDocumentId : undefined;
   const finalOutcomeText =
@@ -609,7 +616,7 @@ async function finalizeAgentTurnOutcome(ctx: {
       ? outcome.text
       : assistantMessage.pendingFinalText || assistantMessage.text;
   assistantMessage.text =
-    (assistantMessage.planDocumentId
+    (assistantMessage.documentId
       ? finalOutcomeText
       : deps.sanitizeText(finalOutcomeText)) ||
     assistantMessage.pendingFinalText ||
@@ -955,6 +962,7 @@ type EffectiveRequestConfigShape = {
 type BuildAgentRuntimeRequestParamsShape = {
   conversationKey: number;
   conversationGeneration?: number;
+  sourceMessageTimestamp?: number;
   item: Zotero.Item;
   activePaperContext?: PaperContextRef;
   userText: string;
@@ -1630,6 +1638,7 @@ export async function sendAgentTurn(
   const runtimeRequest = await deps.buildAgentRuntimeRequest({
     conversationKey,
     conversationGeneration: deps.conversationGeneration,
+    sourceMessageTimestamp: userMessage.timestamp,
     item,
     activePaperContext,
     userText: question,
@@ -1715,6 +1724,8 @@ export async function sendAgentTurn(
       timestamp: persistedTimestamp,
       runMode: "agent",
       agentRunId: assistantMessage.agentRunId,
+      documentId: assistantMessage.documentId,
+      planDocumentId: assistantMessage.planDocumentId,
       modelName: assistantMessage.modelName,
       modelEntryId: assistantMessage.modelEntryId,
       modelProviderLabel: assistantMessage.modelProviderLabel,
@@ -2201,6 +2212,7 @@ export async function retryAgentTurn(
   const runtimeRequest = await deps.buildAgentRuntimeRequest({
     conversationKey,
     conversationGeneration: deps.conversationGeneration,
+    sourceMessageTimestamp: retryPair.userMessage.timestamp,
     item,
     activePaperContext:
       activePaperContextOverride ?? retryPaperContext.activePaperContext,
@@ -2245,6 +2257,8 @@ export async function retryAgentTurn(
       timestamp: persistedTimestamp,
       runMode: "agent",
       agentRunId: assistantMessage.agentRunId,
+      documentId: assistantMessage.documentId,
+      planDocumentId: assistantMessage.planDocumentId,
       modelName: assistantMessage.modelName,
       modelEntryId: assistantMessage.modelEntryId,
       modelProviderLabel: assistantMessage.modelProviderLabel,

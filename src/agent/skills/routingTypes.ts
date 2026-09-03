@@ -24,6 +24,14 @@ export type SkillRouterResponseV1 = Readonly<{
   requestedScopes: readonly SkillRequestedScope[];
   selections: readonly SkillRouterSelection[];
   retrievalIntent: "enumerate" | "verify" | "summarize" | "none";
+  deliverableIntent?: "chat" | "document" | "unspecified";
+  documentKind?:
+    | "research_brief"
+    | "literature_review"
+    | "comparison"
+    | "report"
+    | "guide"
+    | "custom";
   paperTargetIntent?: "active" | "added" | "all_visible" | "unspecified";
   externalSearchIntent?: "none" | "web" | "literature" | "both";
   wantedSections: readonly ("methods" | "results" | "limitations")[];
