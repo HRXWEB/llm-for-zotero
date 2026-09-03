@@ -1706,11 +1706,10 @@ export function getPendingActionButtonLayout(action: AgentPendingAction): {
   const hasActionChooser = normalizedActions.primaryActions.length > 1;
   return {
     hasActionChooser,
-    showsFooterExecuteButton:
-      !hasActionChooser ||
-      normalizedActions.primaryActions.some(
-        (entry) => getPendingActionExecutionMode(action, entry.id) === "edit",
-      ),
+    // Every non-navigation confirmation now resolves through one explicit
+    // footer CTA. Selecting an alternative promotes it to that CTA instead
+    // of executing it from the chooser.
+    showsFooterExecuteButton: normalizedActions.primaryActions.length > 0,
   };
 }
 
@@ -1770,13 +1769,17 @@ function renderPlanningQuestionCard(
   card.dataset.requestId = pending.requestId;
   card.dataset.planningQuestionCard = "true";
 
+  const content = doc.createElement("div");
+  content.className = "llm-agent-hitl-content llm-planning-question-content";
+  card.appendChild(content);
+
   const header = doc.createElement("div");
   header.className = "llm-agent-hitl-header llm-planning-question-eyebrow";
   header.textContent = "Review required";
   const title = doc.createElement("div");
   title.className = "llm-agent-hitl-title llm-planning-question-title";
   title.textContent = pending.action.title;
-  card.append(header, title);
+  content.append(header, title);
 
   const viewport = doc.createElement("div");
   viewport.className = "llm-planning-question-viewport";
@@ -1784,7 +1787,7 @@ function renderPlanningQuestionCard(
   const track = doc.createElement("div");
   track.className = "llm-planning-question-track";
   viewport.appendChild(track);
-  card.appendChild(viewport);
+  content.appendChild(viewport);
 
   const answers = new Map<string, AgentPendingChoiceValue>();
   const customTexts = new Map<string, string>();
@@ -2136,30 +2139,34 @@ export function renderPendingActionCard(
     card.dataset.pagedReview = "true";
   }
 
+  const content = doc.createElement("div");
+  content.className = "llm-agent-hitl-content";
+  card.appendChild(content);
+
   const header = doc.createElement("div");
   header.className = "llm-agent-hitl-header";
   header.textContent =
     pending.action.mode === "review" && !isPagedReviewCard
       ? "Review required"
       : "Action required";
-  card.appendChild(header);
+  content.appendChild(header);
 
   const title = doc.createElement("div");
   title.className = "llm-agent-hitl-title";
   title.textContent = pending.action.title;
-  card.appendChild(title);
+  content.appendChild(title);
 
   if (pending.action.description) {
     const description = doc.createElement("div");
     description.className = "llm-agent-hitl-description";
     description.textContent = pending.action.description;
-    card.appendChild(description);
+    content.appendChild(description);
   }
 
   const pagedTopControls = isPagedReviewCard ? doc.createElement("div") : null;
   if (pagedTopControls) {
     pagedTopControls.className = "llm-agent-hitl-paged-top-controls";
-    card.appendChild(pagedTopControls);
+    content.appendChild(pagedTopControls);
   }
   const pagedFooterCenterControls = isPagedReviewCard
     ? doc.createElement("div")
@@ -2242,7 +2249,7 @@ export function renderPendingActionCard(
           textarea.addEventListener("input", callback);
         },
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2277,7 +2284,7 @@ export function renderPendingActionCard(
           input.addEventListener("input", callback);
         },
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2305,7 +2312,7 @@ export function renderPendingActionCard(
         setDisabled: () => undefined,
         isValid: () => true,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2373,7 +2380,7 @@ export function renderPendingActionCard(
         fieldContainer.className += " llm-agent-hitl-paged-footer-field";
         pagedFooterCenterControls.appendChild(fieldContainer);
       } else {
-        card.appendChild(fieldContainer);
+        content.appendChild(fieldContainer);
       }
       continue;
     }
@@ -2395,7 +2402,7 @@ export function renderPendingActionCard(
         setDisabled: () => undefined,
         isValid: () => true,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2420,7 +2427,7 @@ export function renderPendingActionCard(
         setDisabled: () => undefined,
         isValid: () => true,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2440,7 +2447,7 @@ export function renderPendingActionCard(
         setDisabled: () => undefined,
         isValid: () => true,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2456,7 +2463,7 @@ export function renderPendingActionCard(
         container: fieldContainer,
         ...rendered.accessor,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2472,7 +2479,7 @@ export function renderPendingActionCard(
         container: fieldContainer,
         ...rendered.accessor,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2488,7 +2495,7 @@ export function renderPendingActionCard(
         container: fieldContainer,
         ...rendered.accessor,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
       continue;
     }
 
@@ -2510,7 +2517,7 @@ export function renderPendingActionCard(
         container: fieldContainer,
         ...rendered.accessor,
       });
-      card.appendChild(fieldContainer);
+      content.appendChild(fieldContainer);
     }
   }
 
@@ -2529,6 +2536,7 @@ export function renderPendingActionCard(
   }
 
   const buttons: HTMLButtonElement[] = [];
+  const alternativeButtons = new Map<string, HTMLButtonElement>();
   const isActionValid = (actionId: string) =>
     fieldAccessors.every((accessor) =>
       isAccessorValidForAction(accessor, actionId),
@@ -2549,91 +2557,21 @@ export function renderPendingActionCard(
   const getBackLabel = (actionId: string) => {
     return getActionById(actionId)?.backLabel || "Get back";
   };
-  const actionNeedsExplicitReview = (actionId: string) =>
-    fieldAccessors.some(({ field }) => {
-      const hasScopedVisibility =
-        Array.isArray(field.visibleForActionIds) &&
-        field.visibleForActionIds.length > 0 &&
-        field.visibleForActionIds.includes(actionId);
-      const hasScopedRequirement =
-        Array.isArray(field.requiredForActionIds) &&
-        field.requiredForActionIds.length > 0 &&
-        field.requiredForActionIds.includes(actionId);
-      return hasScopedVisibility || hasScopedRequirement;
-    });
-  const executeAction = (actionId = activeActionId) => {
-    activeActionId = actionId;
-    setButtonsDisabled(true);
-    const payload = Object.fromEntries(
-      fieldAccessors.map((accessor) => [accessor.id, accessor.getValue()]),
-    );
-    const activeAction = getActionById(actionId);
-    getAgentRuntime().resolveConfirmation(pending.requestId, {
-      approved:
-        activeAction?.approved ?? actionId !== normalizedActions.cancelActionId,
-      actionId,
-      data: payload,
-    });
-  };
-  const handleExecute = () => {
-    executeAction(activeActionId);
-  };
   let lastChooserActionId =
     normalizedActions.primaryActions.find(
       (action) => !actionNeedsSeparateSubmit(action.id),
     )?.id || normalizedActions.defaultActionId;
   let actionChooser: HTMLDivElement | null = null;
-  if (buttonLayout.hasActionChooser && !isPagedReviewCard) {
-    actionChooser = doc.createElement("div");
-    actionChooser.className = "llm-agent-hitl-action-choices";
-    for (const action of normalizedActions.primaryActions) {
-      const actionButton = doc.createElement("button");
-      actionButton.type = "button";
-      actionButton.dataset.actionChoice = action.id;
-      actionButton.dataset.primary =
-        action.style === "primary" ? "true" : "false";
-      actionButton.className =
-        action.id === activeActionId
-          ? "llm-agent-hitl-btn llm-agent-hitl-btn-active"
-          : action.style === "primary"
-            ? "llm-agent-hitl-btn"
-            : "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
-      actionButton.textContent = action.label;
-      actionButton.addEventListener("click", () => {
-        const nextActionNeedsSeparateSubmit = actionNeedsSeparateSubmit(
-          action.id,
-        );
-        if (activeActionId === action.id) {
-          if (!nextActionNeedsSeparateSubmit && isActionValid(action.id)) {
-            handleExecute();
-          }
-          return;
-        }
-        if (!nextActionNeedsSeparateSubmit) {
-          lastChooserActionId = action.id;
-        } else if (!actionNeedsSeparateSubmit(activeActionId)) {
-          lastChooserActionId = activeActionId;
-        }
-        activeActionId = action.id;
-        syncActionUi();
-        if (
-          !actionNeedsExplicitReview(action.id) &&
-          !nextActionNeedsSeparateSubmit &&
-          isActionValid(action.id)
-        ) {
-          handleExecute();
-        }
-      });
-      buttons.push(actionButton);
-      actionChooser.appendChild(actionButton);
-    }
-    card.appendChild(actionChooser);
-  }
-
   const actionRow = doc.createElement("div");
-  actionRow.className = "llm-agent-hitl-actions";
+  actionRow.className = "llm-agent-hitl-actions llm-agent-hitl-footer";
+  const safeActionGroup = doc.createElement("div");
+  safeActionGroup.className = "llm-agent-hitl-footer-safe";
+  const primaryActionGroup = doc.createElement("div");
+  primaryActionGroup.className = "llm-agent-hitl-footer-primary";
   let executeButton: HTMLButtonElement | null = null;
   let backButton: HTMLButtonElement | null = null;
+  let alternativesToggleButton: HTMLButtonElement | null = null;
+  let alternativesOpen = false;
   const setButtonsDisabled = (disabled: boolean) => {
     for (const accessor of fieldAccessors) {
       accessor.setDisabled(disabled);
@@ -2661,6 +2599,36 @@ export function renderPendingActionCard(
     }
     return accessor.isValid();
   };
+  const syncConfirmButton = () => {
+    const isValid = isActionValid(activeActionId);
+    if (executeButton) {
+      executeButton.disabled = !isValid;
+    }
+  };
+  const syncAlternativeButtons = () => {
+    for (const [actionId, button] of alternativeButtons) {
+      const isActive = actionId === activeActionId;
+      button.hidden = isActive;
+      button.tabIndex = alternativesOpen && !isActive ? 0 : -1;
+    }
+  };
+  const setAlternativesOpen = (open: boolean, focusFirst = false) => {
+    if (!actionChooser || !alternativesToggleButton) return;
+    alternativesOpen = open;
+    actionChooser.dataset.open = open ? "true" : "false";
+    actionChooser.setAttribute("aria-hidden", open ? "false" : "true");
+    alternativesToggleButton.setAttribute(
+      "aria-expanded",
+      open ? "true" : "false",
+    );
+    syncAlternativeButtons();
+    if (open && focusFirst) {
+      const firstAlternative = Array.from(alternativeButtons.values()).find(
+        (button) => !button.hidden && !button.disabled,
+      );
+      firstAlternative?.focus({ preventScroll: true });
+    }
+  };
   const syncActionUi = () => {
     const isSeparateSubmitMode =
       buttonLayout.hasActionChooser &&
@@ -2672,39 +2640,161 @@ export function renderPendingActionCard(
       );
     }
     const activeAction = getActionById(activeActionId);
-    if (actionChooser) {
-      actionChooser.hidden = isSeparateSubmitMode;
-    }
     if (executeButton) {
-      executeButton.hidden =
-        !buttonLayout.showsFooterExecuteButton ||
-        (buttonLayout.hasActionChooser && !isSeparateSubmitMode);
+      executeButton.hidden = !buttonLayout.showsFooterExecuteButton;
       executeButton.textContent = isSeparateSubmitMode
         ? getSeparateSubmitLabel(activeActionId)
         : activeAction?.label || pending.action.confirmLabel || "Apply";
+      executeButton.dataset.actionId = activeActionId;
+      executeButton.className =
+        activeAction?.style === "danger"
+          ? "llm-agent-hitl-btn llm-agent-hitl-btn-danger"
+          : "llm-agent-hitl-btn";
     }
     if (backButton) {
       backButton.hidden = !isSeparateSubmitMode;
       backButton.textContent = getBackLabel(activeActionId);
     }
-    for (const button of buttons) {
-      if (button.dataset.actionChoice) {
-        const isActive = button.dataset.actionChoice === activeActionId;
-        button.className = isActive
-          ? "llm-agent-hitl-btn llm-agent-hitl-btn-active"
-          : button.dataset.primary === "true"
-            ? "llm-agent-hitl-btn"
-            : "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
-      }
+    if (alternativesToggleButton) {
+      alternativesToggleButton.hidden = isSeparateSubmitMode;
     }
+    card.dataset.activeActionId = activeActionId;
+    syncAlternativeButtons();
     syncConfirmButton();
   };
-  const syncConfirmButton = () => {
-    const isValid = isActionValid(activeActionId);
-    if (executeButton) {
-      executeButton.disabled = !isValid;
-    }
+  const executeAction = (actionId = activeActionId) => {
+    activeActionId = actionId;
+    setAlternativesOpen(false);
+    setButtonsDisabled(true);
+    const payload = Object.fromEntries(
+      fieldAccessors.map((accessor) => [accessor.id, accessor.getValue()]),
+    );
+    const activeAction = getActionById(actionId);
+    getAgentRuntime().resolveConfirmation(pending.requestId, {
+      approved:
+        activeAction?.approved ?? actionId !== normalizedActions.cancelActionId,
+      actionId,
+      data: payload,
+    });
   };
+  const handleExecute = () => {
+    executeAction(activeActionId);
+  };
+
+  if (buttonLayout.hasActionChooser && !isPagedReviewCard) {
+    actionChooser = doc.createElement("div");
+    actionChooser.className = "llm-agent-hitl-action-choices";
+    actionChooser.dataset.open = "false";
+    actionChooser.setAttribute("aria-hidden", "true");
+    actionChooser.setAttribute("role", "region");
+    const safeRequestId = pending.requestId.replace(/[^a-zA-Z0-9_-]/g, "-");
+    actionChooser.id = `llm-agent-hitl-alternatives-${safeRequestId}`;
+
+    const drawerInner = doc.createElement("div");
+    drawerInner.className = "llm-agent-hitl-alternatives-inner";
+    const drawerLabel = doc.createElement("div");
+    drawerLabel.className = "llm-agent-hitl-alternatives-label";
+    drawerLabel.textContent = "Other options";
+    drawerLabel.id = `${actionChooser.id}-label`;
+    actionChooser.setAttribute("aria-labelledby", drawerLabel.id);
+    const drawerList = doc.createElement("div");
+    drawerList.className = "llm-agent-hitl-alternatives-list";
+    drawerInner.append(drawerLabel, drawerList);
+    actionChooser.appendChild(drawerInner);
+
+    for (const action of normalizedActions.primaryActions) {
+      const actionButton = doc.createElement("button");
+      actionButton.type = "button";
+      actionButton.dataset.actionChoice = action.id;
+      actionButton.dataset.actionStyle = action.style || "secondary";
+      actionButton.className = "llm-agent-hitl-alternative";
+      const actionLabel = doc.createElement("span");
+      actionLabel.className = "llm-agent-hitl-alternative-label";
+      actionLabel.textContent = action.label;
+      actionButton.appendChild(actionLabel);
+      if (actionNeedsSeparateSubmit(action.id)) {
+        const actionMeta = doc.createElement("span");
+        actionMeta.className = "llm-agent-hitl-alternative-meta";
+        actionMeta.textContent = "Requires input";
+        actionButton.appendChild(actionMeta);
+      }
+      actionButton.addEventListener("click", () => {
+        if (action.id === activeActionId) return;
+        if (actionNeedsSeparateSubmit(action.id)) {
+          lastChooserActionId = activeActionId;
+        }
+        activeActionId = action.id;
+        setAlternativesOpen(false);
+        syncActionUi();
+        executeButton?.focus({ preventScroll: true });
+      });
+      alternativeButtons.set(action.id, actionButton);
+      buttons.push(actionButton);
+      drawerList.appendChild(actionButton);
+    }
+    actionChooser.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setAlternativesOpen(false);
+      alternativesToggleButton?.focus({ preventScroll: true });
+    });
+    card.appendChild(actionChooser);
+  }
+
+  if (!isPagedReviewCard && normalizedActions.cancelAction) {
+    const cancelButton = doc.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.dataset.kind = "cancel";
+    cancelButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
+    cancelButton.textContent =
+      normalizedActions.cancelAction.label ||
+      pending.action.cancelLabel ||
+      "Cancel";
+    cancelButton.addEventListener("click", () => {
+      setAlternativesOpen(false);
+      setButtonsDisabled(true);
+      getAgentRuntime().resolveConfirmation(pending.requestId, {
+        approved: false,
+        actionId: normalizedActions.cancelActionId,
+      });
+    });
+    buttons.push(cancelButton);
+    safeActionGroup.appendChild(cancelButton);
+  }
+
+  if (!isPagedReviewCard && buttonLayout.hasActionChooser) {
+    alternativesToggleButton = doc.createElement("button");
+    alternativesToggleButton.type = "button";
+    alternativesToggleButton.dataset.kind = "alternatives";
+    alternativesToggleButton.className =
+      "llm-agent-hitl-btn llm-agent-hitl-btn-secondary llm-agent-hitl-alternatives-toggle";
+    alternativesToggleButton.textContent = "Alternatives";
+    alternativesToggleButton.setAttribute("aria-expanded", "false");
+    if (actionChooser) {
+      alternativesToggleButton.setAttribute("aria-controls", actionChooser.id);
+    }
+    alternativesToggleButton.addEventListener("click", () => {
+      setAlternativesOpen(!alternativesOpen, !alternativesOpen);
+    });
+    buttons.push(alternativesToggleButton);
+    primaryActionGroup.appendChild(alternativesToggleButton);
+
+    backButton = doc.createElement("button");
+    backButton.type = "button";
+    backButton.dataset.kind = "back";
+    backButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
+    backButton.textContent = getBackLabel(activeActionId);
+    backButton.hidden = true;
+    backButton.addEventListener("click", () => {
+      activeActionId = lastChooserActionId;
+      setAlternativesOpen(false);
+      syncActionUi();
+      executeButton?.focus({ preventScroll: true });
+    });
+    buttons.push(backButton);
+    primaryActionGroup.appendChild(backButton);
+  }
+
   if (!isPagedReviewCard && buttonLayout.showsFooterExecuteButton) {
     executeButton = doc.createElement("button");
     executeButton.type = "button";
@@ -2715,22 +2805,12 @@ export function renderPendingActionCard(
       handleExecute();
     });
     buttons.push(executeButton);
-    actionRow.appendChild(executeButton);
+    primaryActionGroup.appendChild(executeButton);
   }
 
-  if (!isPagedReviewCard && buttonLayout.hasActionChooser) {
-    backButton = doc.createElement("button");
-    backButton.type = "button";
-    backButton.dataset.kind = "back";
-    backButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
-    backButton.textContent = getBackLabel(activeActionId);
-    backButton.hidden = true;
-    backButton.addEventListener("click", () => {
-      activeActionId = lastChooserActionId;
-      syncActionUi();
-    });
-    buttons.push(backButton);
-    actionRow.appendChild(backButton);
+  if (!isPagedReviewCard) {
+    actionRow.append(safeActionGroup, primaryActionGroup);
+    card.appendChild(actionRow);
   }
 
   const createPendingActionButton = (
@@ -2764,7 +2844,8 @@ export function renderPendingActionCard(
     }
 
     const pagedActions = doc.createElement("div");
-    pagedActions.className = "llm-agent-hitl-paged-actions";
+    pagedActions.className =
+      "llm-agent-hitl-paged-actions llm-agent-hitl-footer";
 
     const left = doc.createElement("div");
     left.className =
@@ -2812,28 +2893,6 @@ export function renderPendingActionCard(
     card.appendChild(pagedActions);
   }
 
-  if (!isPagedReviewCard && normalizedActions.cancelAction) {
-    const cancelButton = doc.createElement("button");
-    cancelButton.type = "button";
-    cancelButton.dataset.kind = "cancel";
-    cancelButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
-    cancelButton.textContent =
-      normalizedActions.cancelAction.label ||
-      pending.action.cancelLabel ||
-      "Cancel";
-    cancelButton.addEventListener("click", () => {
-      setButtonsDisabled(true);
-      getAgentRuntime().resolveConfirmation(pending.requestId, {
-        approved: false,
-        actionId: normalizedActions.cancelActionId,
-      });
-    });
-    buttons.push(cancelButton);
-    actionRow.appendChild(cancelButton);
-  }
-  if (!isPagedReviewCard && actionRow.children.length > 0) {
-    card.appendChild(actionRow);
-  }
   syncActionUi();
   for (const accessor of fieldAccessors) {
     accessor.bindValidity?.(syncActionUi);

@@ -43,29 +43,33 @@ export function renderActionCompletionCard(
 ): HTMLDivElement {
   const card = doc.createElement("div");
   card.className = "llm-agent-hitl-card llm-agent-hitl-card-complete";
+  card.dataset.status = feedback.status;
+  const content = doc.createElement("div");
+  content.className = "llm-agent-hitl-content llm-agent-hitl-status-content";
+  card.appendChild(content);
 
   const header = doc.createElement("div");
   header.className = "llm-agent-hitl-header";
   header.textContent = feedback.status === "failure" ? "Failed" : "Complete";
-  card.appendChild(header);
+  content.appendChild(header);
 
   const title = doc.createElement("div");
   title.className = "llm-agent-hitl-title";
   title.textContent = feedback.title;
-  card.appendChild(title);
+  content.appendChild(title);
 
   if (feedback.description) {
     const description = doc.createElement("div");
     description.className = "llm-agent-hitl-description";
     description.textContent = feedback.description;
-    card.appendChild(description);
+    content.appendChild(description);
   }
 
   const countdown = doc.createElement("div");
   countdown.className = "llm-agent-hitl-description";
   countdown.setAttribute("data-action-completion-countdown", "true");
   countdown.textContent = formatActionCompletionCountdown(secondsRemaining);
-  card.appendChild(countdown);
+  content.appendChild(countdown);
 
   return card;
 }
@@ -142,30 +146,33 @@ export function renderActionTransitionCard(
   card.className = "llm-agent-hitl-card llm-agent-hitl-card-transition";
   card.setAttribute("role", "status");
   card.setAttribute("aria-live", "polite");
+  const content = doc.createElement("div");
+  content.className = "llm-agent-hitl-content llm-agent-hitl-status-content";
+  card.appendChild(content);
 
   const header = doc.createElement("div");
   header.className = "llm-agent-hitl-header";
   header.textContent = "Working";
-  card.appendChild(header);
+  content.appendChild(header);
 
   const { title: titleText, description: descriptionText } =
     getActionTransitionText(actionId);
   const title = doc.createElement("div");
   title.className = "llm-agent-hitl-title";
   title.textContent = titleText;
-  card.appendChild(title);
+  content.appendChild(title);
 
   const description = doc.createElement("div");
   description.className = "llm-agent-hitl-description";
   description.textContent = descriptionText;
-  card.appendChild(description);
+  content.appendChild(description);
 
   const typing = doc.createElement("div");
   typing.className = "llm-typing llm-agent-hitl-transition-typing";
   typing.setAttribute("aria-hidden", "true");
   typing.innerHTML =
     '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
-  card.appendChild(typing);
+  content.appendChild(typing);
 
   return card;
 }
@@ -324,6 +331,9 @@ export function createActionCommandLifecycle(params: {
       chatBox.querySelector(".llm-action-progress-card")?.remove();
       const wrapper = ownerDoc.createElement("div");
       wrapper.className = "llm-action-progress-card";
+      const eyebrow = ownerDoc.createElement("div");
+      eyebrow.className = "llm-action-progress-eyebrow";
+      eyebrow.textContent = "Working";
       const header = ownerDoc.createElement("div");
       header.className = "llm-action-progress-header";
       const title = ownerDoc.createElement("div");
@@ -334,7 +344,7 @@ export function createActionCommandLifecycle(params: {
       typing.innerHTML =
         '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
       header.append(title, typing);
-      wrapper.appendChild(header);
+      wrapper.append(eyebrow, header);
       stepText = ownerDoc.createElement("div");
       stepText.className = "llm-action-progress-step";
       stepText.textContent = "Starting...";

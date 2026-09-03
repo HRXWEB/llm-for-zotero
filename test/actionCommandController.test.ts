@@ -1058,6 +1058,7 @@ describe("actionCommandController", function () {
 
     assert.equal(card.getAttribute("role"), "status");
     assert.equal(card.getAttribute("aria-live"), "polite");
+    assert.exists(card.querySelector(".llm-agent-hitl-status-content"));
     assert.equal(
       card.querySelector(".llm-agent-hitl-header")?.textContent,
       "Working",
@@ -1070,6 +1071,29 @@ describe("actionCommandController", function () {
       card.querySelector(".llm-agent-hitl-description")?.textContent || "",
       "previous review page",
     );
+  });
+
+  it("uses the shared action-card visual hierarchy for progress", function () {
+    const doc = new FakeDocument();
+    const body = doc.createElement("div");
+    const chatBox = doc.createElement("div");
+    body.appendChild(chatBox);
+    const lifecycle = createActionCommandLifecycle({
+      body: body as unknown as Element,
+      actionHitlPanel: null,
+      chatBox: chatBox as unknown as HTMLDivElement,
+      syncHasActionCardAttr: () => undefined,
+    });
+
+    const progress = lifecycle.createActionProgressIndicator("apply_tags");
+    const card = chatBox.querySelector(".llm-action-progress-card");
+
+    assert.equal(
+      card?.querySelector(".llm-action-progress-eyebrow")?.textContent,
+      "Working",
+    );
+    assert.exists(card?.querySelector(".llm-action-progress-title"));
+    progress.remove();
   });
 
   it("replaces an approved action HITL card with a working state", async function () {

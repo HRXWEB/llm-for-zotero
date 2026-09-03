@@ -4912,8 +4912,189 @@ describe("agentTrace render", function () {
 
     assert.deepEqual(getPendingActionButtonLayout(action), {
       hasActionChooser: true,
-      showsFooterExecuteButton: false,
+      showsFooterExecuteButton: true,
     });
+  });
+
+  it("promotes drawer alternatives without executing them immediately", function () {
+    const action: AgentPendingAction = {
+      toolName: "approve_research_expansion",
+      mode: "review",
+      title: "Research scope expanded",
+      description: "Choose how the research should continue.",
+      confirmLabel: "Continue research",
+      cancelLabel: "Revise or cancel",
+      actions: [
+        {
+          id: "expand_continue",
+          label: "Expand and continue",
+          style: "primary",
+        },
+        {
+          id: "finish_limitations",
+          label: "Finish with limitations",
+          style: "secondary",
+        },
+        {
+          id: "revise_cancel",
+          label: "Revise or cancel",
+          style: "secondary",
+        },
+      ],
+      defaultActionId: "expand_continue",
+      cancelActionId: "revise_cancel",
+      fields: [],
+    };
+
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "research-expansion",
+      action,
+    }) as unknown as FakeElement;
+    const content = card.findByClass("llm-agent-hitl-content");
+    const drawer = card.findByClass("llm-agent-hitl-action-choices");
+    const footer = card.findByClass("llm-agent-hitl-footer");
+    const toggle = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "alternatives");
+    const execute = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "save");
+    const cancel = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "cancel");
+    const alternative = card
+      .findAllByClass("llm-agent-hitl-alternative")
+      .find((button) => button.dataset.actionChoice === "finish_limitations");
+
+    assert.strictEqual(card.children[0], content);
+    assert.exists(drawer);
+    assert.exists(footer);
+    assert.exists(toggle);
+    assert.exists(execute);
+    assert.exists(cancel);
+    assert.equal(toggle?.attributes["aria-expanded"], "false");
+    assert.equal(drawer?.dataset.open, "false");
+    assert.equal(execute?.textContent, "Expand and continue");
+    assert.equal(execute?.dataset.actionId, "expand_continue");
+
+    toggle?.dispatchFakeEvent("click");
+    assert.equal(toggle?.attributes["aria-expanded"], "true");
+    assert.equal(drawer?.dataset.open, "true");
+
+    assert.doesNotThrow(() => alternative?.dispatchFakeEvent("click"));
+    assert.equal(card.dataset.activeActionId, "finish_limitations");
+    assert.equal(drawer?.dataset.open, "false");
+    assert.equal(execute?.textContent, "Finish with limitations");
+    assert.equal(execute?.dataset.actionId, "finish_limitations");
+    assert.isFalse(cancel?.disabled || false);
+  });
+
+  it("preserves the note diff subtree inside the redesigned card body", function () {
+    const action: AgentPendingAction = {
+      toolName: "edit_current_note",
+      mode: "review",
+      title: "Review note update",
+      description: "Review the proposed note changes before applying them.",
+      confirmLabel: "Apply edit",
+      cancelLabel: "Cancel",
+      fields: [
+        {
+          type: "diff_preview",
+          id: "noteDiff",
+          label: "Note changes",
+          before: "Old claim\nShared context",
+          after: "New claim\nShared context",
+          contextLines: 0,
+        },
+      ],
+    };
+
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "note-edit-diff",
+      action,
+    }) as unknown as FakeElement;
+    const content = card.findByClass("llm-agent-hitl-content");
+    const diff = card.findByClass("llm-agent-hitl-diff");
+
+    assert.strictEqual(card.children[0], content);
+    assert.exists(diff?.findByClass("llm-agent-hitl-diff-body"));
+    assert.exists(diff?.findByClass("llm-agent-hitl-diff-gutter"));
+    assert.exists(diff?.findByClass("llm-agent-hitl-diff-line-remove"));
+    assert.exists(diff?.findByClass("llm-agent-hitl-diff-line-add"));
+    assert.exists(diff?.findByClass("llm-agent-hitl-diff-content"));
+  });
+
+  it("shows scoped fields for a promoted edit action and can return safely", function () {
+    const action: AgentPendingAction = {
+      toolName: "literature_search",
+      mode: "review",
+      title: "Review online literature results",
+      confirmLabel: "Import selected",
+      cancelLabel: "Cancel",
+      actions: [
+        { id: "import", label: "Import selected", style: "primary" },
+        {
+          id: "new_search",
+          label: "Search again",
+          style: "secondary",
+          executionMode: "edit",
+          submitLabel: "Confirm search",
+          backLabel: "Get back",
+        },
+        { id: "cancel", label: "Cancel", style: "secondary" },
+      ],
+      defaultActionId: "import",
+      cancelActionId: "cancel",
+      fields: [
+        {
+          type: "text",
+          id: "nextQuery",
+          label: "Next search query",
+          value: "plasticity",
+          visibleForActionIds: ["new_search"],
+          requiredForActionIds: ["new_search"],
+        },
+      ],
+    };
+
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "search-again",
+      action,
+    }) as unknown as FakeElement;
+    const field = card.findByClass(
+      "llm-agent-hitl-field",
+    ) as unknown as HTMLElement | null;
+    const toggle = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "alternatives") as unknown as
+      | HTMLElement
+      | undefined;
+    const back = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "back") as unknown as
+      | HTMLElement
+      | undefined;
+    const execute = card
+      .findAllByTag("button")
+      .find((button) => button.dataset.kind === "save");
+    const editAlternative = card
+      .findAllByClass("llm-agent-hitl-alternative")
+      .find((button) => button.dataset.actionChoice === "new_search");
+
+    assert.isTrue(Boolean(field?.hidden));
+    assert.isFalse(Boolean(toggle?.hidden));
+    assert.isTrue(Boolean(back?.hidden));
+
+    editAlternative?.dispatchFakeEvent("click");
+    assert.isFalse(Boolean(field?.hidden));
+    assert.isTrue(Boolean(toggle?.hidden));
+    assert.isFalse(Boolean(back?.hidden));
+    assert.equal(execute?.textContent, "Confirm search");
+
+    (back as unknown as FakeElement | undefined)?.dispatchFakeEvent("click");
+    assert.isTrue(Boolean(field?.hidden));
+    assert.isFalse(Boolean(toggle?.hidden));
+    assert.equal(execute?.textContent, "Import selected");
   });
 
   it("shows a footer execute button when a multi-action review needs extra input", function () {
