@@ -338,6 +338,15 @@ export type AgentInheritedApproval = {
 export type ToolSpec = {
   name: string;
   description: string;
+  /**
+   * Provider-portable JSON Schema for model-generated arguments.
+   *
+   * A model-visible tool must use a non-array root with `type: "object"` and
+   * must not use root-level `oneOf`, `allOf`, or `anyOf`. Nested composition is
+   * allowed. Enforce cross-field constraints in the tool's `validate()`
+   * function. Internal-only tools are exempt because their schemas are not
+   * advertised to models or MCP clients.
+   */
   inputSchema: object;
   /**
    * Safety class for the validated operation.

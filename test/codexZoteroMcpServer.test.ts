@@ -1704,7 +1704,22 @@ describe("Zotero MCP server", function () {
       const listedPaperRead = JSON.parse(listResponse[2]).result.tools.find(
         (tool: { name: string }) => tool.name === "paper_read",
       );
-      assert.isArray(listedPaperRead.inputSchema.properties.target.anyOf);
+      const listedSchema = listedPaperRead.inputSchema as Record<
+        string,
+        unknown
+      >;
+      assert.equal(listedSchema.type, "object");
+      for (const keyword of ["oneOf", "allOf", "anyOf"]) {
+        assert.notProperty(listedSchema, keyword);
+      }
+      const listedProperties = listedSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      assert.isArray(listedProperties.target.anyOf);
+      assert.isArray(
+        (listedProperties.targets.items as Record<string, unknown>).anyOf,
+      );
 
       const response = await invokeMcpEndpoint({
         token: getOrCreateZoteroMcpBearerToken(),

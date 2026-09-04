@@ -62,6 +62,17 @@
  *    addon.api.agent.unregisterTool("my_tool");
  *    ```
  *
+ * ## Input schema portability
+ *
+ * `registerTool` is synchronous, returns no value, and throws before
+ * registration when a model-visible tool does not provide a portable
+ * object-root input schema.
+ * The root must declare `type: "object"` and must not contain `oneOf`, `allOf`,
+ * or `anyOf`; those composition keywords may be used inside properties.
+ * Enforce cross-field constraints, such as mutually exclusive properties, in
+ * the tool's `validate()` function.
+ * Internal-only tools are exempt because their schemas are never advertised.
+ *
  * ## Tool execution class
  *
  * - `"read"` — the tool only reads data. Read tools may still open a HITL card

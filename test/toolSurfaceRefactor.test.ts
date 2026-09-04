@@ -278,15 +278,33 @@ describe("semantic tool surface", function () {
     }
   });
 
-  it("does not expose loose top-level schemas for model-visible built-ins", function () {
+  it("keeps model-visible built-in schemas portable at the root", function () {
     const registry = createTestBuiltInRegistry();
-    const looseTools = registry
-      .listToolsForRequest(baseContext.request)
-      .flatMap((tool) => {
-        const schema = tool.inputSchema as { additionalProperties?: unknown };
-        return schema.additionalProperties === true ? [tool.name] : [];
-      });
+    const visibleTools = registry.listToolsForRequest(baseContext.request);
+    const looseTools = visibleTools.flatMap((tool) => {
+      const schema = tool.inputSchema as { additionalProperties?: unknown };
+      return schema.additionalProperties === true ? [tool.name] : [];
+    });
     assert.deepEqual(looseTools, []);
+    for (const tool of visibleTools) {
+      const schema = tool.inputSchema as Record<string, unknown>;
+      assert.isFalse(
+        Array.isArray(schema),
+        `${tool.name} must have an object root`,
+      );
+      assert.equal(
+        schema.type,
+        "object",
+        `${tool.name} must declare type object`,
+      );
+      for (const keyword of ["oneOf", "allOf", "anyOf"]) {
+        assert.notProperty(
+          schema,
+          keyword,
+          `${tool.name} must not use root-level ${keyword}`,
+        );
+      }
+    }
   });
 
   it("advertises delegate fields on semantic facade schemas", function () {
@@ -562,6 +580,9 @@ describe("semantic tool surface", function () {
       assert.include(conflicting.error, "conflicting_target_arguments");
     }
 
+    assert.equal(tool.validate({ mode: "targeted" }).ok, true);
+    assert.equal(tool.validate({ mode: "targeted", target: {} }).ok, true);
+
     const visualOnly = tool.validate({
       mode: "targeted",
       target: { attachmentId: "upload-1" },
@@ -600,7 +621,7 @@ describe("semantic tool surface", function () {
     assert.equal(visualPaperTarget.ok, true);
   });
 
-  it("paper_read advertises non-empty mutually exclusive target shapes", function () {
+  it("paper_read advertises non-empty target shapes without root composition", function () {
     const tool = createPaperReadTool(
       {} as never,
       {} as never,
@@ -608,16 +629,27 @@ describe("semantic tool surface", function () {
       {} as never,
     );
     const schema = tool.spec.inputSchema as {
-      allOf?: unknown[];
       properties?: {
-        target?: { anyOf?: unknown[] };
-        targets?: { minItems?: number; items?: { anyOf?: unknown[] } };
+        target?: { anyOf?: unknown[]; description?: string };
+        targets?: {
+          minItems?: number;
+          items?: { anyOf?: unknown[] };
+          description?: string;
+        };
       };
     };
-    assert.isNotEmpty(schema.allOf);
+    for (const keyword of ["oneOf", "allOf", "anyOf"]) {
+      assert.notProperty(schema, keyword);
+    }
     assert.isNotEmpty(schema.properties?.target?.anyOf);
     assert.isNotEmpty(schema.properties?.targets?.items?.anyOf);
     assert.equal(schema.properties?.targets?.minItems, 1);
+    assert.match(tool.spec.description, /target or targets, never both/i);
+    assert.match(tool.spec.description, /omit both/i);
+    assert.match(
+      `${schema.properties?.target?.description} ${schema.properties?.targets?.description}`,
+      /never both/i,
+    );
   });
 
   it("paper_read refuses active-reader fallback in collection-scoped library chat", async function () {

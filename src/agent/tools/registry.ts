@@ -288,6 +288,30 @@ function normalizeExecutionOutput(value: AgentToolExecutionOutput<any>): {
   };
 }
 
+function assertPortableModelToolSchema(spec: ToolSpec): void {
+  if (spec.exposure === "internal") return;
+
+  const schema = spec.inputSchema;
+  if (
+    !schema ||
+    typeof schema !== "object" ||
+    Array.isArray(schema) ||
+    (schema as Record<string, unknown>).type !== "object"
+  ) {
+    throw new Error(
+      `Tool "${spec.name}" has an incompatible model-visible inputSchema: the schema root must be a non-array object with type: "object".`,
+    );
+  }
+
+  for (const keyword of ["oneOf", "allOf", "anyOf"] as const) {
+    if (Object.prototype.hasOwnProperty.call(schema, keyword)) {
+      throw new Error(
+        `Tool "${spec.name}" has an incompatible model-visible inputSchema: root-level "${keyword}" is not portable across providers. Move alternatives into properties and enforce cross-field rules in validate().`,
+      );
+    }
+  }
+}
+
 export class AgentToolRegistry {
   private readonly tools = new Map<string, AgentToolDefinition<any, any>>();
 
@@ -364,6 +388,7 @@ export class AgentToolRegistry {
   }
 
   register<TInput, TResult>(tool: AgentToolDefinition<TInput, TResult>): void {
+    assertPortableModelToolSchema(tool.spec);
     const registered = tool.planInvocation
       ? tool
       : {

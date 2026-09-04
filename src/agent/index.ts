@@ -246,7 +246,11 @@ export function getAgentApi() {
     /**
      * Register a custom tool with the agent.  The tool is available immediately
      * for all subsequent `runTurn` calls.  Registering a tool whose name
-     * matches an existing built-in tool replaces that built-in.
+     * matches an existing built-in tool replaces that built-in after validation.
+     * This synchronous call throws before registration when a model-visible
+     * input schema lacks an object root or uses root-level `oneOf`, `allOf`, or
+     * `anyOf`. Put alternatives inside properties and enforce cross-field rules
+     * in the tool's `validate()` function.
      *
      * See `src/agent/extensionApi.ts` for the full set of types and helpers
      * available to third-party tool authors.
@@ -274,7 +278,7 @@ export function getAgentApi() {
      */
     registerTool: <TInput, TResult>(
       tool: AgentToolDefinition<TInput, TResult>,
-    ) => getAgentRuntime().registerTool(tool),
+    ): void => getAgentRuntime().registerTool(tool),
 
     /**
      * Remove a previously registered tool by name.  Returns `true` if the

@@ -908,17 +908,10 @@ export function createPaperReadTool(
     spec: {
       name: "paper_read",
       description:
-        "Read content from the active or targeted paper through one semantic tool. Use mode:'overview' for bounded summaries, mode:'targeted' for relevance-ranked textual evidence, mode:'full' only when the user explicitly requests exhaustive full-text reading, mode:'figures' for precise extracted figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible Zotero reader page.",
+        "Read content from the active or targeted paper through one semantic tool. Provide target or targets, never both; omit both to use the current turn's paper scope. Use mode:'overview' for bounded summaries, mode:'targeted' for relevance-ranked textual evidence, mode:'full' only when the user explicitly requests exhaustive full-text reading, mode:'figures' for precise extracted figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible Zotero reader page.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
-        allOf: [
-          {
-            not: {
-              required: ["target", "targets"],
-            },
-          },
-        ],
         properties: {
           mode: {
             type: "string",
@@ -936,7 +929,7 @@ export function createPaperReadTool(
           target: {
             type: "object",
             description:
-              "Optional explicit paper or visual target. Omit this property to use the current turn's paper scope.",
+              "Optional explicit paper or visual target. Provide target or targets, never both; omit both to use the current turn's paper scope.",
             properties: {
               contextItemId: { type: "number" },
               itemId: { type: "number" },
@@ -957,7 +950,7 @@ export function createPaperReadTool(
             type: "array",
             minItems: 1,
             description:
-              "Optional explicit paper targets. Omit this property to use the current turn's paper scope.",
+              "Optional explicit paper targets. Provide target or targets, never both; omit both to use the current turn's paper scope.",
             items: {
               type: "object",
               properties: {

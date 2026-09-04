@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AnthropicMessagesAgentAdapter } from "../src/agent/model/anthropicMessages";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import type {
   AgentModelMessage,
   AgentRuntimeRequest,
@@ -118,6 +119,62 @@ describe("AnthropicMessagesAgentAdapter", function () {
     if (step.kind !== "tool_calls") return;
     assert.equal(step.calls[0].id, "toolu_123");
     assert.deepEqual(step.calls[0].arguments, { query: "methods" });
+  });
+
+  it("serializes the real paper_read schema with a portable object root", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    let capturedBody: Record<string, unknown> | null = null;
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            body: undefined,
+            json: async () => ({
+              content: [{ type: "text", text: "OK" }],
+            }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+
+    await new AnthropicMessagesAgentAdapter().runStep({
+      request: makeRequest(),
+      messages: [{ role: "user", content: "Explain the paper" }],
+      tools: [paperRead.spec],
+    });
+
+    const bodyTools = capturedBody?.tools as
+      | Array<Record<string, unknown>>
+      | undefined;
+    const inputSchema = bodyTools?.[0]?.input_schema as Record<string, unknown>;
+    assert.equal(inputSchema.type, "object");
+    for (const keyword of ["oneOf", "allOf", "anyOf"]) {
+      assert.notProperty(inputSchema, keyword);
+    }
+    const properties = inputSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    assert.isArray(properties.target.anyOf);
+    assert.isArray((properties.targets.items as Record<string, unknown>).anyOf);
   });
 
   for (const provider of [

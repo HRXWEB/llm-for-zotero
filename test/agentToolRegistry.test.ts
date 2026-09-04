@@ -2,7 +2,7 @@ import { assert } from "chai";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import type { AgentToolContext } from "../src/agent/types";
+import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import {
   prohibitedInvocationPlan,
@@ -40,6 +40,26 @@ describe("AgentToolRegistry", function () {
     currentAnswerText: "",
     modelName: "gpt-4o-mini",
   };
+
+  function createSchemaTool(params: {
+    name: string;
+    inputSchema: object;
+    exposure?: "model" | "internal";
+    description?: string;
+  }): AgentToolDefinition<unknown, unknown> {
+    return {
+      spec: {
+        name: params.name,
+        description: params.description || "schema fixture",
+        inputSchema: params.inputSchema,
+        executionClass: "read",
+        requiresConfirmation: false,
+        exposure: params.exposure,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      execute: async (input) => input,
+    };
+  }
 
   it("returns an error result for unknown tools", async function () {
     const registry = new AgentToolRegistry();
@@ -89,6 +109,83 @@ describe("AgentToolRegistry", function () {
     assert.isArray(plan?.targets);
     assert.isArray(plan?.riskSignals);
     assert.isNotEmpty(plan?.reason || "");
+  });
+
+  it("rejects root composition in model-visible schemas before replacing a tool", function () {
+    for (const keyword of ["oneOf", "allOf", "anyOf"] as const) {
+      const registry = new AgentToolRegistry();
+      const name = `portable_${keyword}`;
+      registry.register(
+        createSchemaTool({
+          name,
+          inputSchema: { type: "object" },
+          description: "existing tool",
+        }),
+      );
+
+      let registrationError: unknown;
+      try {
+        registry.register(
+          createSchemaTool({
+            name,
+            inputSchema: { type: "object", [keyword]: [] },
+            description: "invalid replacement",
+          }),
+        );
+      } catch (error) {
+        registrationError = error;
+      }
+      assert.instanceOf(registrationError, Error);
+      const message = (registrationError as Error).message;
+      assert.include(message, name);
+      assert.include(message, keyword);
+      assert.include(message, "properties");
+      assert.include(message, "validate()");
+      assert.equal(registry.getTool(name)?.spec.description, "existing tool");
+    }
+  });
+
+  it("requires a non-array object schema with type object for model-visible tools", function () {
+    const invalidSchemas: Array<{ label: string; schema: object }> = [
+      { label: "array root", schema: [] },
+      { label: "null root", schema: null as unknown as object },
+      { label: "missing type", schema: {} },
+      { label: "array type", schema: { type: "array" } },
+    ];
+
+    for (const fixture of invalidSchemas) {
+      const registry = new AgentToolRegistry();
+      const name = `invalid_${fixture.label.replace(/ /g, "_")}`;
+      let registrationError: unknown;
+      try {
+        registry.register(
+          createSchemaTool({ name, inputSchema: fixture.schema }),
+        );
+      } catch (error) {
+        registrationError = error;
+      }
+      assert.instanceOf(registrationError, Error);
+      const message = (registrationError as Error).message;
+      assert.include(message, name);
+      assert.include(message, 'type: "object"');
+    }
+  });
+
+  it("permits root composition for internal-only tool schemas", function () {
+    const registry = new AgentToolRegistry();
+    registry.register(
+      createSchemaTool({
+        name: "internal_composed_tool",
+        inputSchema: { allOf: [{ type: "object" }] },
+        exposure: "internal",
+      }),
+    );
+
+    assert.exists(registry.getTool("internal_composed_tool"));
+    assert.notInclude(
+      registry.listTools().map((tool) => tool.name),
+      "internal_composed_tool",
+    );
   });
 
   it("rejects malformed diagnostic arguments centrally before validation", async function () {
