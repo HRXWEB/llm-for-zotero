@@ -5,6 +5,15 @@ import { openStandaloneDocumentWindow } from "../src/modules/contextPanel/standa
 class FakeElement {
   public readonly children: FakeElement[] = [];
   public readonly attributes: Record<string, string> = {};
+  public readonly style = {
+    values: {} as Record<string, string>,
+    setProperty(name: string, value: string) {
+      this.values[name] = value;
+    },
+    getPropertyValue(name: string) {
+      return this.values[name] || "";
+    },
+  };
   public className = "";
   public textContent = "";
   public rel = "";
@@ -181,5 +190,54 @@ describe("standalone document window", function () {
     );
     assert.isTrue(targetWin.dispatchKey({ key: "w", ctrlKey: true }));
     assert.isTrue(targetWin.closed);
+  });
+
+  it("zooms document text with Cmd or Ctrl shortcuts and resets locally", function () {
+    const targetDoc = new FakeDocument(new FakeElement());
+    const targetWin = createWindow(targetDoc);
+    const sourceDoc = {
+      documentElement: new FakeElement(),
+      defaultView: {
+        getComputedStyle: () => ({ getPropertyValue: () => "" }),
+        openDialog: () => targetWin,
+      },
+    };
+
+    assert.isTrue(
+      openStandaloneDocumentWindow({
+        sourceDoc: sourceDoc as unknown as Document,
+        chromeDocument: "standaloneResponseDocument.xhtml",
+        windowName: "response-window-text-zoom",
+        rootId: "document-root",
+        title: "Response from Codex",
+        render: () => undefined,
+      }),
+    );
+
+    const fontSize = () =>
+      targetDoc.documentElement.style.getPropertyValue(
+        "--llm-document-font-size",
+      );
+    assert.equal(fontSize(), "15.5px");
+    assert.isTrue(targetWin.dispatchKey({ key: "=", metaKey: true }));
+    assert.equal(fontSize(), "17.05px");
+    assert.isTrue(targetWin.dispatchKey({ key: "+", ctrlKey: true }));
+    assert.equal(fontSize(), "18.6px");
+    assert.isTrue(targetWin.dispatchKey({ key: "-", metaKey: true }));
+    assert.equal(fontSize(), "17.05px");
+    assert.isTrue(targetWin.dispatchKey({ key: "0", metaKey: true }));
+    assert.equal(fontSize(), "15.5px");
+
+    for (let index = 0; index < 20; index += 1) {
+      targetWin.dispatchKey({ key: "-", ctrlKey: true });
+    }
+    assert.equal(fontSize(), "10.85px");
+    for (let index = 0; index < 30; index += 1) {
+      targetWin.dispatchKey({ key: "+", ctrlKey: true });
+    }
+    assert.equal(fontSize(), "31px");
+
+    assert.isFalse(targetWin.dispatchKey({ key: "x", metaKey: true }));
+    assert.equal(fontSize(), "31px");
   });
 });

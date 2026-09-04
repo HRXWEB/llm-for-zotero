@@ -110,6 +110,7 @@ type AgentTraceSummaryRow = {
 };
 
 const agentTraceActionExpandedCache = new Map<string, boolean>();
+const planProgressPinnedOpenCache = new Map<string, boolean>();
 const agentActivityExpandedCache = new WeakMap<
   Message,
   { open: boolean; wasWorking: boolean }
@@ -4833,6 +4834,9 @@ function renderPlanContainer(params: {
   };
 
   const wrapExecutionProgress = (ledger: PlanExecutionLedger): void => {
+    if (!isFloatingPlanExecutionStatus(ledger.status)) {
+      planProgressPinnedOpenCache.delete(ledger.executionId);
+    }
     const required = ledger.tasks.filter(
       (entry) => entry.kind === "required_step",
     );
@@ -4903,6 +4907,11 @@ function renderPlanContainer(params: {
 
     const setPinnedOpen = (open: boolean) => {
       if (open) positionFloatingPopover();
+      if (open) {
+        planProgressPinnedOpenCache.set(ledger.executionId, true);
+      } else {
+        planProgressPinnedOpenCache.delete(ledger.executionId);
+      }
       root.classList.toggle("llm-plan-progress-open", open);
       trigger.setAttribute("aria-expanded", open ? "true" : "false");
       trigger.setAttribute("aria-label", progressTriggerLabel(open));
@@ -4926,6 +4935,18 @@ function renderPlanContainer(params: {
     });
 
     root.replaceChildren(trigger, popover);
+    const pinnedOpen =
+      planProgressPinnedOpenCache.get(ledger.executionId) === true;
+    root.classList.toggle("llm-plan-progress-open", pinnedOpen);
+    trigger.setAttribute("aria-expanded", pinnedOpen ? "true" : "false");
+    trigger.setAttribute("aria-label", progressTriggerLabel(pinnedOpen));
+    if (pinnedOpen) {
+      params.doc.defaultView?.setTimeout(() => {
+        if (!root.classList.contains("llm-plan-progress-open")) return;
+        if (!root.isConnected && !root.parentElement) return;
+        positionFloatingPopover();
+      }, 0);
+    }
     if (liveRegion) root.appendChild(liveRegion);
   };
 
@@ -5069,19 +5090,33 @@ function renderPlanContainer(params: {
         "Approve to start these steps. Anything outside this plan will still require a new decision.";
       root.appendChild(approvalHint);
       const actions = params.doc.createElement("div");
-      actions.className = "llm-plan-actions";
+      actions.className = "llm-plan-actions llm-plan-review-actions";
+      const setReviewActionLabel = (
+        button: HTMLButtonElement,
+        fullLabel: string,
+        compactLabel: string,
+      ) => {
+        button.setAttribute("aria-label", fullLabel);
+        const full = params.doc.createElement("span");
+        full.className = "llm-plan-action-label-full";
+        full.textContent = fullLabel;
+        const compact = params.doc.createElement("span");
+        compact.className = "llm-plan-action-label-compact";
+        compact.textContent = compactLabel;
+        button.replaceChildren(full, compact);
+      };
       const approve = params.doc.createElement("button");
       approve.type = "button";
       approve.className = "llm-plan-action llm-plan-approve";
-      approve.textContent = "Approve plan";
+      setReviewActionLabel(approve, "Approve plan", "Approve");
       const revise = params.doc.createElement("button");
       revise.type = "button";
       revise.className = "llm-plan-action llm-plan-revise";
-      revise.textContent = "Request changes";
+      setReviewActionLabel(revise, "Request changes", "Revise");
       const cancel = params.doc.createElement("button");
       cancel.type = "button";
       cancel.className = "llm-plan-action llm-plan-cancel";
-      cancel.textContent = "Cancel";
+      setReviewActionLabel(cancel, "Cancel", "Cancel");
       actions.append(approve, revise, cancel);
       root.appendChild(actions);
 
@@ -5104,6 +5139,7 @@ function renderPlanContainer(params: {
         revise.disabled = true;
         cancel.disabled = true;
         approve.textContent = "Starting…";
+        approve.setAttribute("aria-label", "Starting plan");
         void planExecutionCoordinator
           .approve({
             planId: reviewArtifact.planId,
@@ -5139,7 +5175,7 @@ function renderPlanContainer(params: {
             approve.disabled = false;
             revise.disabled = false;
             cancel.disabled = false;
-            approve.textContent = "Approve plan";
+            setReviewActionLabel(approve, "Approve plan", "Approve");
             const errorMessage = params.doc.createElement("p");
             errorMessage.className = "llm-plan-error";
             errorMessage.textContent =

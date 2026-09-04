@@ -1649,6 +1649,166 @@ describe("agentTrace render", function () {
     assert.notInclude(css, ".llm-plan-progress-trigger-current");
   });
 
+  it("keeps clicked task progress open across live execution rerenders", function () {
+    const renderProgress = (
+      status: "running" | "completed",
+      updatedAt: number,
+    ) =>
+      renderAgentTrace({
+        doc: fakeDocument,
+        message: {
+          role: "assistant",
+          text: "Evidence is being synthesized.",
+          timestamp: updatedAt,
+          runMode: "agent",
+          streaming: status === "running",
+        },
+        events: [
+          {
+            runId: "run-stable-progress",
+            seq: updatedAt,
+            eventType: "plan_execution_updated",
+            payload: {
+              type: "plan_execution_updated",
+              ledger: {
+                version: 1,
+                executionId: "execution-stable-progress",
+                planId: "plan-stable-progress",
+                revision: 1,
+                planDigest: "digest",
+                conversationKey: 1,
+                attempt: 1,
+                provider: "original",
+                grant: {
+                  version: 1,
+                  planId: "plan-stable-progress",
+                  revision: 1,
+                  planDigest: "digest",
+                  conversationKey: 1,
+                  conversationGeneration: 1,
+                  approvedAt: 1,
+                },
+                status,
+                activeTaskId: status === "running" ? "step-1" : undefined,
+                tasks: [
+                  {
+                    version: 1,
+                    taskId: "step-1",
+                    executionId: "execution-stable-progress",
+                    planStepId: "step-1",
+                    kind: "required_step",
+                    content: "Draft the document",
+                    activeForm: "Drafting the document",
+                    acceptanceCriteria: ["The document is complete"],
+                    expectedEffect: "artifact",
+                    obligationIds: [],
+                    status: status === "running" ? "in_progress" : "completed",
+                    attemptCount: 1,
+                    evidenceIds:
+                      status === "completed" ? ["evidence-step-1"] : [],
+                    failureReasons: [],
+                    createdAt: 1,
+                    updatedAt,
+                  },
+                ],
+                evidence: [],
+                startedAt: 1,
+                completedAt: status === "completed" ? updatedAt : undefined,
+                updatedAt,
+              },
+            },
+            createdAt: updatedAt,
+          },
+        ],
+      }) as unknown as FakeElement;
+
+    const first = renderProgress("running", 2);
+    const firstRoot = first.findByClass("llm-plan-container-execution");
+    firstRoot
+      ?.findByClass("llm-plan-progress-trigger")
+      ?.dispatchFakeEvent("click");
+    assert.isTrue(firstRoot?.classList.contains("llm-plan-progress-open"));
+
+    const updated = renderProgress("running", 3);
+    const updatedRoot = updated.findByClass("llm-plan-container-execution");
+    const updatedTrigger = updatedRoot?.findByClass(
+      "llm-plan-progress-trigger",
+    );
+    assert.isTrue(updatedRoot?.classList.contains("llm-plan-progress-open"));
+    assert.equal(updatedTrigger?.attributes["aria-expanded"], "true");
+    assert.include(updatedTrigger?.attributes["aria-label"] || "", "Hide");
+
+    renderProgress("completed", 4);
+    const restarted = renderProgress("running", 5);
+    const restartedRoot = restarted.findByClass("llm-plan-container-execution");
+    assert.isFalse(restartedRoot?.classList.contains("llm-plan-progress-open"));
+  });
+
+  it("keeps plan review actions centered in one row at narrow widths", function () {
+    const source = readFileSync(
+      "src/modules/contextPanel/agentTrace/render.ts",
+      "utf8",
+    );
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const actionsRule =
+      css.match(/\.llm-plan-review-actions\s*\{[\s\S]*?\}/)?.[0] || "";
+    const actionButtonRule =
+      css.match(
+        /\.llm-plan-review-actions\s+\.llm-plan-action\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+    const cancelRule =
+      css.match(
+        /\.llm-plan-review-actions\s+\.llm-plan-cancel\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+    const approveOpticalRule =
+      css.match(
+        /\.llm-plan-review-actions\s+\.llm-plan-approve\s+\.llm-plan-action-label-full,\s*\.llm-plan-review-actions\s+\.llm-plan-approve\s+\.llm-plan-action-label-compact\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+
+    assert.match(
+      source,
+      /actions\.className\s*=\s*"llm-plan-actions llm-plan-review-actions"/,
+    );
+    assert.include(source, "llm-plan-action-label-full");
+    assert.include(source, "llm-plan-action-label-compact");
+    assert.include(actionsRule, "display: grid");
+    assert.include(
+      actionsRule,
+      "grid-template-columns: repeat(3, minmax(0, 1fr))",
+    );
+    assert.include(actionsRule, "align-items: stretch");
+    assert.include(actionsRule, "width: 100%");
+    assert.include(actionButtonRule, "justify-content: center");
+    assert.include(actionButtonRule, "white-space: nowrap");
+    assert.include(cancelRule, "margin-left: 0");
+    assert.include(approveOpticalRule, "position: relative");
+    assert.include(approveOpticalRule, "top: -1px");
+    assert.include(css, "@container (max-width: 360px)");
+  });
+
+  it("normalizes coverage search and filter metrics in one aligned row", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const controlsRule =
+      css.match(/\.llm-plan-document-coverage-controls\s*\{[\s\S]*?\}/)?.[0] ||
+      "";
+    const fieldsRule =
+      css.match(
+        /\.llm-plan-document-coverage-controls input,\s*\.llm-plan-document-coverage-controls select\s*\{[\s\S]*?\}/,
+      )?.[0] || "";
+
+    assert.include(controlsRule, "display: grid");
+    assert.include(
+      controlsRule,
+      "grid-template-columns: minmax(0, 1fr) minmax(84px, auto)",
+    );
+    assert.include(controlsRule, "align-items: center");
+    assert.include(fieldsRule, "box-sizing: border-box");
+    assert.include(fieldsRule, "height: 28px");
+    assert.include(fieldsRule, "margin: 0");
+    assert.include(fieldsRule, "padding: 0 9px");
+    assert.include(fieldsRule, "line-height: 1.2");
+  });
+
   it("keeps host-owned plan bookkeeping out of the visible tool trace", function () {
     const events: AgentRunEventRecord[] = [
       {

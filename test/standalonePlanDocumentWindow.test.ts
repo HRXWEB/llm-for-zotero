@@ -51,11 +51,11 @@ describe("standalone plan document window", function () {
       root,
       'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     );
-    assert.include(root, "font-size: 15.5px");
+    assert.include(root, "font-size: var(--llm-document-font-size, 15.5px)");
     assert.include(content, "width: min(100%, 1120px)");
     assert.include(content, "padding: 30px clamp(38px, 5vw, 72px) 92px");
-    assert.include(title, "font-size: clamp(29px, 3.2vw, 38px)");
-    assert.include(heading, "font-size: 28px");
+    assert.include(title, "font-size: clamp(1.871em, 3.2vw, 2.452em)");
+    assert.include(heading, "font-size: 1.806em");
   });
 
   it("keeps citations compact and blue until interaction", function () {

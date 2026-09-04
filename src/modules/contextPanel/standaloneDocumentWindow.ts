@@ -3,6 +3,10 @@ import { HTML_NS } from "../../utils/domHelpers";
 
 const WINDOW_FEATURES =
   "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen,dialog=no,dependent=no";
+const DEFAULT_DOCUMENT_FONT_SIZE_PX = 15.5;
+const MIN_DOCUMENT_FONT_SCALE = 0.7;
+const MAX_DOCUMENT_FONT_SCALE = 2;
+const DOCUMENT_FONT_SCALE_STEP = 0.1;
 
 const THEME_VARIABLES = [
   "--fill-primary",
@@ -90,6 +94,19 @@ export function openStandaloneDocumentWindow(
 
   let attempts = 0;
   let initialized = false;
+  let documentFontScale = 1;
+  const setDocumentFontScale = (scale: number) => {
+    documentFontScale = Math.max(
+      MIN_DOCUMENT_FONT_SCALE,
+      Math.min(MAX_DOCUMENT_FONT_SCALE, Math.round(scale * 10) / 10),
+    );
+    const fontSize =
+      Math.round(DEFAULT_DOCUMENT_FONT_SIZE_PX * documentFontScale * 100) / 100;
+    newWin.document.documentElement?.style.setProperty(
+      "--llm-document-font-size",
+      `${fontSize}px`,
+    );
+  };
   const failInitialization = (error: unknown) => {
     if (initialized) return;
     initialized = true;
@@ -128,10 +145,32 @@ export function openStandaloneDocumentWindow(
       );
       installSourceTheme(options.sourceDoc, doc);
       installAddonStylesheet(doc);
+      setDocumentFontScale(1);
       options.render(doc, root, newWin);
       newWin.addEventListener(
         "keydown",
         (event: KeyboardEvent) => {
+          if (event.metaKey || event.ctrlKey) {
+            if (event.key === "+" || event.key === "=") {
+              event.preventDefault();
+              setDocumentFontScale(
+                documentFontScale + DOCUMENT_FONT_SCALE_STEP,
+              );
+              return;
+            }
+            if (event.key === "-" || event.key === "_") {
+              event.preventDefault();
+              setDocumentFontScale(
+                documentFontScale - DOCUMENT_FONT_SCALE_STEP,
+              );
+              return;
+            }
+            if (event.key === "0") {
+              event.preventDefault();
+              setDocumentFontScale(1);
+              return;
+            }
+          }
           const closeShortcut =
             event.key === "Escape" ||
             ((event.metaKey || event.ctrlKey) && event.key === "w");
