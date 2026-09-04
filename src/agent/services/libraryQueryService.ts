@@ -46,6 +46,8 @@ export type QueryLibraryFilters = {
 };
 
 export type QueryLibraryItemResult = LibraryItemTarget & {
+  /** Stable Zotero key, included in compact rows so callers need no metadata expansion. */
+  itemKey?: string;
   metadata?: EditableArticleMetadataSnapshot | null;
   collections?: CollectionSummary[];
   abstract?: string;
@@ -79,6 +81,7 @@ function enrichPaperTarget(
     "journalArticle";
   const result: QueryLibraryItemResult = {
     itemId: target.itemId,
+    itemKey: String(metadataItem?.key || "").trim() || undefined,
     itemType,
     title: target.title,
     firstCreator: target.firstCreator,
@@ -112,8 +115,10 @@ function enrichItemTarget(
   zoteroGateway: ZoteroGateway,
   include: QueryLibraryInclude[] | undefined,
 ): QueryLibraryItemResult {
+  const item = zoteroGateway.getItem(target.itemId);
   const result: QueryLibraryItemResult = {
     itemId: target.itemId,
+    itemKey: String(item?.key || "").trim() || undefined,
     itemType: target.itemType,
     title: target.title,
     firstCreator: target.firstCreator,
@@ -124,9 +129,7 @@ function enrichItemTarget(
     noteKind: target.noteKind,
   };
   if (includeField(include, "metadata")) {
-    result.metadata = zoteroGateway.getEditableArticleMetadata(
-      zoteroGateway.getItem(target.itemId),
-    );
+    result.metadata = zoteroGateway.getEditableArticleMetadata(item);
   }
   if (includeField(include, "collections")) {
     result.collections = buildCollectionSummaries(
@@ -135,7 +138,6 @@ function enrichItemTarget(
     );
   }
   if (includeField(include, "abstract") && !includeField(include, "metadata")) {
-    const item = zoteroGateway.getItem(target.itemId);
     result.abstract = (item?.getField?.("abstractNote") as string) || "";
   }
   return result;

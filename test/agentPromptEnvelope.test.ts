@@ -16,6 +16,116 @@ function messageText(message: AgentModelMessage): string {
 }
 
 describe("agent prompt envelope", function () {
+  it("tells the model that host-verifiable research and document tasks advance without task_update", async function () {
+    const ledger: PlanExecutionLedger = {
+      version: 1,
+      executionId: "execution-host-owned",
+      planId: "plan-host-owned",
+      revision: 1,
+      planDigest: "sha256:host-owned",
+      conversationKey: 705,
+      attempt: 1,
+      provider: "original",
+      grant: {
+        version: 1,
+        planId: "plan-host-owned",
+        revision: 1,
+        planDigest: "sha256:host-owned",
+        conversationKey: 705,
+        conversationGeneration: 1,
+        approvedAt: 1,
+      },
+      status: "running",
+      activeTaskId: "read",
+      tasks: [
+        {
+          version: 2,
+          taskId: "read",
+          executionId: "execution-host-owned",
+          planStepId: "s1",
+          kind: "required_step",
+          content: "Read every paper",
+          activeForm: "Reading every paper",
+          acceptanceCriteria: [],
+          expectedEffect: "read",
+          completionRequirements: [
+            {
+              requirementId: "read:verified",
+              kind: "verified_read",
+              criterionIds: [],
+              contractDigest: "sha256:host-owned",
+            },
+          ],
+          obligationIds: [],
+          status: "in_progress",
+          attemptCount: 1,
+          evidenceIds: [],
+          failureReasons: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        {
+          version: 2,
+          taskId: "document",
+          executionId: "execution-host-owned",
+          planStepId: "s2",
+          kind: "required_step",
+          content: "Publish the review",
+          activeForm: "Publishing the review",
+          acceptanceCriteria: [],
+          expectedEffect: "artifact",
+          completionRequirements: [
+            {
+              requirementId: "document:integrity",
+              kind: "document_integrity",
+              criterionIds: [],
+              contractDigest: "sha256:host-owned",
+            },
+            {
+              requirementId: "document:published",
+              kind: "document_published",
+              criterionIds: [],
+              contractDigest: "sha256:host-owned",
+            },
+          ],
+          obligationIds: [],
+          status: "pending",
+          attemptCount: 0,
+          evidenceIds: [],
+          failureReasons: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const request = resolvedAgentRequest({
+      conversationKey: 705,
+      mode: "agent",
+      userText: "Execute the approved review",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: ledger.planId,
+        revision: ledger.revision,
+        executionId: ledger.executionId,
+        approvedDigest: ledger.planDigest,
+        provider: "original",
+      },
+      metadata: { planExecutionLedger: ledger },
+    });
+
+    const messages = await buildAgentInitialMessages(request, [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, "Do not call task_update for these tasks");
+    assert.include(prompt, "research_update and submit_document");
+    assert.notInclude(
+      prompt,
+      "After evidence exists, call task_update with only the task",
+    );
+  });
+
   it("keeps host-owned execution identities out of the final answer", async function () {
     const ledger: PlanExecutionLedger = {
       version: 1,

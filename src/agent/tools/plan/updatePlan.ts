@@ -50,6 +50,25 @@ const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
   "user_decision",
 ]);
 
+/**
+ * Preserve an explicit user-selected corpus size without treating a separate
+ * deep-read count as the scope boundary.
+ */
+export function extractExplicitResearchScopeCount(
+  requestText: string,
+): number | undefined {
+  const patterns = [
+    /\b(?:use|using|cover|covering|screen|screening|review|reviewing)\s+exactly\s+(?:the\s+)?(?:first\s+)?(\d+)\s+(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
+    /\bexactly\s+the\s+first\s+(\d+)\s+(?:alphabetically\s+(?:listed|sorted)\s+)?(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const matched = requestText.match(pattern);
+    const count = matched ? Number(matched[1]) : Number.NaN;
+    if (Number.isSafeInteger(count) && count > 0) return count;
+  }
+  return undefined;
+}
+
 function validateUpdatePlanInput(
   args: unknown,
 ): AgentToolInputValidation<UpdatePlanInput> {
@@ -185,9 +204,20 @@ async function resolvePlanContract(params: {
     }
   }
   let contract = decodePlanContract(raw, { requireSnapshot: false });
-  if (contract.investigation && !contract.investigation.criteria.length) {
+  if (
+    contract.investigation?.reviewMode === "systematic" &&
+    !contract.investigation.criteria.length
+  ) {
     throw new Error(
-      "A research investigation requires at least one explicit inclusion or exclusion criterion",
+      "A systematic review requires at least one explicit inclusion or exclusion criterion",
+    );
+  }
+  if (
+    contract.investigation?.readingStrategy === "adaptive" &&
+    contract.investigation.estimatedDeepReadPapers !== 0
+  ) {
+    throw new Error(
+      "An adaptive review must not preselect a paper count; set estimatedDeepReadPapers to 0",
     );
   }
   if (params.ready && contract.investigation) {
@@ -246,6 +276,8 @@ export function createUpdatePlanTool(
                   "question",
                   "subquestions",
                   "criteria",
+                  "reviewMode",
+                  "readingStrategy",
                   "scope",
                   "requiredEvidenceDepth",
                   "estimatedDeepReadPapers",
@@ -268,7 +300,7 @@ export function createUpdatePlanTool(
                   },
                   criteria: {
                     type: "array",
-                    minItems: 1,
+                    minItems: 0,
                     items: {
                       type: "object",
                       additionalProperties: false,
@@ -282,6 +314,18 @@ export function createUpdatePlanTool(
                         },
                       },
                     },
+                  },
+                  reviewMode: {
+                    type: "string",
+                    enum: ["narrative", "scoping", "systematic"],
+                    description:
+                      "Use narrative for an ordinary literature review, scoping to map a field, and systematic only when the user requests formal eligibility screening or a systematic-review method.",
+                  },
+                  readingStrategy: {
+                    type: "string",
+                    enum: ["adaptive", "selected"],
+                    description:
+                      "adaptive reads every paper in the frozen scope to the depth allowed by measured model capacity; selected is only for a user-requested bounded subset or a formal screening workflow.",
                   },
                   scope: {
                     type: "object",
@@ -521,7 +565,7 @@ export function createUpdatePlanTool(
     guidance: {
       matches: (request) => request.planContext?.phase === "planning",
       instruction:
-        "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and 3–7 stable steps. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. For a fuzzy multi-paper document, use contract.investigation with question, stable subquestion/criterion IDs, strict scope such as {libraryID:1,kind:'library'}, requiredEvidenceDepth, estimatedDeepReadPapers, and approvedLargeCorpus; use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use verifier research_coverage on the screening/deep-evidence criterion, document_integrity and document_published on document criteria, mutation_receipts only on a mutation criterion, and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
+        "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and three stable steps for an ordinary literature review: (1) read the frozen scope and build a durable understanding of every paper, (2) discover cross-paper relationships and construct the answer, and (3) publish the verified document. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. Use verifier verified_read on the reading step, research_coverage on the relationship-synthesis step, and document_integrity plus document_published on the final document step. When the user gives an exact bounded subset such as the first N sorted papers, resolve it with one bounded metadata query and use scope kind 'items' with exactly those itemKeys; library_search compact rows already contain itemKey, title, creator, and year, so omit include and never use zotero_script just to recover keys. Never freeze the containing collection or library instead. The frozen snapshot is authoritative, so do not add an execution step that re-enumerates or verifies it. For an ordinary literature review set reviewMode:'narrative', readingStrategy:'adaptive', criteria:[], requiredEvidenceDepth:'body', and estimatedDeepReadPapers:0. Adaptive means the host reads every accessible paper to the depth permitted by measured model capacity; never invent a paper quota. Use reviewMode:'scoping' when the user wants a field map. Use reviewMode:'systematic', readingStrategy:'selected', and explicit inclusion/exclusion criteria only when the user asks for formal eligibility screening, PRISMA-style selection, or another systematic method. Use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use mutation_receipts only on a mutation criterion and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
     },
     validate: validateUpdatePlanInput,
     planInvocation: () =>
@@ -545,6 +589,18 @@ export function createUpdatePlanTool(
         revision: plan.revision,
         conversationKey: context.request.conversationKey,
       });
+      const explicitScopeCount = extractExplicitResearchScopeCount(
+        context.request.userText,
+      );
+      if (
+        input.ready &&
+        explicitScopeCount !== undefined &&
+        contract.investigation?.scopeSnapshot?.itemCount !== explicitScopeCount
+      ) {
+        throw new Error(
+          `The user requested exactly ${explicitScopeCount} research items, but the frozen scope contains ${contract.investigation?.scopeSnapshot?.itemCount ?? 0}. Resolve exactly those items with a bounded sorted metadata query and use investigation.scope kind 'items' with their exact itemKeys.`,
+        );
+      }
       const artifact = await planExecutionCoordinator.updateDraft({
         planId: plan.planId,
         conversationKey: context.request.conversationKey,

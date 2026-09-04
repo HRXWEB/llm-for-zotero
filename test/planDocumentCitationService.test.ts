@@ -139,4 +139,78 @@ describe("plan document citation serialization", function () {
     );
     assert.include(noteHtml, 'href="zotero://select/library/items/BBBB2222"');
   });
+
+  it("replaces a model-authored References section with the host bibliography", function () {
+    const result = formatPlanDocumentCitations({
+      gateway: {
+        formatStructuredCitations: () => ({
+          clusters: [
+            {
+              citationId: "cluster",
+              text: "(Alpha, 2020)",
+              html: "<span>(Alpha, 2020)</span>",
+            },
+          ],
+          bibliographyEntries: [
+            { itemId: 10, text: "Alpha. 2020.", html: "Alpha. 2020." },
+          ],
+          styleId: "apa",
+          styleTitle: "APA",
+          locale: "en-US",
+        }),
+      } as unknown as ZoteroGateway,
+      draftMarkdown: [
+        "# Review",
+        "",
+        "Evidence [[cite:cluster]].",
+        "",
+        "## References",
+        "",
+        "- Model-authored entry that must not survive",
+      ].join("\n"),
+      clusters: [
+        {
+          citationId: "cluster",
+          sources: [
+            {
+              libraryID: 1,
+              itemKey: "AAAA1111",
+              evidenceRefs: ["e-a"],
+            },
+          ],
+        },
+      ],
+      corpus: [
+        { snapshotId: "s", libraryID: 1, itemKey: "AAAA1111", ordinal: 0 },
+      ],
+      evidence: [
+        {
+          version: 2,
+          evidenceRef: "e-a",
+          researchJobId: "research",
+          executionId: "execution",
+          parentTaskId: "task",
+          libraryID: 1,
+          itemKey: "AAAA1111",
+          sourceFingerprint: "pdfjs:a",
+          sourceKind: "body",
+          observationId: "observation-a",
+          createdAt: 1,
+        },
+      ],
+      spec: {
+        kind: "literature_review",
+        title: "Review",
+        requiredSections: [],
+        requiresReferences: true,
+        requiresCoverageSection: false,
+        allowFigures: false,
+        citationStyle: { styleId: "apa", styleTitle: "APA", locale: "en-US" },
+      },
+    });
+
+    assert.notInclude(result.visibleMarkdown, "Model-authored entry");
+    assert.equal(result.visibleMarkdown.match(/^## References$/gm)?.length, 1);
+    assert.include(result.visibleMarkdown, "Alpha. 2020.");
+  });
 });

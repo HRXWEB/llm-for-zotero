@@ -9,21 +9,46 @@ import { planExecutionCoordinator } from "./coordinator";
 import type { PlanExecutionLedger, PlanEvent, TaskEvidence } from "./types";
 import type { PlanRuntimeContext } from "./types";
 import type { ZoteroMcpToolActivityEvent } from "../mcp/server";
-import { loadLatestResearchMutationApprovalGrant } from "../research/store";
+import {
+  interruptResearchExecution,
+  loadLatestResearchMutationApprovalGrant,
+} from "../research/store";
 import { validateResearchMutationGrant } from "../research/mutationApproval";
 import {
   loadLatestPlanDocumentForExecution,
   loadPlanDocumentOutbox,
 } from "../documents/store";
 import { createTrustedReadObservations } from "./readObservation";
+import { planRequiresModelTaskUpdates } from "./taskOwnership";
 
 export function buildPlanFinalCorrection(
   failure: string,
   requiresDocument: boolean,
+  documentTaskActive = requiresDocument,
+  modelTaskUpdatesRequired = true,
 ): string {
+  if (requiresDocument && documentTaskActive) {
+    return `${failure}. This approved plan requires a published document. Do not stop with ordinary answer text and do not try to complete the document task with task_update. Call submit_document now with the model-authored Markdown plus its citation and evidence mappings. If validation rejects the submission, correct the reported fields and call submit_document again; the host finalizer owns References, publication evidence, and completion of the document task.`;
+  }
+  if (!modelTaskUpdatesRequired) {
+    return requiresDocument
+      ? `${failure}. Complete the current approved research task: continue with the active research tool; the host advances its task state from verified evidence. Once the document task becomes active, call submit_document with the model-authored Markdown plus its citation and evidence mappings.`
+      : `${failure}. Continue with the active scholarly tool; the host advances its task state from verified evidence.`;
+  }
   return requiresDocument
-    ? `${failure}. This approved plan requires a published document. Do not stop with ordinary answer text and do not try to complete the document task with task_update. Call submit_document now with the model-authored Markdown plus its citation and evidence mappings. If validation rejects the submission, correct the reported fields and call submit_document again; the host finalizer owns References, publication evidence, and completion of the document task.`
+    ? `${failure}. Complete the current approved task before attempting document publication. Use task_update only after the current task has its required verified evidence. Once the document task becomes active, call submit_document with the model-authored Markdown plus its citation and evidence mappings; do not try to complete the document task with task_update.`
     : `${failure}. Continue the approved plan. Use task_update only after the current task has verified evidence; do not claim completion from model judgment alone.`;
+}
+
+export function shouldOfferPlanFinalCorrection(params: {
+  canCorrect: boolean;
+  successfulToolResultCount: number;
+  lastCorrectionSuccessfulToolCount: number;
+}): boolean {
+  return (
+    params.canCorrect &&
+    params.successfulToolResultCount > params.lastCorrectionSuccessfulToolCount
+  );
 }
 
 export async function recordMcpPlanEvidence(
@@ -114,7 +139,7 @@ export type PlanFinalDecision =
   | { kind: "fail"; failure: string };
 
 export class PlanExecutionRunSession {
-  private correctionUsed = false;
+  private lastCorrectionSuccessfulToolCount = -1;
   private ledger: PlanExecutionLedger | null = null;
 
   constructor(
@@ -321,6 +346,10 @@ export class PlanExecutionRunSession {
       });
     }
     this.ledger = ledger;
+    this.request.planContext = {
+      ...plan,
+      activeTaskId: ledger.activeTaskId,
+    };
     await this.publish({ type: "plan_execution_updated", ledger });
   }
 
@@ -339,6 +368,10 @@ export class PlanExecutionRunSession {
       requestedBy: plan.provider,
       reason,
     });
+    await interruptResearchExecution({
+      executionId: plan.executionId,
+      conversationKey: this.request.conversationKey,
+    });
     this.ledger = ledger;
     this.request.planContext = {
       ...plan,
@@ -349,7 +382,17 @@ export class PlanExecutionRunSession {
 
   async evaluateFinal(params: {
     canCorrect: boolean;
+    successfulToolResultCount?: number;
   }): Promise<PlanFinalDecision> {
+    const successfulToolResultCount = Math.max(
+      0,
+      params.successfulToolResultCount || 0,
+    );
+    const canOfferCorrection = shouldOfferPlanFinalCorrection({
+      canCorrect: params.canCorrect,
+      successfulToolResultCount,
+      lastCorrectionSuccessfulToolCount: this.lastCorrectionSuccessfulToolCount,
+    });
     const plan = this.request.planContext;
     if (!plan) return { kind: "accept" };
     if (plan.phase === "planning") {
@@ -360,8 +403,8 @@ export class PlanExecutionRunSession {
       }
       const correction =
         "Finish the planning phase by calling update_plan with objective acceptance criteria for every step and ready=true. Do not execute any mutation.";
-      if (params.canCorrect && !this.correctionUsed) {
-        this.correctionUsed = true;
+      if (canOfferCorrection) {
+        this.lastCorrectionSuccessfulToolCount = successfulToolResultCount;
         return { kind: "correct", correction };
       }
       return {
@@ -392,15 +435,23 @@ export class PlanExecutionRunSession {
       return { kind: "accept" };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (params.canCorrect && !this.correctionUsed) {
-        this.correctionUsed = true;
+      if (canOfferCorrection) {
+        this.lastCorrectionSuccessfulToolCount = successfulToolResultCount;
         const artifact = await loadPlanArtifact(plan.planId, plan.revision);
         const requiresDocument =
           artifact?.version === 4 &&
           artifact.contract?.deliverable.kind === "document";
+        const activeTask = this.ledger?.tasks.find(
+          (task) => task.taskId === this.ledger?.activeTaskId,
+        );
         return {
           kind: "correct",
-          correction: buildPlanFinalCorrection(message, requiresDocument),
+          correction: buildPlanFinalCorrection(
+            message,
+            requiresDocument,
+            activeTask?.expectedEffect === "artifact",
+            this.ledger ? planRequiresModelTaskUpdates(this.ledger) : true,
+          ),
         };
       }
       return { kind: "fail", failure: message };

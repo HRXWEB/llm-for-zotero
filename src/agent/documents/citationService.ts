@@ -7,6 +7,7 @@ import type {
   PlanCitationCluster,
   PlanCitationSource,
 } from "./types";
+import { stripHandwrittenReferences } from "./draftValidation";
 
 const CITATION_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
 
@@ -17,6 +18,7 @@ export type DocumentCitationEvidence = Pick<
   | "observationId"
   | "libraryID"
   | "itemKey"
+  | "sourceKind"
   | "locator"
 >;
 
@@ -94,6 +96,44 @@ function validateLocator(params: {
   }
 }
 
+/**
+ * Citation provenance is a host responsibility once research evidence is
+ * durable. Models identify the citable Zotero paper; the host attaches the
+ * opaque evidence records for that exact identity. Explicit references remain
+ * supported for strict quotes and advanced callers.
+ */
+export function bindCitationEvidenceRefs(
+  clusters: readonly PlanCitationCluster[],
+  evidence: readonly DocumentCitationEvidence[],
+): PlanCitationCluster[] {
+  return clusters.map((cluster) => ({
+    ...cluster,
+    sources: cluster.sources.map((source) => {
+      if (source.evidenceRefs.length) return source;
+      const evidenceRefs = evidence
+        .filter(
+          (record) =>
+            record.version === 2 &&
+            Boolean(record.observationId) &&
+            record.libraryID === source.libraryID &&
+            record.itemKey === source.itemKey,
+        )
+        .sort((left, right) => {
+          const rank = {
+            quote: 4,
+            figure: 3,
+            body: 2,
+            abstract: 1,
+            metadata: 0,
+          };
+          return rank[right.sourceKind] - rank[left.sourceKind];
+        })
+        .map((record) => record.evidenceRef);
+      return { ...source, evidenceRefs: [...new Set(evidenceRefs)] };
+    }),
+  }));
+}
+
 export function formatDocumentCitations(params: {
   gateway: ZoteroGateway;
   draftMarkdown: string;
@@ -106,12 +146,17 @@ export function formatDocumentCitations(params: {
   visibleMarkdown: string;
   citationBundle: FormattedCitationBundle;
 } {
+  const draftMarkdown = stripHandwrittenReferences(params.draftMarkdown);
   const corpusKeys = new Set(params.corpus.map(sourceKey));
   const evidenceByRef = new Map(
     params.evidence.map((record) => [record.evidenceRef, record]),
   );
+  const clusters =
+    params.requireEvidence === false
+      ? [...params.clusters]
+      : bindCitationEvidenceRefs(params.clusters, params.evidence);
   const clustersById = new Map<string, PlanCitationCluster>();
-  const resolved = params.clusters.map((cluster) => {
+  const resolved = clusters.map((cluster) => {
     if (!cluster.citationId.trim() || clustersById.has(cluster.citationId)) {
       throw new Error(`Duplicate or empty citation ID: ${cluster.citationId}`);
     }
@@ -168,10 +213,10 @@ export function formatDocumentCitations(params: {
   });
 
   const tokenIds: string[] = [];
-  for (const match of params.draftMarkdown.matchAll(CITATION_TOKEN)) {
+  for (const match of draftMarkdown.matchAll(CITATION_TOKEN)) {
     tokenIds.push(match[1]);
   }
-  if (!tokenIds.length && params.clusters.length) {
+  if (!tokenIds.length && clusters.length) {
     throw new Error(
       "Citation mappings were supplied but the document has no citation tokens",
     );
@@ -188,19 +233,14 @@ export function formatDocumentCitations(params: {
       throw new Error(`Citation ${citationId} is not used in the document`);
     }
   }
-  if (/^#{1,6}\s+references\s*$/im.test(params.draftMarkdown)) {
-    throw new Error(
-      "Do not hand-write References; the host generates them from cited Zotero items",
-    );
-  }
-  if (!params.clusters.length) {
+  if (!clusters.length) {
     if (params.spec.requiresReferences) {
       throw new Error(
         "The approved document requires References but contains no citations",
       );
     }
     return {
-      visibleMarkdown: params.draftMarkdown,
+      visibleMarkdown: draftMarkdown,
       citationBundle: {
         clusters: [],
         bibliographyEntries: [],
@@ -219,7 +259,7 @@ export function formatDocumentCitations(params: {
     locale: params.spec.citationStyle.locale,
   });
   const sourceByItemId = new Map<number, PlanCitationSource>();
-  for (const cluster of params.clusters) {
+  for (const cluster of clusters) {
     for (const source of cluster.sources) {
       const item = itemByLibraryAndKey(source.libraryID, source.itemKey);
       if (item) sourceByItemId.set(Number(item.id), source);
@@ -234,7 +274,7 @@ export function formatDocumentCitations(params: {
   const clusterById = new Map(
     formattedClusters.map((cluster) => [cluster.citationId, cluster]),
   );
-  let visibleMarkdown = params.draftMarkdown.replace(
+  let visibleMarkdown = draftMarkdown.replace(
     CITATION_TOKEN,
     (_token, citationId: string) => {
       const cluster = clusterById.get(citationId);

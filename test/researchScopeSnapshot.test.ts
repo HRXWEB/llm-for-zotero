@@ -3,6 +3,7 @@ import {
   assertResearchScopeTargets,
   resolveResearchScopeItemIds,
 } from "../src/agent/research/scopeSnapshot";
+import { decodeScopeSnapshotItem } from "../src/agent/research/decoders";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 
 describe("research scope resolution", function () {
@@ -113,5 +114,22 @@ describe("research scope resolution", function () {
         targetItemIds: [10],
       }),
     );
+  });
+
+  it("keeps frozen descriptive metadata available after a reading checkpoint", function () {
+    const decoded = decodeScopeSnapshotItem({
+      snapshotId: "snapshot-1",
+      libraryID: 1,
+      itemKey: "AAAA1111",
+      localItemId: 10,
+      title: "A stable title",
+      firstCreator: "Author",
+      year: "2024",
+      ordinal: 0,
+    });
+
+    assert.equal(decoded.title, "A stable title");
+    assert.equal(decoded.firstCreator, "Author");
+    assert.equal(decoded.year, "2024");
   });
 });

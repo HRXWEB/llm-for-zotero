@@ -43,6 +43,10 @@ export type ResearchContract = Readonly<{
   question: string;
   subquestions: readonly ResearchSubquestion[];
   criteria: readonly ResearchCriterion[];
+  /** Narrative is the ordinary literature-review default. */
+  reviewMode?: "narrative" | "scoping" | "systematic";
+  /** Adaptive reads the approved scope to the depth allowed by live capacity. */
+  readingStrategy?: "adaptive" | "selected";
   scope: ResearchScopeSpec;
   /** Required once the plan is ready for approval. */
   scopeSnapshot?: ResearchScopeSnapshotRef;
@@ -65,6 +69,10 @@ export type ResearchScopeSnapshotItem = Readonly<{
   libraryID: number;
   itemKey: string;
   localItemId?: number;
+  /** Frozen display metadata used by recovery and final coverage reporting. */
+  title?: string;
+  firstCreator?: string;
+  year?: string;
   metadataFingerprint?: string;
   attachmentFingerprint?: string;
   ordinal: number;
@@ -235,6 +243,23 @@ export type PaperFinding = Readonly<{
   inclusionDecision: "include" | "exclude" | "unresolved";
   confidence: ResearchFindingConfidence;
   unresolvedQuestions: readonly string[];
+  /** Descriptive, non-exclusive roles used by narrative evidence synthesis. */
+  roles?: readonly (
+    | "central_evidence"
+    | "supporting_evidence"
+    | "contradictory_evidence"
+    | "theoretical_foundation"
+    | "methodological_contribution"
+    | "historical_context"
+    | "tangential_context"
+    | "unresolved"
+  )[];
+  mainMessage?: string;
+  researchQuestion?: string;
+  method?: string;
+  mechanisms?: readonly string[];
+  relevance?: string;
+  relationships?: readonly string[];
   createdAt: number;
 }>;
 

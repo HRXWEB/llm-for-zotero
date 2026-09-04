@@ -10252,6 +10252,15 @@ async function buildAgentRuntimeRequest(
           return { ledger, artifact };
         })
       : null;
+  const priorPlanArtifact =
+    params.planContext?.phase === "planning" && params.planContext.revision > 1
+      ? await import("../../agent/plans/store").then((store) =>
+          store.loadPlanArtifact(
+            params.planContext!.planId,
+            params.planContext!.revision - 1,
+          ),
+        )
+      : null;
   return {
     conversationKey: params.conversationKey,
     conversationGeneration: params.conversationGeneration,
@@ -10336,6 +10345,7 @@ async function buildAgentRuntimeRequest(
       conversationInstanceID,
       planExecutionLedger: executingPlan?.ledger,
       approvedPlanContract: executingPlan?.artifact.contract,
+      priorPlanArtifact,
     },
   };
 }

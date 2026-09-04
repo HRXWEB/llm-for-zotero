@@ -353,6 +353,24 @@ export async function listTaskEvidence(
     .filter((evidence): evidence is TaskEvidence => Boolean(evidence));
 }
 
+/**
+ * Research provenance may be collected by a deep-read task and consumed by a
+ * later synthesis task. Recover it from the approved execution boundary rather
+ * than from whichever task owns the research job.
+ */
+export async function listExecutionTaskEvidence(
+  executionId: string,
+): Promise<TaskEvidence[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${PLAN_TASK_EVIDENCE_TABLE}
+     WHERE execution_id = ? ORDER BY created_at ASC`,
+    [executionId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parsePayload(row, decodeTaskEvidence))
+    .filter((evidence): evidence is TaskEvidence => Boolean(evidence));
+}
+
 export async function clearPlanConversationRowsInTransaction(
   conversationKey: number,
 ): Promise<void> {

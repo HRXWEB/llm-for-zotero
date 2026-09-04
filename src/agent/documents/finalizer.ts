@@ -49,6 +49,7 @@ import {
   nextPlanDocumentVersion,
   savePlanDocumentInTransaction,
 } from "./store";
+import { assertDocumentDraftValid } from "./draftValidation";
 import type {
   PlanExecutionLedger,
   TaskEvidence,
@@ -83,37 +84,20 @@ function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function normalizeHeading(value: string): string {
-  return value.trim().toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ");
-}
-
 function collectHeadings(markdown: string): Set<string> {
   const headings = new Set<string>();
   for (const line of markdown.split(/\r?\n/)) {
     const match = /^#{1,6}\s+(.+?)\s*$/.exec(line);
-    if (match) headings.add(normalizeHeading(match[1]));
+    if (match)
+      headings.add(
+        match[1]
+          .trim()
+          .toLowerCase()
+          .replace(/[`*_]/g, "")
+          .replace(/\s+/g, " "),
+      );
   }
   return headings;
-}
-
-function validateSections(params: {
-  markdown: string;
-  requiredSections: readonly string[];
-  requiresCoverageSection: boolean;
-}): void {
-  const headings = collectHeadings(params.markdown);
-  const required = params.requiredSections
-    .map(normalizeHeading)
-    .filter((heading) => heading !== "references");
-  if (params.requiresCoverageSection) required.push("scope and limitations");
-  const missing = [...new Set(required)].filter(
-    (heading) => !headings.has(heading),
-  );
-  if (missing.length) {
-    throw new Error(
-      `Document is missing required sections: ${missing.join(", ")}`,
-    );
-  }
 }
 
 function validateVisibleDocumentPrivacy(markdown: string): void {
@@ -193,18 +177,6 @@ function validateAssets(
   }
 }
 
-function validateQuoteBoundary(markdown: string): void {
-  const proseWithoutTokens = markdown.replace(QUOTE_TOKEN, "");
-  const hasDirectQuote =
-    /^\s*>\s+\S/m.test(proseWithoutTokens) ||
-    /(?:^|[\s(])["“][^"”\n]{20,}["”]/m.test(proseWithoutTokens);
-  if (hasDirectQuote) {
-    throw new Error(
-      "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
-    );
-  }
-}
-
 async function resolveVerifiedQuotes(params: {
   markdown: string;
   quotes: SubmitPlanDocumentInput["quotes"];
@@ -214,7 +186,6 @@ async function resolveVerifiedQuotes(params: {
     Awaited<ReturnType<typeof listResearchEvidence>>[number]
   >;
 }): Promise<{ markdown: string; verifiedQuotes: PlanVerifiedQuote[] }> {
-  validateQuoteBoundary(params.markdown);
   const mappings = new Map<string, SubmitPlanDocumentInput["quotes"][number]>();
   for (const quote of params.quotes) {
     if (
@@ -543,7 +514,7 @@ export class PlanDocumentFinalizer {
     if (utf8Bytes(params.input.markdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES) {
       throw new Error("Document Markdown exceeds the 2 MiB limit");
     }
-    validateSections({
+    assertDocumentDraftValid({
       markdown: params.input.markdown,
       requiredSections: spec.requiredSections,
       requiresCoverageSection: spec.requiresCoverageSection,
@@ -867,6 +838,11 @@ function evidenceFromObservations(
     observationId: observation.observationId,
     libraryID: observation.libraryID,
     itemKey: observation.itemKey,
+    sourceKind: observation.capabilities.includes("body")
+      ? "body"
+      : observation.capabilities.includes("abstract")
+        ? "abstract"
+        : "metadata",
     locator:
       observation.attachmentItemKey &&
       observation.pageIndex !== undefined &&
@@ -1029,10 +1005,11 @@ export class DirectDocumentFinalizer {
       title,
       hasCitations: params.input.citations.length > 0,
     });
-    validateSections({
+    assertDocumentDraftValid({
       markdown: params.input.markdown,
       requiredSections: spec.requiredSections,
       requiresCoverageSection: spec.requiresCoverageSection,
+      validateQuotes: false,
     });
     if (
       !researchGrounded &&

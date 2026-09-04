@@ -23,6 +23,8 @@ import type {
   TaskEvidence,
 } from "../src/agent/plans/types";
 import { takePendingPlanExecution } from "../src/modules/contextPanel/planModeState";
+import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
+import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const globalScope = globalThis as typeof globalThis & { Zotero?: unknown };
 
@@ -107,6 +109,132 @@ function reasoningEvidence(): TaskEvidence {
     summary: "The evidence supports the bounded conclusion.",
     createdAt: 2,
   };
+}
+
+function hostVerifiedResearchExecution(): PlanExecutionLedger {
+  const makeTask = (params: {
+    suffix: string;
+    content: string;
+    status: ExecutionTask["status"];
+    requirementKind:
+      | "verified_read"
+      | "research_coverage"
+      | "document_integrity";
+  }): ExecutionTask => ({
+    version: 2,
+    taskId: `execution-1:task-${params.suffix}`,
+    executionId: "execution-1",
+    planStepId: `step-${params.suffix}`,
+    kind: "required_step",
+    content: params.content,
+    activeForm: params.content,
+    acceptanceCriteria: [
+      {
+        criterionId: `criterion-${params.suffix}`,
+        description: params.content,
+        verifier: params.requirementKind,
+      },
+    ],
+    expectedEffect:
+      params.requirementKind === "document_integrity" ? "artifact" : "read",
+    completionRequirements: [
+      {
+        requirementId: `requirement-${params.suffix}`,
+        kind: params.requirementKind,
+        criterionIds: [`criterion-${params.suffix}`],
+        contractDigest: "sha256:contract",
+      },
+    ],
+    obligationIds: [],
+    status: params.status,
+    attemptCount: params.status === "in_progress" ? 1 : 0,
+    evidenceIds: [],
+    failureReasons: [],
+    createdAt: 1,
+    updatedAt: 1,
+    startedAt: params.status === "in_progress" ? 1 : undefined,
+  });
+  return {
+    ...execution(),
+    activeTaskId: "execution-1:task-1",
+    tasks: [
+      makeTask({
+        suffix: "1",
+        content: "Understand every paper",
+        status: "in_progress",
+        requirementKind: "verified_read",
+      }),
+      makeTask({
+        suffix: "2",
+        content: "Synthesize relationships",
+        status: "pending",
+        requirementKind: "research_coverage",
+      }),
+      makeTask({
+        suffix: "3",
+        content: "Publish the document",
+        status: "pending",
+        requirementKind: "document_integrity",
+      }),
+    ],
+  };
+}
+
+function hostVerifiedResearchEvidence(): TaskEvidence[] {
+  return [
+    {
+      version: 3,
+      evidenceId: "evidence-read",
+      executionId: "execution-1",
+      taskId: "execution-1:task-1",
+      kind: "verified_read",
+      verified: true,
+      requirementId: "requirement-1",
+      criterionIds: ["criterion-1"],
+      contractDigest: "sha256:contract",
+      payload: {
+        type: "verified_read",
+        reference: "read-1",
+        observations: [
+          {
+            version: 1,
+            observationId: "observation-1",
+            issuer: "zotero_host",
+            toolName: "paper_read",
+            callDigest: "sha256:call",
+            inputDigest: "sha256:input",
+            resultDigest: "sha256:result",
+            libraryID: 1,
+            itemKey: "AAAA1111",
+            capabilities: ["body"],
+            certificateDigest: "sha256:certificate",
+          },
+        ],
+      },
+      createdAt: 2,
+    },
+    {
+      version: 3,
+      evidenceId: "evidence-coverage",
+      executionId: "execution-1",
+      taskId: "execution-1:task-2",
+      kind: "research_coverage",
+      verified: true,
+      requirementId: "requirement-2",
+      criterionIds: ["criterion-2"],
+      contractDigest: "sha256:contract",
+      payload: {
+        type: "research_coverage",
+        researchJobId: "research-1",
+        coverageStatus: "complete",
+        totalItems: 1,
+        screenedItems: 1,
+        candidateItems: 1,
+        deepReadCompleted: 1,
+      },
+      createdAt: 3,
+    },
+  ];
 }
 
 function documentExecution(): PlanExecutionLedger {
@@ -311,6 +439,91 @@ describe("transactional Plan task transitions", function () {
           .get()?.count,
       ),
       1,
+    );
+  });
+
+  it("advances sequential host-verified research tasks without model bookkeeping", async function () {
+    await savePlanExecutionLedger(hostVerifiedResearchExecution());
+    for (const evidence of hostVerifiedResearchEvidence()) {
+      await saveTaskEvidence(evidence);
+    }
+
+    const updated = await new PlanExecutionCoordinator().advanceVerifiedTasks({
+      executionId: "execution-1",
+      requirementKinds: ["verified_read", "research_coverage"],
+      now: 4,
+    });
+
+    assert.deepEqual(
+      updated.tasks.map((task) => task.status),
+      ["completed", "completed", "in_progress"],
+    );
+    assert.equal(updated.activeTaskId, "execution-1:task-3");
+  });
+
+  it("refreshes the runtime active task after a same-run transition", async function () {
+    const first = reasoningTask();
+    const second: ExecutionTask = {
+      ...reasoningTask(),
+      taskId: "execution-1:task-2",
+      planStepId: "step-2",
+      content: "Publish the document",
+      activeForm: "Publishing the document",
+      status: "pending",
+      attemptCount: 0,
+      startedAt: undefined,
+    };
+    await savePlanExecutionLedger({
+      ...execution(),
+      tasks: [first, second],
+    });
+    const coordinator = new PlanExecutionCoordinator();
+    await coordinator.requestTransitionWithEvidence({
+      request: {
+        executionId: "execution-1",
+        taskId: first.taskId,
+        toStatus: "completed",
+        requestedBy: "original",
+      },
+      evidence: reasoningEvidence(),
+      now: 2,
+    });
+    await coordinator.startNextTask("execution-1", 3);
+    const request = resolvedAgentRequest({
+      conversationKey: 41,
+      mode: "agent",
+      userText: "Continue the plan",
+      libraryID: 1,
+      planContext: {
+        phase: "executing",
+        planId: "plan-1",
+        revision: 1,
+        executionId: "execution-1",
+        approvedDigest: "sha256:plan",
+        activeTaskId: first.taskId,
+        provider: "original",
+      },
+    });
+    const session = new PlanExecutionRunSession(request, async () => {});
+
+    await session.recordToolResult({
+      toolName: "task_update",
+      executionClass: "control",
+      result: {
+        callId: "call-1",
+        name: "task_update",
+        ok: true,
+        actionReceipts: [],
+        content: { status: "completed" },
+      },
+      runId: "run-1",
+    });
+
+    assert.equal(
+      request.planContext?.phase === "executing"
+        ? request.planContext.activeTaskId
+        : undefined,
+      second.taskId,
     );
   });
 

@@ -39,8 +39,8 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
     "Zotero.Items.getAll",
   ],
   "literature-review.md": [
-    "central ResearchPolicy owns corpus budgets",
-    "inventory every frozen item",
+    "central ResearchPolicy owns capacity measurement",
+    "one durable paper understanding for every item",
     "Finish with `submit_document`",
   ],
   "simple-paper-qa.md": [

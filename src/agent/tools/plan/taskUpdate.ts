@@ -6,9 +6,12 @@ import type {
 import { planExecutionCoordinator } from "../../plans/coordinator";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { listTaskEvidence } from "../../plans/store";
+import { planRequiresModelTaskUpdates } from "../../plans/taskOwnership";
 import type {
+  ExecutionTask,
   PlanAcceptanceCriterion,
   PlanCompletionRequirementKind,
+  PlanExecutionLedger,
   TaskEvidence,
 } from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
@@ -130,6 +133,48 @@ function validateTaskUpdateInput(
   return ok({ task });
 }
 
+export function buildReasoningAssertionEvidence(params: {
+  executionId: string;
+  task: ExecutionTask;
+  status: ExecutionTaskStatus;
+  assertion?: string;
+  createdAt?: number;
+}): TaskEvidence | undefined {
+  const assertion = params.assertion?.trim();
+  if (!assertion) return undefined;
+  const requirement = params.task.completionRequirements?.find(
+    (entry) => entry.kind === "bounded_reasoning",
+  );
+  if (!requirement) {
+    // Extra narrative is not evidence for a host-verifiable task. Ignore it
+    // and let the normal completion verifier require the real receipts.
+    return undefined;
+  }
+  if (params.status !== "completed") {
+    throw new Error(
+      "A reasoning assertion must accompany a completed transition",
+    );
+  }
+  const createdAt = params.createdAt ?? Date.now();
+  return {
+    version: 3,
+    evidenceId: `${params.executionId}:${params.task.taskId}:reasoning:${createdAt}`,
+    executionId: params.executionId,
+    taskId: params.task.taskId,
+    kind: "reasoning_assertion",
+    verified: true,
+    requirementId: requirement.requirementId,
+    criterionIds: requirement.criterionIds,
+    contractDigest: requirement.contractDigest,
+    payload: {
+      type: "bounded_reasoning",
+      assertion,
+    },
+    summary: assertion,
+    createdAt,
+  };
+}
+
 export function createTaskUpdateTool(): AgentToolDefinition<
   TaskUpdateInput,
   unknown
@@ -192,11 +237,25 @@ export function createTaskUpdateTool(): AgentToolDefinition<
       executionClass: "control",
       requiresConfirmation: false,
     },
-    isAvailable: (request) => request.planContext?.phase === "executing",
+    isAvailable: (request) => {
+      if (request.planContext?.phase !== "executing") return false;
+      const ledger = request.metadata?.planExecutionLedger as
+        | PlanExecutionLedger
+        | null
+        | undefined;
+      return !ledger || planRequiresModelTaskUpdates(ledger);
+    },
     guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
+      matches: (request) => {
+        if (request.planContext?.phase !== "executing") return false;
+        const ledger = request.metadata?.planExecutionLedger as
+          | PlanExecutionLedger
+          | null
+          | undefined;
+        return !ledger || planRequiresModelTaskUpdates(ledger);
+      },
       instruction:
-        "Execute the approved plan in order. The host starts the active task and owns the authoritative ledger. Call task_update with exactly one task transition, using the immutable taskId from the approved-plan context. Existing tasks normally need only taskId and status, but when completing a task whose expectedEffect is reasoning or whose completion requirement is bounded_reasoning, include reasoningAssertion in that same update; otherwise completion is rejected. Wait for that call to commit before submitting another transition. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, delete, reorder, or silently skip an approved task.",
+        "Execute the approved plan in order. The host starts the active task and owns the authoritative ledger. Never call task_update for research or document tasks whose requirements are only verified_read, research_coverage, document_integrity, or document_published; their owning tools advance them automatically. For any other active task, call task_update with exactly one transition, using the immutable taskId from the approved-plan context. Existing tasks normally need only taskId and status, but when completing a task whose expectedEffect is reasoning or whose completion requirement is bounded_reasoning, include reasoningAssertion in that same update; otherwise completion is rejected. Wait for that call to commit before submitting another transition. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, delete, reorder, or silently skip an approved task.",
     },
     validate: validateTaskUpdateInput,
     planInvocation: () =>
@@ -245,41 +304,12 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         current = ledger.tasks.find((task) => task.taskId === request.taskId);
       }
       if (!current) throw new Error(`Unknown taskId: ${request.taskId}`);
-      let transitionEvidence: TaskEvidence | undefined;
-      if (request.reasoningAssertion) {
-        if (request.status !== "completed") {
-          throw new Error(
-            "A reasoning assertion must accompany a completed transition",
-          );
-        }
-        const requirement = current.completionRequirements?.find(
-          (entry) => entry.kind === "bounded_reasoning",
-        );
-        if (!requirement) {
-          throw new Error(
-            "Reasoning assertions may attest only criteria declared with the bounded_reasoning verifier",
-          );
-        }
-        transitionEvidence = {
-          version: requirement ? 3 : 1,
-          evidenceId: `${plan.executionId}:${request.taskId}:reasoning:${Date.now()}`,
-          executionId: plan.executionId,
-          taskId: request.taskId,
-          kind: "reasoning_assertion",
-          verified: true,
-          requirementId: requirement?.requirementId,
-          criterionIds: requirement?.criterionIds,
-          contractDigest: requirement?.contractDigest,
-          payload: requirement
-            ? {
-                type: "bounded_reasoning",
-                assertion: request.reasoningAssertion,
-              }
-            : undefined,
-          summary: request.reasoningAssertion,
-          createdAt: Date.now(),
-        };
-      }
+      const transitionEvidence = buildReasoningAssertionEvidence({
+        executionId: plan.executionId,
+        task: current,
+        status: request.status,
+        assertion: request.reasoningAssertion,
+      });
       const latest = ledger.tasks.find(
         (task) => task.taskId === request.taskId,
       );

@@ -53,6 +53,8 @@ import type {
   ProjectedPaperMetadata,
   ZoteroMetadataResolver,
 } from "../../../services/zoteroMetadata/types";
+import { normalizeMaxTokensForRequest } from "../../../utils/llmClient";
+import { resolveAdaptiveReadingBudget } from "../../research/readingBudget";
 
 type PaperReadMode =
   | "overview"
@@ -105,7 +107,6 @@ export type PaperReadFigureExtractionService = {
   }) => Promise<PaperReadFigureExtractionResult>;
 };
 
-const MAX_OVERVIEW_TARGETS = 5;
 const MAX_TARGETED_TARGETS = 10;
 const MAX_FULL_TARGETS = Number.MAX_SAFE_INTEGER;
 const MAX_OVERVIEW_QUOTES_PER_RESULT = 3;
@@ -298,6 +299,10 @@ async function tryReadMineruOverview(
       filePath,
       text: selected.text,
       sections: selected.sections,
+      selectedCharacters: selected.text.length,
+      totalCharacters: fullMd.length,
+      coverage:
+        selected.text.length >= fullMd.length ? "complete" : "capacity_sampled",
       citationLabel: formatPaperCitationLabel(paperContext),
       sourceLabel: formatPaperSourceLabel(paperContext),
       paperContext,
@@ -496,6 +501,7 @@ function buildMetadataOverview(params: {
   return {
     backend: "zotero_metadata",
     sourceKind: "zotero_metadata",
+    coverage: abstract ? "abstract_only" : "metadata_only",
     contentStatus,
     warning:
       params.warning ||
@@ -1074,7 +1080,7 @@ export function createPaperReadTool(
       const mode = normalizeMode(args.mode);
       const maxTargets =
         mode === "overview"
-          ? MAX_OVERVIEW_TARGETS
+          ? MAX_FULL_TARGETS
           : mode === "full"
             ? MAX_FULL_TARGETS
             : MAX_TARGETED_TARGETS;
@@ -1191,7 +1197,7 @@ export function createPaperReadTool(
               context,
               zoteroGateway,
               input.mode === "overview"
-                ? MAX_OVERVIEW_TARGETS
+                ? MAX_FULL_TARGETS
                 : MAX_TARGETED_TARGETS,
             );
       if (!targets.length) {
@@ -1306,7 +1312,24 @@ export function createPaperReadTool(
         return output;
       }
       if (input.mode === "overview") {
-        const maxChars = input.maxChars || 6000;
+        const runtimeBudget = context.request.runtimeContextBudget;
+        const adaptiveBudget = runtimeBudget
+          ? resolveAdaptiveReadingBudget({
+              ...runtimeBudget,
+              outputReserveTokens: normalizeMaxTokensForRequest({
+                value: context.request.advanced?.maxTokens,
+                maxTokensExplicit: context.request.advanced?.maxTokensExplicit,
+                model: context.request.model || context.modelName,
+                apiBase: context.request.apiBase,
+                protocol: context.request.providerProtocol,
+                authMode: context.request.authMode,
+                profileOverride: context.request.advanced?.profileOverride,
+              }),
+              paperCount: targets.length,
+            })
+          : undefined;
+        const maxChars =
+          input.maxChars || adaptiveBudget?.maxCharactersPerPaper || 6000;
         const results = [];
         const metadataResolver = createZoteroMetadataResolver({
           getItem: (itemId) => zoteroGateway.getItem(itemId),
@@ -1318,9 +1341,19 @@ export function createPaperReadTool(
             continue;
           }
           try {
-            results.push(
-              await pdfService.getOverviewExcerpt({ paperContext, maxChars }),
-            );
+            const overview = await pdfService.getOverviewExcerpt({
+              paperContext,
+              maxChars,
+            });
+            results.push({
+              ...overview,
+              selectedCharacters: overview.text.length,
+              coverage:
+                Array.isArray(overview.chunkIndexes) &&
+                overview.chunkIndexes.length >= overview.totalChunks
+                  ? "complete"
+                  : "capacity_sampled",
+            });
           } catch (error) {
             const warning = combineWarnings(
               extractWarningText(mineru),
@@ -1343,10 +1376,32 @@ export function createPaperReadTool(
         const overviewQuotePack = buildOverviewQuoteCitationPack(
           results as Array<Record<string, unknown>>,
         );
+        const coverageKinds = overviewQuotePack.results.map((result) =>
+          String((result as Record<string, unknown>).coverage || "unknown"),
+        );
         return {
           mode: input.mode,
           results: overviewQuotePack.results,
           quoteCitations: overviewQuotePack.quoteCitations,
+          readingReceipt: {
+            strategy: adaptiveBudget ? "capacity_adaptive" : "default",
+            requestedPapers: targets.length,
+            returnedPapers: overviewQuotePack.results.length,
+            completePapers: coverageKinds.filter(
+              (coverage) => coverage === "complete",
+            ).length,
+            capacitySampledPapers: coverageKinds.filter(
+              (coverage) => coverage === "capacity_sampled",
+            ).length,
+            abstractOnlyPapers: coverageKinds.filter(
+              (coverage) => coverage === "abstract_only",
+            ).length,
+            metadataOnlyPapers: coverageKinds.filter(
+              (coverage) => coverage === "metadata_only",
+            ).length,
+            maxCharactersPerPaper: maxChars,
+            ...(adaptiveBudget || {}),
+          },
         };
       }
 

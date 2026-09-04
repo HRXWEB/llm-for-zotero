@@ -68,6 +68,10 @@ export function decodeScopeSnapshotItem(
       input.localItemId === undefined
         ? undefined
         : positiveInteger(input.localItemId, "localItemId"),
+    title: typeof input.title === "string" ? input.title : undefined,
+    firstCreator:
+      typeof input.firstCreator === "string" ? input.firstCreator : undefined,
+    year: typeof input.year === "string" ? input.year : undefined,
     metadataFingerprint:
       typeof input.metadataFingerprint === "string"
         ? input.metadataFingerprint
@@ -430,6 +434,21 @@ export function decodePaperFinding(value: unknown): PaperFinding {
   if (!new Set(["low", "medium", "high"]).has(String(input.confidence))) {
     throw new Error("Invalid paper-finding confidence");
   }
+  const roles =
+    input.roles === undefined ? undefined : strings(input.roles, "roles");
+  const allowedRoles = new Set([
+    "central_evidence",
+    "supporting_evidence",
+    "contradictory_evidence",
+    "theoretical_foundation",
+    "methodological_contribution",
+    "historical_context",
+    "tangential_context",
+    "unresolved",
+  ]);
+  if (roles?.some((role) => !allowedRoles.has(role))) {
+    throw new Error("Invalid paper-finding role");
+  }
   return {
     version: 1,
     findingId: string(input.findingId, "findingId"),
@@ -453,6 +472,27 @@ export function decodePaperFinding(value: unknown): PaperFinding {
       input.unresolvedQuestions,
       "unresolvedQuestions",
     ),
+    ...(roles ? { roles: roles as NonNullable<PaperFinding["roles"]> } : {}),
+    ...(input.mainMessage === undefined
+      ? {}
+      : { mainMessage: string(input.mainMessage, "mainMessage") }),
+    ...(input.researchQuestion === undefined
+      ? {}
+      : {
+          researchQuestion: string(input.researchQuestion, "researchQuestion"),
+        }),
+    ...(input.method === undefined
+      ? {}
+      : { method: string(input.method, "method") }),
+    ...(input.mechanisms === undefined
+      ? {}
+      : { mechanisms: strings(input.mechanisms, "mechanisms") }),
+    ...(input.relevance === undefined
+      ? {}
+      : { relevance: string(input.relevance, "relevance") }),
+    ...(input.relationships === undefined
+      ? {}
+      : { relationships: strings(input.relationships, "relationships") }),
     createdAt: number(input.createdAt, "createdAt"),
   };
 }

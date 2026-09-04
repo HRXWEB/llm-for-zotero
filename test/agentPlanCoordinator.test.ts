@@ -9,7 +9,10 @@ import type {
   TaskEvidence,
 } from "../src/agent/plans/types";
 import type { AgentActionReceipt } from "../src/agent/contracts/types";
-import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
+import {
+  buildReasoningAssertionEvidence,
+  createTaskUpdateTool,
+} from "../src/agent/tools/plan/taskUpdate";
 import { hasApprovedFullReadAuthorization } from "../src/agent/tools/read/paperRead";
 import type { AgentToolContext } from "../src/agent/types";
 
@@ -101,6 +104,31 @@ function evidence(
 }
 
 describe("PlanExecutionCoordinator invariants", function () {
+  it("ignores a surplus reasoning assertion when verified evidence owns completion", function () {
+    const readTask = task({
+      expectedEffect: "read",
+      completionRequirements: [
+        {
+          requirementId: "read-requirement",
+          kind: "verified_read",
+          criterionIds: ["read-complete"],
+          contractDigest: "sha256:test",
+        },
+      ],
+    });
+
+    assert.isUndefined(
+      buildReasoningAssertionEvidence({
+        executionId: "execution-1",
+        task: readTask,
+        status: "completed",
+        assertion: "The requested reads are complete.",
+        createdAt: 3,
+      }),
+      "surplus narrative must not become completion evidence",
+    );
+  });
+
   it("accepts exactly one task transition per committed call", function () {
     const validated = createTaskUpdateTool().validate({
       task: { taskId: "execution-1:step-1", status: "completed" },

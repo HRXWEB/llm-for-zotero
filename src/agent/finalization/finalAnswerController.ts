@@ -99,6 +99,9 @@ export class AgentFinalAnswerController {
 
     const planDecision = await this.planSession?.evaluateFinal({
       canCorrect: params.canCorrect,
+      successfulToolResultCount: params.toolExecutionRecords.filter(
+        (record) => record.ok,
+      ).length,
     });
     if (planDecision && planDecision.kind !== "accept") {
       return planDecision.kind === "correct"

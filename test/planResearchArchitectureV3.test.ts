@@ -26,17 +26,34 @@ import {
 } from "../src/agent/research/evaluation";
 import {
   assertTaskCompletionEvidence,
+  canonicalizePlanResearchEvidenceDepth,
+  canonicalizePlanVerifierOwnership,
   resolvePreResearchActionContract,
 } from "../src/agent/plans/coordinator";
 import type { AgentActionContract } from "../src/agent/contracts/types";
 import { createSubmitPlanDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
 import {
   createResearchUpdateTool,
+  getTerminalScreeningDecisionError,
+  isCriterionCompleteScreeningDecision,
+  resolveTrustedPdfLocator,
+  selectPreferredReadingAttachment,
   selectPreferredVerifiedReads,
 } from "../src/agent/tools/plan/researchUpdate";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
+import {
+  buildExcludedScreeningFinding,
+  buildAdaptiveScreeningBatch,
+  type ScreeningBatchPaper,
+} from "../src/agent/research/screeningBatch";
+import {
+  createUpdatePlanTool,
+  extractExplicitResearchScopeCount,
+} from "../src/agent/tools/plan/updatePlan";
 import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
-import { buildPlanFinalCorrection } from "../src/agent/plans/runSession";
+import {
+  buildPlanFinalCorrection,
+  shouldOfferPlanFinalCorrection,
+} from "../src/agent/plans/runSession";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type {
   ExecutionTask,
@@ -47,6 +64,10 @@ import {
   OPERATION_CATALOG,
   operationAuthorityIsConsistent,
 } from "../src/agent/contracts/operationCatalog";
+import { interruptResearchExecution } from "../src/agent/research/store";
+import { listExecutionTaskEvidence } from "../src/agent/plans/store";
+import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const policy = resolveResearchPolicy("plan_research");
 
@@ -72,6 +93,313 @@ function investigation() {
 }
 
 describe("Plan Mode research architecture v3", function () {
+  it("explains terminal screening contradictions when papers are recorded", function () {
+    const criteria = [
+      {
+        id: "include-scope",
+        kind: "include" as const,
+        description: "In scope",
+      },
+      {
+        id: "exclude-outside",
+        kind: "exclude" as const,
+        description: "Outside the scope",
+      },
+    ];
+
+    assert.include(
+      getTerminalScreeningDecisionError({
+        screeningStatus: "included",
+        criterionResults: {
+          "include-scope": "met",
+          "exclude-outside": "met",
+        },
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 3,
+      }) || "",
+      'exclude criteria must be "not_met"',
+    );
+    assert.isUndefined(
+      getTerminalScreeningDecisionError({
+        screeningStatus: "excluded",
+        criterionResults: {
+          "include-scope": "met",
+          "exclude-outside": "not_met",
+        },
+        decisionReason: "Relevant, but outside the strongest three papers.",
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 3,
+      }),
+      "a reasoned relative exclusion remains valid",
+    );
+    assert.isUndefined(
+      getTerminalScreeningDecisionError({
+        screeningStatus: "candidate",
+        criterionResults: {
+          "include-scope": "met",
+          "exclude-outside": "unknown",
+        },
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 3,
+      }),
+      "provisional candidates may retain unknown results",
+    );
+  });
+
+  it("accepts reasoned relative exclusions when only a bounded subset is deep-read", function () {
+    const criteria = [
+      { id: "c1", kind: "include" as const, description: "Frozen scope" },
+      { id: "c2", kind: "include" as const, description: "PDF-backed" },
+      { id: "c3", kind: "exclude" as const, description: "Not a paper" },
+    ];
+    const excluded = decodeResearchCorpusItem({
+      version: 1,
+      researchJobId: "r",
+      executionId: "e",
+      parentTaskId: "t",
+      libraryID: 1,
+      itemKey: "AAAA1111",
+      ordinal: 0,
+      screeningStatus: "excluded",
+      criterionResults: { c1: "met", c2: "met", c3: "not_met" },
+      decisionReason:
+        "Relevant at abstract level, but not among the three strongest papers selected for body reading.",
+      inventoryRecorded: true,
+      hasAbstract: true,
+      attachmentItemKeys: ["PDF00001"],
+      duplicateAttachmentKeys: [],
+      readable: true,
+      indexed: true,
+      updatedAt: 1,
+    });
+
+    assert.isTrue(
+      isCriterionCompleteScreeningDecision({
+        entry: excluded,
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 3,
+      }),
+    );
+    assert.isFalse(
+      isCriterionCompleteScreeningDecision({
+        entry: { ...excluded, decisionReason: "" },
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 3,
+      }),
+      "relative exclusion still requires an explicit paper-level rationale",
+    );
+    assert.isFalse(
+      isCriterionCompleteScreeningDecision({
+        entry: excluded,
+        criteria,
+        totalItems: 10,
+        deepReadPlanned: 10,
+      }),
+      "a corpus-wide deep-read plan cannot use relative selection as an exclusion reason",
+    );
+  });
+
+  it("derives an explicit research scope count without confusing the deep-read count", function () {
+    assert.equal(
+      extractExplicitResearchScopeCount(
+        "Use exactly the first 55 alphabetically listed papers and deep-read 3.",
+      ),
+      55,
+    );
+    assert.equal(
+      extractExplicitResearchScopeCount(
+        "Create a review using exactly 30 articles from this collection.",
+      ),
+      30,
+    );
+    assert.isUndefined(
+      extractExplicitResearchScopeCount(
+        "Screen the collection and deep-read exactly 3 papers.",
+      ),
+    );
+  });
+
+  it("makes a positive deep-read budget enforce body evidence", function () {
+    const contract = canonicalizePlanResearchEvidenceDepth(
+      decodePlanContract({
+        investigation: {
+          ...investigation(),
+          requiredEvidenceDepth: "abstract",
+          estimatedDeepReadPapers: 3,
+        },
+        deliverable: { kind: "answer" },
+        researchPolicy: policy,
+      }),
+    );
+    assert.equal(contract.investigation?.requiredEvidenceDepth, "body");
+  });
+
+  it("recovers trusted reads from every task in the approved execution", async function () {
+    const previousZotero = (globalThis as { Zotero?: unknown }).Zotero;
+    const evidence = [
+      {
+        version: 3 as const,
+        evidenceId: "read-task-1",
+        executionId: "execution-1",
+        taskId: "deep-read-task",
+        kind: "verified_read" as const,
+        verified: true,
+        criterionIds: [] as string[],
+        reference: "read-call-1",
+        payload: {
+          type: "verified_read" as const,
+          reference: "read-call-1",
+          observations: [],
+        },
+        createdAt: 1,
+      },
+      {
+        version: 3 as const,
+        evidenceId: "read-task-2",
+        executionId: "execution-1",
+        taskId: "synthesis-task",
+        kind: "verified_read" as const,
+        verified: true,
+        criterionIds: [] as string[],
+        reference: "read-call-2",
+        payload: {
+          type: "verified_read" as const,
+          reference: "read-call-2",
+          observations: [],
+        },
+        createdAt: 2,
+      },
+    ];
+    let queriedSql = "";
+    (globalThis as { Zotero: unknown }).Zotero = {
+      DB: {
+        queryAsync: async (sql: string, args: unknown[]) => {
+          queriedSql = sql;
+          assert.deepEqual(args, ["execution-1"]);
+          return evidence.map((entry) => ({
+            payloadJson: JSON.stringify(entry),
+          }));
+        },
+      },
+    };
+    try {
+      const recovered = await listExecutionTaskEvidence("execution-1");
+      assert.deepEqual(
+        recovered.map((entry) => entry.reference),
+        ["read-call-1", "read-call-2"],
+      );
+      assert.notInclude(queriedSql, "task_id = ?");
+    } finally {
+      (globalThis as { Zotero?: unknown }).Zotero = previousZotero;
+    }
+  });
+
+  it("drops an unissued body locator while preserving the trusted body receipt", function () {
+    const observation: TrustedReadObservation = {
+      version: 1,
+      observationId: "observation-1",
+      issuer: "zotero_host",
+      toolName: "paper_read",
+      callDigest: "sha256:call",
+      inputDigest: "sha256:input",
+      resultDigest: "sha256:result",
+      libraryID: 1,
+      itemKey: "AAAA1111",
+      attachmentItemKey: "PDFP2222",
+      capabilities: ["body"],
+      sourceFingerprint: "fnv1a32-body",
+      certificateDigest: "sha256:certificate",
+    };
+    assert.isUndefined(
+      resolveTrustedPdfLocator({
+        evidenceKey: "body-claim",
+        sourceKind: "body",
+        requested: { attachmentItemKey: "PDFP2222", pageIndex: 7 },
+        observations: [observation],
+        fallbackFingerprint: "fnv1a32-body",
+      }),
+      "a page number omitted by the host receipt must not be persisted from model output",
+    );
+    assert.throws(
+      () =>
+        resolveTrustedPdfLocator({
+          evidenceKey: "quote-claim",
+          sourceKind: "quote",
+          requested: { attachmentItemKey: "PDFP2222", pageIndex: 7 },
+          observations: [observation],
+          fallbackFingerprint: "fnv1a32-body",
+        }),
+      /locator was not emitted/,
+    );
+  });
+
+  it("injects the persisted prior plan into a revision prompt", async function () {
+    const priorPlan = {
+      version: 4 as const,
+      planId: "plan-1",
+      conversationKey: 1,
+      provider: "original" as const,
+      revision: 1,
+      digest: "sha256:plan",
+      status: "superseded" as const,
+      explanation: "Screen ten papers, then deep-read three.",
+      contract: decodePlanContract({
+        investigation: investigation(),
+        deliverable: { kind: "answer" },
+        researchPolicy: policy,
+      }),
+      contractDigest: "sha256:contract",
+      steps: [
+        {
+          planStepId: "screen",
+          content: "Screen the frozen corpus",
+          activeForm: "Screening the frozen corpus",
+          acceptanceCriteria: [
+            {
+              criterionId: "screened",
+              description: "Every paper is screened",
+              verifier: "research_coverage" as const,
+            },
+          ],
+          completionRequirements: [],
+          expectedEffect: "read" as const,
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const messages = await buildAgentInitialMessages(
+      resolvedAgentRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Revise only the evidence strategy.",
+        planContext: {
+          phase: "planning",
+          planId: "plan-1",
+          revision: 2,
+          provider: "original",
+        },
+        metadata: { priorPlanArtifact: priorPlan },
+      }),
+      [],
+      [],
+    );
+    const prompt = messages
+      .map((message) =>
+        typeof message.content === "string" ? message.content : "",
+      )
+      .join("\n");
+    assert.include(prompt, "HOST-PERSISTED PLAN REVISION BASE");
+    assert.include(prompt, "Screen ten papers, then deep-read three.");
+    assert.include(prompt, '"planStepId":"screen"');
+    assert.include(prompt, "Do not rediscover or reconstruct this plan");
+  });
+
   it("directs an unfinished document plan to the terminal document tool", function () {
     const correction = buildPlanFinalCorrection(
       "The document task is incomplete",
@@ -83,6 +411,151 @@ describe("Plan Mode research architecture v3", function () {
     assert.notInclude(
       correction,
       "Continue the approved plan. Use task_update",
+    );
+  });
+
+  it("keeps document submission behind unfinished prerequisite tasks", function () {
+    const correction = buildPlanFinalCorrection(
+      "The deep-reading task is incomplete",
+      true,
+      false,
+    );
+    assert.include(correction, "Complete the current approved task");
+    assert.include(correction, "task_update");
+    assert.include(correction, "Once the document task becomes active");
+    assert.notInclude(correction, "Call submit_document now");
+  });
+
+  it("keeps host-advanced research corrections off task_update", function () {
+    const correction = buildPlanFinalCorrection(
+      "The deep-reading task is incomplete",
+      true,
+      false,
+      false,
+    );
+    assert.include(correction, "host advances its task state");
+    assert.include(correction, "continue with the active research tool");
+    assert.notInclude(correction, "task_update");
+    assert.notInclude(correction, "Call submit_document now");
+  });
+
+  it("renews the Plan final correction only after a successful tool step", function () {
+    assert.isTrue(
+      shouldOfferPlanFinalCorrection({
+        canCorrect: true,
+        successfulToolResultCount: 0,
+        lastCorrectionSuccessfulToolCount: -1,
+      }),
+    );
+    assert.isFalse(
+      shouldOfferPlanFinalCorrection({
+        canCorrect: true,
+        successfulToolResultCount: 0,
+        lastCorrectionSuccessfulToolCount: 0,
+      }),
+    );
+    assert.isTrue(
+      shouldOfferPlanFinalCorrection({
+        canCorrect: true,
+        successfulToolResultCount: 2,
+        lastCorrectionSuccessfulToolCount: 0,
+      }),
+    );
+  });
+
+  it("canonicalizes host-owned research and document verifier placement", function () {
+    const steps = canonicalizePlanVerifierOwnership({
+      contract: decodePlanContract({
+        investigation: investigation(),
+        deliverable: {
+          kind: "document",
+          spec: {
+            kind: "literature_review",
+            title: "Review",
+            requiredSections: ["Findings", "Limitations"],
+            requiresReferences: true,
+            requiresCoverageSection: true,
+            allowFigures: false,
+            citationStyle: {
+              styleId: "http://www.zotero.org/styles/apa",
+              styleTitle: "APA",
+              locale: "en-US",
+            },
+          },
+        },
+        researchPolicy: policy,
+      }),
+      steps: [
+        {
+          planStepId: "screen",
+          content: "Screen the corpus",
+          activeForm: "Screening",
+          expectedEffect: "read" as const,
+          acceptanceCriteria: [
+            {
+              criterionId: "screened",
+              description: "All papers screened",
+              verifier: "research_coverage" as const,
+            },
+            {
+              criterionId: "integrity-wrong-step",
+              description: "Document is valid",
+              verifier: "document_integrity" as const,
+            },
+          ],
+        },
+        {
+          planStepId: "synthesize",
+          content: "Synthesize findings",
+          activeForm: "Synthesizing",
+          expectedEffect: "reasoning" as const,
+          acceptanceCriteria: [
+            {
+              criterionId: "deep-read",
+              description: "Included papers have evidence",
+              verifier: "research_coverage" as const,
+            },
+          ],
+        },
+        {
+          planStepId: "document",
+          content: "Publish the review",
+          activeForm: "Publishing",
+          expectedEffect: "artifact" as const,
+          acceptanceCriteria: [
+            {
+              criterionId: "published",
+              description: "Document is published",
+              verifier: "document_published" as const,
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.deepEqual(
+      steps.flatMap((step, index) =>
+        step.acceptanceCriteria
+          .filter((criterion) => criterion.verifier === "research_coverage")
+          .map(() => index),
+      ),
+      [1, 1],
+    );
+    assert.deepEqual(
+      steps.flatMap((step, index) =>
+        step.acceptanceCriteria
+          .filter((criterion) =>
+            ["document_integrity", "document_published"].includes(
+              criterion.verifier,
+            ),
+          )
+          .map(() => index),
+      ),
+      [2, 2],
+    );
+    assert.isTrue(
+      steps.every((step) => step.acceptanceCriteria.length > 0),
+      "canonicalization must not leave a user-visible step unverifiable",
     );
   });
 
@@ -109,17 +582,21 @@ describe("Plan Mode research architecture v3", function () {
     );
     assert.equal(
       contractSchema.properties.investigation.properties.criteria.minItems,
-      1,
+      0,
     );
 
     const researchUpdate = createResearchUpdateTool({} as ZoteroGateway);
     assert.isTrue(researchUpdate.validate({ operation: "inventory_scope" }).ok);
+    assert.isTrue(
+      researchUpdate.validate({ operation: "next_screen_batch" }).ok,
+    );
     assert.isTrue(
       researchUpdate.validate({ operation: "list_verified_reads" }).ok,
     );
     assert.isTrue(
       researchUpdate.validate({ operation: "list_findings", limit: 20 }).ok,
     );
+    assert.isTrue(researchUpdate.validate({ operation: "list_themes" }).ok);
     assert.isFalse(
       researchUpdate.validate({ operation: "list_findings", limit: 26 }).ok,
     );
@@ -129,40 +606,100 @@ describe("Plan Mode research architecture v3", function () {
         papers: Array.from({ length: 2 }, () => ({})),
       }).ok,
     );
-    assert.isFalse(
+    assert.isTrue(
       researchUpdate.validate({
         operation: "record_papers",
         papers: Array.from({ length: 26 }, () => ({})),
       }).ok,
     );
-    assert.equal(
+    assert.isUndefined(
       (researchUpdate.spec.inputSchema as any).properties.papers.maxItems,
-      25,
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "host inventories every frozen item",
+      "authoritative scope check",
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "exact approved criterion/subquestion IDs",
+      "read every accessible paper",
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "exact findingId",
+      "host binds internal evidence and finding IDs",
+    );
+    assert.include(researchUpdate.guidance?.instruction || "", "list_themes");
+    assert.include(
+      researchUpdate.guidance?.instruction || "",
+      "do not recover old tool handles",
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "copy findingId and evidenceRefs exactly",
+      "continuation checkpoint already supplies the authoritative remaining manifest",
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "durable normalized findings",
+      "next_screen_batch",
     );
     assert.include(
       researchUpdate.guidance?.instruction || "",
-      "batch up to 25 papers",
+      "never re-enumerate or re-verify it with library_search",
     );
+    assert.include(
+      updatePlan.guidance?.instruction || "",
+      "resolve it with one bounded metadata query",
+    );
+    assert.include(updatePlan.guidance?.instruction || "", "omit include");
+    assert.include(
+      updatePlan.guidance?.instruction || "",
+      "never invent a paper quota",
+    );
+    const paperSchema = (researchUpdate.spec.inputSchema as any).properties
+      .papers.items;
+    assert.deepEqual(paperSchema.required, ["libraryID", "itemKey"]);
+    const findingSchema = paperSchema.properties.finding;
+    assert.includeMembers(findingSchema.required, [
+      "mainMessage",
+      "researchQuestion",
+      "method",
+      "relevance",
+    ]);
+    assert.notProperty(
+      findingSchema.properties,
+      "evidenceKeys",
+      "finding-to-evidence linkage is owned by the host",
+    );
+    for (const hostOwnedField of [
+      "hasAbstract",
+      "attachmentItemKeys",
+      "duplicateAttachmentKeys",
+      "readable",
+      "indexed",
+      "evidence",
+    ]) {
+      assert.notProperty(
+        paperSchema.properties,
+        hostOwnedField,
+        `${hostOwnedField} is frozen or verified by the host`,
+      );
+    }
+    assert.deepEqual(
+      paperSchema.properties.finding.properties.roles.items.enum,
+      [
+        "central_evidence",
+        "supporting_evidence",
+        "contradictory_evidence",
+        "theoretical_foundation",
+        "methodological_contribution",
+        "historical_context",
+        "tangential_context",
+        "unresolved",
+      ],
+    );
+    const themeSchema = (researchUpdate.spec.inputSchema as any).properties
+      .themes.items;
+    assert.property(themeSchema.properties, "paperIdentities");
+    assert.notInclude(themeSchema.required, "paperFindingIds");
+    assert.notInclude(themeSchema.required, "evidenceRefs");
     const taskUpdate = createTaskUpdateTool();
     assert.isFalse(
       taskUpdate.validate({
@@ -176,6 +713,77 @@ describe("Plan Mode research architecture v3", function () {
     assert.include(
       taskUpdate.guidance?.instruction || "",
       "include reasoningAssertion",
+    );
+    const hostOwnedRequest = resolvedAgentRequest({
+      conversationKey: 1,
+      mode: "agent",
+      userText: "Execute the approved review",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: "plan-1",
+        revision: 1,
+        executionId: "execution-1",
+        approvedDigest: "sha256:plan",
+        provider: "original",
+      },
+      metadata: {
+        planExecutionLedger: {
+          version: 1,
+          executionId: "execution-1",
+          planId: "plan-1",
+          revision: 1,
+          planDigest: "sha256:plan",
+          conversationKey: 1,
+          attempt: 1,
+          provider: "original",
+          grant: {
+            version: 1,
+            planId: "plan-1",
+            revision: 1,
+            planDigest: "sha256:plan",
+            conversationKey: 1,
+            conversationGeneration: 1,
+            approvedAt: 1,
+          },
+          status: "running",
+          activeTaskId: "task-1",
+          tasks: [
+            {
+              version: 2,
+              taskId: "task-1",
+              executionId: "execution-1",
+              planStepId: "s1",
+              kind: "required_step",
+              content: "Read every paper",
+              activeForm: "Reading every paper",
+              acceptanceCriteria: [],
+              expectedEffect: "read",
+              completionRequirements: [
+                {
+                  requirementId: "task-1:verified",
+                  kind: "verified_read",
+                  criterionIds: [],
+                  contractDigest: "sha256:plan",
+                },
+              ],
+              obligationIds: [],
+              status: "in_progress",
+              attemptCount: 1,
+              evidenceIds: [],
+              failureReasons: [],
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    });
+    assert.isFalse(
+      taskUpdate.isAvailable?.(hostOwnedRequest),
+      "host-verifiable workflows must not advertise task_update",
     );
     assert.match(
       (taskUpdate.spec.inputSchema as any).properties.task.properties
@@ -197,6 +805,147 @@ describe("Plan Mode research architecture v3", function () {
       "semantic",
       "reformulation",
     ]);
+  });
+
+  for (const corpusSize of [10, 30, 55]) {
+    it(`issues an adaptive, lossless screening queue for ${corpusSize} papers`, function () {
+      const pending: ScreeningBatchPaper[] = Array.from(
+        { length: corpusSize },
+        (_, index) => ({
+          libraryID: 1,
+          itemKey: `ITEM${String(index).padStart(4, "0")}`,
+          ordinal: index,
+          title: `Paper ${index}`,
+          abstract: `Abstract ${index} ${"evidence ".repeat((index % 5) + 1)}`,
+          year: String(2000 + (index % 25)),
+          firstCreator: `Author ${index}`,
+          hasAbstract: true,
+          readable: true,
+          indexed: true,
+        }),
+      );
+      const issued = new Set<string>();
+      while (issued.size < corpusSize) {
+        const batch = buildAdaptiveScreeningBatch({
+          papers: pending.filter(
+            (paper) => !issued.has(`${paper.libraryID}:${paper.itemKey}`),
+          ),
+          criterionIds: ["include-topic", "exclude-editorial"],
+          outputTokenBudget: 8192,
+          maxPapersPerUpdate: 25,
+        });
+        assert.isNotEmpty(batch.papers);
+        assert.isAtMost(batch.papers.length, 25);
+        for (const paper of batch.papers) {
+          const identity = `${paper.libraryID}:${paper.itemKey}`;
+          assert.isFalse(issued.has(identity), `${identity} was issued twice`);
+          issued.add(identity);
+        }
+      }
+      assert.equal(issued.size, corpusSize);
+    });
+  }
+
+  it("turns a broad-screen exclusion into a durable normalized finding", function () {
+    const finding = buildExcludedScreeningFinding({
+      researchJobId: "research-1",
+      executionId: "execution-1",
+      parentTaskId: "task-1",
+      libraryID: 1,
+      itemKey: "ITEM0001",
+      criterionIds: ["include-topic", "exclude-editorial"],
+      decisionReason: "The abstract concerns an unrelated clinical outcome.",
+      sourceFingerprint: "sha256:metadata",
+      createdAt: 123,
+    });
+    assert.equal(finding.inclusionDecision, "exclude");
+    assert.deepEqual(finding.criterionIds, [
+      "include-topic",
+      "exclude-editorial",
+    ]);
+    assert.include(finding.limitations[0], "title/abstract screening");
+    assert.deepEqual(finding.evidenceRefs, []);
+  });
+
+  it("terminalizes a research job and its issued work when Plan execution is interrupted", async function () {
+    const previousZotero = (globalThis as { Zotero?: unknown }).Zotero;
+    const job = {
+      version: 1 as const,
+      researchJobId: "execution-1:research",
+      executionId: "execution-1",
+      parentTaskId: "task-research",
+      contractDigest: "sha256:contract",
+      snapshotId: "snapshot-1",
+      policy,
+      status: "running" as const,
+      activeStage: "broad_screening" as const,
+      totalItems: 10,
+      screenedItems: 0,
+      candidateItems: 0,
+      deepReadCompleted: 0,
+      deepReadPlanned: 3,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const work = {
+      version: 1 as const,
+      workItemId: "execution-1:research:work:broad_screening:1:ITEM0001",
+      researchJobId: job.researchJobId,
+      executionId: job.executionId,
+      parentTaskId: job.parentTaskId,
+      libraryID: 1,
+      itemKey: "ITEM0001",
+      stage: "broad_screening" as const,
+      subquestionIds: [] as string[],
+      status: "in_progress" as const,
+      attemptCount: 1,
+      leaseOwner: "run-1",
+      leaseExpiresAt: 999999,
+      evidenceRefs: [] as string[],
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const saved: unknown[] = [];
+    (globalThis as { Zotero: unknown }).Zotero = {
+      DB: {
+        executeTransaction: async (fn: () => Promise<void>) => fn(),
+        queryAsync: async (sql: string, args?: unknown[]) => {
+          if (sql.includes("FROM llm_for_zotero_research_jobs")) {
+            return [{ payloadJson: JSON.stringify(job) }];
+          }
+          if (
+            sql.includes("FROM llm_for_zotero_research_work_items") &&
+            sql.includes("SELECT")
+          ) {
+            return [{ payloadJson: JSON.stringify(work) }];
+          }
+          if (sql.includes("INSERT OR REPLACE")) saved.push({ sql, args });
+          return [];
+        },
+      },
+    };
+    try {
+      const interrupted = await interruptResearchExecution({
+        executionId: "execution-1",
+        conversationKey: 7,
+        now: 100,
+      });
+      assert.equal(interrupted?.status, "interrupted");
+      assert.equal(interrupted?.updatedAt, 100);
+      assert.lengthOf(saved, 2);
+      const savedJob = JSON.parse(
+        String((saved[0] as { args: unknown[] }).args[5]),
+      ) as Record<string, unknown>;
+      assert.equal(savedJob.status, "interrupted");
+      const savedWork = JSON.parse(
+        String((saved[1] as { args: unknown[] }).args[6]),
+      ) as Record<string, unknown>;
+      assert.equal(savedWork.status, "interrupted");
+      assert.notProperty(savedWork, "leaseOwner");
+      assert.notProperty(savedWork, "leaseExpiresAt");
+    } finally {
+      (globalThis as { Zotero?: unknown }).Zotero = previousZotero;
+    }
   });
 
   it("decodes a composable research-to-document contract with exact policy", function () {
@@ -479,6 +1228,24 @@ describe("Plan Mode research architecture v3", function () {
     } finally {
       (globalThis as { Zotero?: unknown }).Zotero = priorZotero;
     }
+  });
+
+  it("selects a readable PDF rather than a sibling cache package for a reading manifest", function () {
+    const selected = selectPreferredReadingAttachment([
+      {
+        contextItemId: 3267,
+        title: "MinerU cache.zip",
+        contentType: "application/zip",
+      },
+      {
+        contextItemId: 3268,
+        title: "Paper.pdf",
+        contentType: "application/pdf",
+        indexingState: "indexed",
+      },
+    ]);
+
+    assert.equal(selected?.contextItemId, 3268);
   });
 
   it("keeps an earlier body receipt visible when a later metadata read covers the same paper", function () {

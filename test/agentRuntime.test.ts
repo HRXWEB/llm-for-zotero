@@ -5733,6 +5733,158 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("checkpoints raw paper text after a durable research batch", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read papers",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({
+          results: [
+            {
+              identity: "1:AAAA1111",
+              text: `FULL_PAPER_TEXT_SENTINEL ${"P".repeat(20_000)}`,
+            },
+          ],
+        }),
+      });
+      registry.register({
+        spec: {
+          name: "research_update",
+          description: "persist paper understanding",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({
+          content: {
+            progress: { totalItems: 30, deepReadCompleted: 1 },
+          },
+          continuationCheckpoint: {
+            reason: "research_batch_durable",
+            instruction:
+              "The completed paper understanding is durable. Continue with the remaining reading manifest.",
+          },
+        }),
+      });
+      registry.register(createToolResultReadTool());
+
+      let stepIndex = 0;
+      let resetCount = 0;
+      let messagesAfterBatch: AgentModelMessage[] = [];
+      const events: AgentEvent[] = [];
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          resetState: () => {
+            resetCount += 1;
+          },
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex += 1;
+            if (stepIndex === 1) {
+              const call = {
+                id: "read-paper-batch",
+                name: "paper_read",
+                arguments: {
+                  mode: "overview",
+                  targets: [{ itemId: 1, contextItemId: 2 }],
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            if (stepIndex === 2) {
+              const call = {
+                id: "record-paper-batch",
+                name: "research_update",
+                arguments: {
+                  operation: "record_papers",
+                  papers: [{ libraryID: 1, itemKey: "AAAA1111" }],
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            messagesAfterBatch = structuredClone(params.messages);
+            return {
+              kind: "final",
+              text: "Durable batch recorded.",
+              assistantMessage: {
+                role: "assistant",
+                content: "Durable batch recorded.",
+              },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1213,
+          mode: "agent",
+          userText: "Read every paper and persist each completed group.",
+          model: "deepseek-v4-pro",
+          apiBase: "https://api.deepseek.com/anthropic",
+          apiKey: "test",
+          advanced: { inputTokenCap: 1_000_000 },
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      assert.equal(outcome.kind, "completed");
+      assert.equal(resetCount, 1);
+      assert.notInclude(
+        JSON.stringify(messagesAfterBatch),
+        "FULL_PAPER_TEXT_SENTINEL",
+      );
+      assert.include(
+        JSON.stringify(messagesAfterBatch),
+        "Agent semantic continuation checkpoint",
+      );
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_context_budget" &&
+            event.payload?.action === "checkpoint_durable_tool_state" &&
+            event.payload?.reason === "research_batch_durable",
+        ),
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("checkpoints cached provider state when reported replay usage exceeds the send budget", async function () {
     const restoreDb = installMockDb();
     try {

@@ -238,6 +238,9 @@ export async function materializeResearchScopeSnapshot(params: {
       libraryID: params.scope.libraryID,
       itemKey,
       localItemId: target.itemId,
+      title: target.title,
+      firstCreator: target.firstCreator,
+      year: target.year,
       ...fingerprints,
       ordinal: items.length,
     });
@@ -251,11 +254,17 @@ export async function materializeResearchScopeSnapshot(params: {
         ({
           libraryID,
           itemKey,
+          title,
+          firstCreator,
+          year,
           metadataFingerprint,
           attachmentFingerprint,
         }) => ({
           libraryID,
           itemKey,
+          title,
+          firstCreator,
+          year,
           metadataFingerprint,
           attachmentFingerprint,
         }),

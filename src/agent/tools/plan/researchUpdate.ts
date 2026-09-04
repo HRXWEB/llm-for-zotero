@@ -4,10 +4,13 @@ import type {
 } from "../../types";
 import { canonicalJson } from "../../services/libraryMutation/canonicalJson";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type {
+  LibraryItemTargetAttachment,
+  ZoteroGateway,
+} from "../../services/zoteroGateway";
 import { planExecutionCoordinator } from "../../plans/coordinator";
 import {
-  listTaskEvidence,
+  listExecutionTaskEvidence,
   loadPlanArtifact,
   loadPlanExecutionLedger,
 } from "../../plans/store";
@@ -17,10 +20,12 @@ import {
 } from "../../research/policy";
 import { getResearchItemFingerprints } from "../../research/scopeSnapshot";
 import {
+  claimResearchWorkItems,
   listPaperFindings,
   listResearchCorpusItems,
   listResearchEvidence,
   listResearchRecallProbes,
+  listResearchWorkItems,
   listScopeSnapshotItems,
   listThemeFindings,
   loadResearchJobForExecution,
@@ -33,9 +38,16 @@ import {
   saveResearchWorkItem,
   saveThemeFinding,
 } from "../../research/store";
+import {
+  buildExcludedScreeningFinding,
+  buildAdaptiveScreeningBatch,
+  type ScreeningBatchPaper,
+} from "../../research/screeningBatch";
+import { normalizeMaxTokensForRequest } from "../../../utils/llmClient";
 import type {
   PaperFinding,
   ResearchCorpusItem,
+  ResearchCriterion,
   ResearchEvidenceRecord,
   ResearchJob,
   ResearchProgress,
@@ -52,8 +64,10 @@ import { fail, ok, validateObject } from "../shared";
 type ResearchUpdateInput = {
   operation:
     | "inventory_scope"
+    | "next_screen_batch"
     | "list_verified_reads"
     | "list_findings"
+    | "list_themes"
     | "record_papers"
     | "record_probes"
     | "record_themes"
@@ -86,7 +100,205 @@ const SCREENING_STATUSES = new Set<ResearchCorpusItem["screeningStatus"]>([
   "unreadable",
   "missing",
 ]);
-const MAX_PAPERS_PER_UPDATE = 25;
+const NARRATIVE_ROLES = [
+  "central_evidence",
+  "supporting_evidence",
+  "contradictory_evidence",
+  "theoretical_foundation",
+  "methodological_contribution",
+  "historical_context",
+  "tangential_context",
+  "unresolved",
+] as const;
+
+export function selectPreferredReadingAttachment(
+  attachments: readonly LibraryItemTargetAttachment[],
+): LibraryItemTargetAttachment | undefined {
+  const pdfs = attachments.filter((attachment) => {
+    const contentType = String(attachment.contentType || "")
+      .trim()
+      .toLowerCase();
+    const title = String(attachment.title || "")
+      .trim()
+      .toLowerCase();
+    return contentType === "application/pdf" || title.endsWith(".pdf");
+  });
+  return pdfs
+    .map((attachment, ordinal) => ({
+      attachment,
+      ordinal,
+      score:
+        (attachment.mineruCacheDir?.trim() ? 4 : 0) +
+        (attachment.indexingState === "indexed"
+          ? 3
+          : attachment.indexingState === "partial"
+            ? 2
+            : 0),
+    }))
+    .sort(
+      (left, right) => right.score - left.score || left.ordinal - right.ordinal,
+    )[0]?.attachment;
+}
+
+type ReadingManifestEntry = {
+  identity: string;
+  libraryID: number;
+  itemKey: string;
+  ordinal: number;
+  title: string;
+  hasAbstract: boolean;
+  readable: boolean;
+  indexed: boolean;
+  evidenceDepthTarget: "metadata" | "abstract" | "body";
+  target?: { itemId: number; contextItemId: number };
+};
+
+async function buildReadingManifest(params: {
+  corpus: readonly ResearchCorpusItem[];
+  gateway: ZoteroGateway;
+  requiredEvidenceDepth: "metadata" | "abstract" | "body";
+  preferredContextItemIds?: ReadonlyMap<string, number>;
+}): Promise<ReadingManifestEntry[]> {
+  const manifest: ReadingManifestEntry[] = [];
+  for (const entry of [...params.corpus].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  )) {
+    const identity = `${entry.libraryID}:${entry.itemKey}`;
+    const item =
+      Zotero.Items.getByLibraryAndKey(entry.libraryID, entry.itemKey) ||
+      undefined;
+    let preferredContextItemId = params.preferredContextItemIds?.get(identity);
+    if (!preferredContextItemId && item) {
+      const attachments = await params.gateway.getAllChildAttachmentInfos(
+        item.id,
+      );
+      preferredContextItemId =
+        selectPreferredReadingAttachment(attachments)?.contextItemId;
+    }
+    const attachment = preferredContextItemId
+      ? Zotero.Items.get(preferredContextItemId) || undefined
+      : undefined;
+    manifest.push({
+      identity,
+      libraryID: entry.libraryID,
+      itemKey: entry.itemKey,
+      ordinal: entry.ordinal,
+      title:
+        String(
+          item?.getField?.("title") || item?.getDisplayTitle?.() || "",
+        ).trim() || "Untitled item",
+      hasAbstract: entry.hasAbstract,
+      readable: entry.readable,
+      indexed: entry.indexed,
+      evidenceDepthTarget: entry.readable
+        ? params.requiredEvidenceDepth
+        : entry.hasAbstract
+          ? "abstract"
+          : "metadata",
+      ...(item
+        ? {
+            target: {
+              itemId: Number(item.id),
+              contextItemId: Number(attachment?.id || item.id),
+            },
+          }
+        : {}),
+    });
+  }
+  return manifest;
+}
+
+export function isCriterionCompleteScreeningDecision(params: {
+  entry: ResearchCorpusItem;
+  criteria: readonly ResearchCriterion[];
+  totalItems: number;
+  deepReadPlanned: number;
+}): boolean {
+  const { entry, criteria } = params;
+  if (entry.screeningStatus === "missing") return true;
+  if (!criteria.length) {
+    return !["pending", "candidate"].includes(entry.screeningStatus);
+  }
+  const results = criteria.map(
+    (criterion) => entry.criterionResults[criterion.id],
+  );
+  if (results.some((result) => !result)) return false;
+  if (["unresolved", "unreadable"].includes(entry.screeningStatus)) {
+    return results.includes("unknown");
+  }
+  if (entry.screeningStatus === "included") {
+    return criteria.every((criterion) => {
+      const result = entry.criterionResults[criterion.id];
+      return criterion.kind === "include"
+        ? result === "met"
+        : result === "not_met";
+    });
+  }
+  if (entry.screeningStatus === "excluded") {
+    const criteriaExcludePaper = criteria.some((criterion) => {
+      const result = entry.criterionResults[criterion.id];
+      return (
+        (criterion.kind === "include" && result === "not_met") ||
+        (criterion.kind === "exclude" && result === "met")
+      );
+    });
+    if (criteriaExcludePaper) return true;
+
+    // In a bounded deep-reading plan, screening is also a relative ranking:
+    // papers can satisfy every absolute criterion while still falling outside
+    // the strongest subset selected for body reading. Preserve that honest
+    // distinction instead of forcing the model to falsify criterion results.
+    return (
+      params.deepReadPlanned > 0 &&
+      params.deepReadPlanned < params.totalItems &&
+      Boolean(entry.decisionReason?.trim())
+    );
+  }
+  return true;
+}
+
+export function getTerminalScreeningDecisionError(params: {
+  screeningStatus: ResearchCorpusItem["screeningStatus"];
+  criterionResults: Readonly<Record<string, "met" | "not_met" | "unknown">>;
+  decisionReason?: string;
+  criteria: readonly ResearchCriterion[];
+  totalItems: number;
+  deepReadPlanned: number;
+}): string | undefined {
+  if (["pending", "candidate", "missing"].includes(params.screeningStatus)) {
+    return undefined;
+  }
+  const entry = {
+    screeningStatus: params.screeningStatus,
+    criterionResults: params.criterionResults,
+    decisionReason: params.decisionReason,
+  } as ResearchCorpusItem;
+  if (
+    isCriterionCompleteScreeningDecision({
+      entry,
+      criteria: params.criteria,
+      totalItems: params.totalItems,
+      deepReadPlanned: params.deepReadPlanned,
+    })
+  ) {
+    return undefined;
+  }
+  const rendered = params.criteria
+    .map(
+      (criterion) =>
+        `${criterion.id} (${criterion.kind})=${
+          params.criterionResults[criterion.id] || "missing"
+        }`,
+    )
+    .join(", ");
+  if (params.screeningStatus === "included") {
+    return `screeningStatus "included" is inconsistent with criterionResults: include criteria must be "met" and exclude criteria must be "not_met". Received ${rendered}`;
+  }
+  if (params.screeningStatus === "excluded") {
+    return `screeningStatus "excluded" needs an include criterion marked "not_met", an exclude criterion marked "met", or an explicit decisionReason for relative ranking within a bounded deep-read subset. Received ${rendered}`;
+  }
+  return `screeningStatus "${params.screeningStatus}" requires at least one criterion marked "unknown". Received ${rendered}`;
+}
 
 type PreferredVerifiedRead = Readonly<{
   sourceReadRef: string;
@@ -108,6 +320,42 @@ function verifiedReadDepth(observations: readonly TrustedReadObservation[]) {
   return observations.some((entry) => entry.capabilities.includes("abstract"))
     ? "abstract"
     : "metadata";
+}
+
+/**
+ * A body receipt can prove that a paper was read without certifying a page.
+ * In that case retain the body proof but discard any model-supplied page
+ * number. Figure and quote evidence remain page-bound and fail closed.
+ */
+export function resolveTrustedPdfLocator(params: {
+  evidenceKey: string;
+  sourceKind: ResearchEvidenceRecord["sourceKind"];
+  requested: Readonly<{ attachmentItemKey: string; pageIndex: number }>;
+  observations: readonly TrustedReadObservation[];
+  fallbackFingerprint: string;
+}): ResearchEvidenceRecord["locator"] {
+  const locatable = params.observations.filter(
+    (observation) =>
+      Boolean(observation.attachmentItemKey) &&
+      Number.isFinite(observation.pageIndex),
+  );
+  if (!locatable.length && params.sourceKind === "body") return undefined;
+  const trusted = locatable.find(
+    (observation) =>
+      observation.attachmentItemKey === params.requested.attachmentItemKey &&
+      observation.pageIndex === params.requested.pageIndex,
+  );
+  if (!trusted) {
+    throw new Error(
+      `Evidence ${params.evidenceKey} locator was not emitted by its verified read`,
+    );
+  }
+  return {
+    kind: "pdf_page",
+    attachmentItemKey: params.requested.attachmentItemKey,
+    pageIndex: params.requested.pageIndex,
+    sourceFingerprint: trusted.sourceFingerprint || params.fallbackFingerprint,
+  };
 }
 
 /**
@@ -200,8 +448,10 @@ function validateResearchUpdate(
   if (
     ![
       "inventory_scope",
+      "next_screen_batch",
       "list_verified_reads",
       "list_findings",
+      "list_themes",
       "record_papers",
       "record_probes",
       "record_themes",
@@ -237,11 +487,9 @@ function validateResearchUpdate(
   if (
     operation === "record_papers" &&
     Array.isArray(args.papers) &&
-    (args.papers.length < 1 || args.papers.length > MAX_PAPERS_PER_UPDATE)
+    args.papers.length < 1
   ) {
-    return fail(
-      `record_papers accepts 1–${MAX_PAPERS_PER_UPDATE} papers per call`,
-    );
+    return fail("record_papers requires at least one paper");
   }
   if (operation === "record_probes" && !Array.isArray(args.probes)) {
     return fail("record_probes requires probes[]");
@@ -391,8 +639,10 @@ export function createResearchUpdateTool(
             enum: [
               "record_papers",
               "inventory_scope",
+              "next_screen_batch",
               "list_verified_reads",
               "list_findings",
+              "list_themes",
               "record_probes",
               "record_themes",
               "set_stage",
@@ -415,23 +665,19 @@ export function createResearchUpdateTool(
           papers: {
             type: "array",
             minItems: 1,
-            maxItems: MAX_PAPERS_PER_UPDATE,
             description:
-              "One to 25 frozen-corpus paper updates per transactional call. Batch broad-screening decisions so a corpus does not consume one model turn per paper; an invalid indexed entry rejects the whole batch for correction. Do not use this to inventory the scope; call inventory_scope once. screeningStatus and criterionResults are required for every paper. Call list_verified_reads first; non-metadata evidence must use one of its exact sourceReadRef values and may use only its trusted locator fields.",
+              "Durable paper understandings for any capacity-sized reading group. For adaptive narrative reviews provide the paper identities and rich findings; the host derives descriptive status, criterion fields, and trusted evidence references. Systematic reviews also provide screeningStatus and criterionResults.",
             items: {
               type: "object",
               additionalProperties: false,
-              required: [
-                "libraryID",
-                "itemKey",
-                "screeningStatus",
-                "criterionResults",
-              ],
+              required: ["libraryID", "itemKey"],
               properties: {
                 libraryID: { type: "integer", minimum: 1 },
                 itemKey: { type: "string" },
                 screeningStatus: {
                   type: "string",
+                  description:
+                    "candidate is provisional for deep reading; included means selected for the evidence synthesis and must meet requiredEvidenceDepth; excluded means screened and not selected for deep reading, but the paper remains in frozen coverage.",
                   enum: [
                     "pending",
                     "candidate",
@@ -445,75 +691,43 @@ export function createResearchUpdateTool(
                 criterionResults: {
                   type: "object",
                   description:
-                    "Map every approved criterion ID to met, not_met, or unknown during broad screening and later stages.",
+                    'Map every approved criterion ID to met, not_met, or unknown. Criterion kind controls the direction: an included paper has every include criterion="met" and every exclude criterion="not_met". An excluded paper has an include criterion="not_met" or an exclude criterion="met"; a reasoned relative exclusion may satisfy all absolute criteria when only a bounded subset will be deep-read.',
                   additionalProperties: {
                     type: "string",
                     enum: ["met", "not_met", "unknown"],
                   },
                 },
                 decisionReason: { type: "string" },
-                hasAbstract: { type: "boolean" },
-                attachmentItemKeys: {
-                  type: "array",
-                  items: { type: "string" },
-                },
-                duplicateAttachmentKeys: {
-                  type: "array",
-                  items: { type: "string" },
-                },
-                readable: { type: "boolean" },
-                indexed: { type: "boolean" },
-                evidence: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["evidenceKey", "sourceKind"],
-                    properties: {
-                      evidenceKey: { type: "string" },
-                      sourceKind: {
-                        type: "string",
-                        enum: [
-                          "metadata",
-                          "abstract",
-                          "body",
-                          "figure",
-                          "quote",
-                        ],
-                      },
-                      sourceReadRef: {
-                        type: "string",
-                        description:
-                          "Exact sourceReadRef returned by list_verified_reads for this paper. Required for abstract, body, figure, and quote evidence.",
-                      },
-                      locator: {
-                        type: "object",
-                        additionalProperties: false,
-                        required: ["attachmentItemKey", "pageIndex"],
-                        properties: {
-                          attachmentItemKey: { type: "string" },
-                          pageIndex: { type: "integer", minimum: 0 },
-                        },
-                      },
-                    },
-                  },
-                },
                 finding: {
                   type: "object",
                   additionalProperties: false,
                   required: [
-                    "subquestionIds",
-                    "criterionIds",
+                    "mainMessage",
+                    "researchQuestion",
+                    "method",
                     "findings",
-                    "contradictions",
-                    "negativeEvidence",
                     "limitations",
-                    "evidenceKeys",
-                    "inclusionDecision",
+                    "relevance",
                     "confidence",
-                    "unresolvedQuestions",
                   ],
                   properties: {
+                    roles: {
+                      type: "array",
+                      minItems: 1,
+                      items: { type: "string", enum: NARRATIVE_ROLES },
+                    },
+                    mainMessage: { type: "string" },
+                    researchQuestion: { type: "string" },
+                    method: { type: "string" },
+                    mechanisms: {
+                      type: "array",
+                      items: { type: "string" },
+                    },
+                    relevance: { type: "string" },
+                    relationships: {
+                      type: "array",
+                      items: { type: "string" },
+                    },
                     subquestionIds: {
                       type: "array",
                       items: { type: "string" },
@@ -535,10 +749,6 @@ export function createResearchUpdateTool(
                       items: { type: "string" },
                     },
                     limitations: {
-                      type: "array",
-                      items: { type: "string" },
-                    },
-                    evidenceKeys: {
                       type: "array",
                       items: { type: "string" },
                     },
@@ -598,23 +808,21 @@ export function createResearchUpdateTool(
           themes: {
             type: "array",
             description:
-              "Theme reductions with themeId, title, synthesis, paperFindingIds, evidenceRefs, and limitations.",
+              "Cross-paper relationship themes. Refer to papers by stable libraryID:itemKey identities; the host resolves durable finding and evidence IDs.",
             items: {
               type: "object",
               additionalProperties: false,
-              required: [
-                "themeId",
-                "title",
-                "synthesis",
-                "paperFindingIds",
-                "evidenceRefs",
-                "limitations",
-              ],
+              required: ["themeId", "title", "synthesis", "limitations"],
               properties: {
                 themeId: { type: "string" },
                 title: { type: "string" },
                 synthesis: { type: "string" },
                 paperFindingIds: {
+                  type: "array",
+                  minItems: 1,
+                  items: { type: "string" },
+                },
+                paperIdentities: {
                   type: "array",
                   minItems: 1,
                   items: { type: "string" },
@@ -643,7 +851,7 @@ export function createResearchUpdateTool(
     guidance: {
       matches: (request) => request.planContext?.phase === "executing",
       instruction:
-        "For an approved investigation, use research_update to persist work rather than keeping a paper list only in model context. First call {operation:'inventory_scope'} exactly once; the host inventories every frozen item, attachment key, duplicate, readability, abstract, and index state without making you enumerate the corpus. Then advance stages in order with set_stage. During broad screening, batch up to 25 papers in each record_papers call, with every approved criterion ID mapped to met, not_met, or unknown for every paper. An invalid papers[index] rejects the transactional batch; correct that indexed entry and retry the batch. Persist recall-expansion probes with record_probes, deep-read included or unresolved candidates, then call {operation:'list_verified_reads'} to obtain the exact approved criterion/subquestion IDs, per-paper durable status, strongest durable sourceReadRef, exact findingId, and exact evidenceRefs. A verifiedReads entry with evidenceDepth:'body' is a PDF/body-capable receipt and is preferred across resumed runs; use its exact trusted locator fields. On resume at synthesis or drafting, page through {operation:'list_findings'} until nextCursor is null; use those durable normalized findings instead of recovering old tool handles or rereading PDFs. For record_themes and submit_document, copy findingId and evidenceRefs exactly; never shorten or invent their IDs. Never invent criterion IDs or omit an approved criterion. Detailed evidence and findings may also be persisted in validated batches of up to 25 papers. Store one paper finding per paper and durable theme reductions. Missing evidence is unresolved, never negative evidence. Finalize only after the approved coverage is terminal; the host derives complete versus complete_with_limitations and emits aggregate progress.",
+        "For an approved investigation, persist durable understanding instead of administering workflow state in model context. The host has frozen and fingerprinted the exact scope, so never re-enumerate or re-verify it with library_search. First call {operation:'inventory_scope'}; this authoritative scope check returns the unread reading manifest and is safe to repeat after an actual interruption when no continuation manifest is available. For a narrative or scoping review, read one capacity-sized semantic group with paper_read overview, then immediately record rich paper understandings with record_papers before reading more: main message, research question, method, findings, mechanisms, limitations, relevance, descriptive roles, and relationships. The host checkpoints away that group's raw PDF text, and the host binds internal evidence and finding IDs before supplying the exact remaining manifest. A continuation checkpoint already supplies the authoritative remaining manifest: call paper_read directly from it and do not call inventory_scope between durable groups. You must read every accessible paper; never preselect a fixed deep-reading quota or accumulate multiple unrecorded groups. The host supplies criterion/status bookkeeping and advances to synthesis once every paper is durable. Then record cross-paper themes using paperIdentities such as '1:ABCD1234'; the host derives paperFindingIds and evidenceRefs. Call finalize only after themes are recorded. Use targeted reads only to resolve important uncertainty or verify a decisive claim. Missing or inaccessible evidence remains unresolved and its depth must be reported honestly. For a systematic review only, use next_screen_batch, explicit criterion decisions, recall probes, and ordered screening stages. When all papers are durable, call list_findings directly, or list_themes when themes are already durable; do not recover old tool handles or reread completed papers.",
     },
     validate: validateResearchUpdate,
     planInvocation: () =>
@@ -689,6 +897,9 @@ export function createResearchUpdateTool(
           "Research job contract digest no longer matches the plan",
         );
       }
+      const adaptiveReview =
+        investigation.readingStrategy === "adaptive" &&
+        investigation.reviewMode !== "systematic";
       const corpus = await listResearchCorpusItems({
         researchJobId: job.researchJobId,
       });
@@ -699,10 +910,7 @@ export function createResearchUpdateTool(
       const snapshotByKey = new Map(
         snapshot.map((entry) => [`${entry.libraryID}:${entry.itemKey}`, entry]),
       );
-      const taskEvidence = await listTaskEvidence(
-        plan.executionId,
-        job.parentTaskId,
-      );
+      const taskEvidence = await listExecutionTaskEvidence(plan.executionId);
       const verifiedReads = new Map(
         taskEvidence
           .filter(
@@ -718,6 +926,142 @@ export function createResearchUpdateTool(
               : [],
           ]),
       );
+      if (input.operation === "next_screen_batch") {
+        if (adaptiveReview) {
+          throw new Error(
+            "Adaptive narrative and scoping reviews read the inventory manifest directly; next_screen_batch is only for systematic review",
+          );
+        }
+        if (job.activeStage !== "broad_screening") {
+          throw new Error(
+            "next_screen_batch is available only during broad screening",
+          );
+        }
+        if (corpus.some((entry) => !entry.inventoryRecorded)) {
+          throw new Error(
+            "Inventory is incomplete; call inventory_scope before requesting screening work",
+          );
+        }
+        const pendingCorpus = corpus.filter(
+          (entry) => entry.screeningStatus === "pending",
+        );
+        const activeWork = await listResearchWorkItems({
+          researchJobId: job.researchJobId,
+          stage: "broad_screening",
+          statuses: ["in_progress"],
+        });
+        const activeIdentities = new Set(
+          activeWork.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+        );
+        const availableCorpus = activeWork.length
+          ? pendingCorpus.filter((entry) =>
+              activeIdentities.has(`${entry.libraryID}:${entry.itemKey}`),
+            )
+          : pendingCorpus;
+        const materialized: ScreeningBatchPaper[] = availableCorpus.map(
+          (entry) => {
+            const item = Zotero.Items.getByLibraryAndKey(
+              entry.libraryID,
+              entry.itemKey,
+            );
+            const field = (name: string) =>
+              String(
+                item && item.getField?.(name) ? item.getField(name) : "",
+              ).trim();
+            return {
+              libraryID: entry.libraryID,
+              itemKey: entry.itemKey,
+              ordinal: entry.ordinal,
+              title: field("title") || "Untitled item",
+              abstract: field("abstractNote"),
+              year: field("year") || field("date") || undefined,
+              firstCreator: field("firstCreator") || undefined,
+              hasAbstract: entry.hasAbstract,
+              readable: entry.readable,
+              indexed: entry.indexed,
+            };
+          },
+        );
+        const outputTokenBudget = normalizeMaxTokensForRequest({
+          value: context.request.advanced?.maxTokens,
+          maxTokensExplicit: context.request.advanced?.maxTokensExplicit,
+          model: context.request.model || context.modelName,
+          apiBase: context.request.apiBase,
+          protocol: context.request.providerProtocol,
+          authMode: context.request.authMode,
+          profileOverride: context.request.advanced?.profileOverride,
+        });
+        const projected = buildAdaptiveScreeningBatch({
+          papers: materialized,
+          criterionIds: investigation.criteria.map((entry) => entry.id),
+          outputTokenBudget,
+          maxPapersPerUpdate: Math.max(1, materialized.length),
+        });
+        let issued = [...projected.papers];
+        if (!activeWork.length && issued.length) {
+          const createdAt = Date.now();
+          for (const paper of issued) {
+            const workItemId = `${job.researchJobId}:work:broad_screening:${paper.libraryID}:${paper.itemKey}`;
+            if (await loadResearchWorkItem(workItemId)) continue;
+            await saveResearchWorkItem({
+              version: 1,
+              workItemId,
+              researchJobId: job.researchJobId,
+              executionId: job.executionId,
+              parentTaskId: job.parentTaskId,
+              libraryID: paper.libraryID,
+              itemKey: paper.itemKey,
+              stage: "broad_screening",
+              subquestionIds: [],
+              status: "pending",
+              attemptCount: 0,
+              evidenceRefs: [],
+              createdAt: createdAt + paper.ordinal,
+              updatedAt: createdAt,
+            });
+          }
+          const claimed = await claimResearchWorkItems({
+            researchJobId: job.researchJobId,
+            stage: "broad_screening",
+            leaseOwner: context.runId || job.executionId,
+            limit: issued.length,
+          });
+          const claimedIdentities = new Set(
+            claimed.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+          );
+          issued = issued.filter((paper) =>
+            claimedIdentities.has(`${paper.libraryID}:${paper.itemKey}`),
+          );
+        }
+        const next = await recomputeJob({
+          job,
+          conversationKey: context.request.conversationKey,
+        });
+        return {
+          researchContract: {
+            question: investigation.question,
+            criteria: investigation.criteria,
+            subquestions: investigation.subquestions,
+            requiredEvidenceDepth: investigation.requiredEvidenceDepth,
+          },
+          batch: {
+            batchId: issued.length
+              ? `${job.researchJobId}:screen:${issued[0].ordinal}-${issued[issued.length - 1].ordinal}`
+              : undefined,
+            papers: issued,
+            pendingPapers: pendingCorpus.length,
+            remainingAfterCommit: Math.max(
+              0,
+              pendingCorpus.length - issued.length,
+            ),
+            resumed: activeWork.length > 0,
+          },
+          instruction: issued.length
+            ? "Classify every paper in this batch against every criterion, then immediately call research_update record_papers with exactly these identities. Do not analyze another batch first."
+            : "Broad screening is durable for the complete frozen corpus; advance to recall_expansion.",
+          progress: progress(next),
+        };
+      }
       if (input.operation === "list_verified_reads") {
         const preferredByPaper = selectPreferredVerifiedReads(
           taskEvidence,
@@ -776,6 +1120,10 @@ export function createResearchUpdateTool(
       }
       if (input.operation === "list_findings") {
         const findings = await listPaperFindings(job.researchJobId);
+        const preferredByPaper = selectPreferredVerifiedReads(
+          taskEvidence,
+          new Set(corpusByKey.keys()),
+        );
         const corpusOrdinal = new Map(
           corpus.map((entry) => [
             `${entry.libraryID}:${entry.itemKey}`,
@@ -794,6 +1142,16 @@ export function createResearchUpdateTool(
         const page = findings.slice(cursor, cursor + limit).map((finding) => ({
           findingId: finding.findingId,
           identity: `${finding.libraryID}:${finding.itemKey}`,
+          title: snapshotByKey.get(`${finding.libraryID}:${finding.itemKey}`)
+            ?.title,
+          firstCreator: snapshotByKey.get(
+            `${finding.libraryID}:${finding.itemKey}`,
+          )?.firstCreator,
+          year: snapshotByKey.get(`${finding.libraryID}:${finding.itemKey}`)
+            ?.year,
+          evidenceDepth:
+            preferredByPaper.get(`${finding.libraryID}:${finding.itemKey}`)
+              ?.evidenceDepth || "metadata",
           subquestionIds: finding.subquestionIds,
           criterionIds: finding.criterionIds,
           findings: finding.findings,
@@ -804,12 +1162,36 @@ export function createResearchUpdateTool(
           inclusionDecision: finding.inclusionDecision,
           confidence: finding.confidence,
           unresolvedQuestions: finding.unresolvedQuestions,
+          roles: finding.roles,
+          mainMessage: finding.mainMessage,
+          researchQuestion: finding.researchQuestion,
+          method: finding.method,
+          mechanisms: finding.mechanisms,
+          relevance: finding.relevance,
+          relationships: finding.relationships,
         }));
         const nextCursor = cursor + page.length;
         return {
           findings: page,
           nextCursor: nextCursor < findings.length ? nextCursor : null,
           totalFindings: findings.length,
+        };
+      }
+      if (input.operation === "list_themes") {
+        const themes = await listThemeFindings(job.researchJobId);
+        return {
+          themes: themes.map((theme) => ({
+            themeFindingId: theme.themeFindingId,
+            title: theme.title,
+            synthesis: theme.synthesis,
+            paperFindingIds: theme.paperFindingIds,
+            evidenceRefs: theme.evidenceRefs,
+            limitations: theme.limitations,
+          })),
+          totalThemes: themes.length,
+          instruction: themes.length
+            ? "Use these durable theme reductions for the synthesis task and document; do not recover old tool handles or reread papers."
+            : "No durable themes are recorded yet; synthesize from list_findings and persist them with record_themes.",
         };
       }
       const allowedCriteria = new Set(
@@ -859,9 +1241,14 @@ export function createResearchUpdateTool(
         }
       }
       const effectiveStage = input.stage || job.activeStage;
+      const resumesAdaptiveInventory =
+        adaptiveReview &&
+        input.operation === "inventory_scope" &&
+        effectiveStage !== "inventory";
       if (
         input.operation === "inventory_scope" &&
-        effectiveStage !== "inventory"
+        effectiveStage !== "inventory" &&
+        !resumesAdaptiveInventory
       ) {
         throw new Error(
           "The frozen scope can be inventoried only in inventory",
@@ -874,6 +1261,40 @@ export function createResearchUpdateTool(
         throw new Error(
           "Use inventory_scope to inventory the frozen corpus, then advance to broad_screening",
         );
+      }
+      if (
+        input.operation === "record_papers" &&
+        effectiveStage === "broad_screening" &&
+        !adaptiveReview
+      ) {
+        const issued = await listResearchWorkItems({
+          researchJobId: job.researchJobId,
+          stage: "broad_screening",
+          statuses: ["in_progress"],
+        });
+        if (!issued.length) {
+          throw new Error(
+            "Call next_screen_batch before recording broad-screening decisions",
+          );
+        }
+        const expected = new Set(
+          issued.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+        );
+        const submitted = new Set(
+          (input.papers || []).map((paper) =>
+            validateObject<Record<string, unknown>>(paper)
+              ? `${Number(paper.libraryID)}:${String(paper.itemKey || "")}`
+              : "invalid",
+          ),
+        );
+        if (
+          expected.size !== submitted.size ||
+          [...expected].some((identity) => !submitted.has(identity))
+        ) {
+          throw new Error(
+            "record_papers must commit exactly the current host-issued screening batch before more work is issued",
+          );
+        }
       }
       if (
         input.operation === "set_stage" &&
@@ -910,30 +1331,163 @@ export function createResearchUpdateTool(
       }
 
       let inventoriedItems: number | undefined;
+      let readingManifest: ReadingManifestEntry[] | undefined;
       if (input.operation === "inventory_scope") {
-        let recorded = 0;
-        for (const current of corpus) {
-          const identity = `${current.libraryID}:${current.itemKey}`;
-          const approvedSource = snapshotByKey.get(identity);
-          if (!approvedSource) {
-            throw new Error(`Paper ${identity} is outside the frozen corpus`);
-          }
-          const liveItem = Zotero.Items.getByLibraryAndKey(
-            current.libraryID,
-            current.itemKey,
+        if (resumesAdaptiveInventory) {
+          const findings = await listPaperFindings(job.researchJobId);
+          const recordedIdentities = new Set(
+            findings.map(
+              (finding) => `${finding.libraryID}:${finding.itemKey}`,
+            ),
           );
-          if (!liveItem || liveItem.deleted) {
+          readingManifest = await buildReadingManifest({
+            corpus: corpus.filter(
+              (entry) =>
+                entry.screeningStatus !== "missing" &&
+                !recordedIdentities.has(`${entry.libraryID}:${entry.itemKey}`),
+            ),
+            gateway,
+            requiredEvidenceDepth: investigation.requiredEvidenceDepth,
+          });
+          inventoriedItems = corpus.filter(
+            (entry) => entry.inventoryRecorded,
+          ).length;
+        } else {
+          let recorded = 0;
+          const preferredReadingContextIds = new Map<string, number>();
+          for (const current of corpus) {
+            const identity = `${current.libraryID}:${current.itemKey}`;
+            const approvedSource = snapshotByKey.get(identity);
+            if (!approvedSource) {
+              throw new Error(`Paper ${identity} is outside the frozen corpus`);
+            }
+            const liveItem = Zotero.Items.getByLibraryAndKey(
+              current.libraryID,
+              current.itemKey,
+            );
+            if (!liveItem || liveItem.deleted) {
+              await saveResearchCorpusItem({
+                ...current,
+                screeningStatus: "missing",
+                inventoryRecorded: true,
+                hasAbstract: false,
+                attachmentItemKeys: [],
+                duplicateAttachmentKeys: [],
+                readable: false,
+                indexed: false,
+                decisionReason:
+                  "Item is missing from the approved library snapshot",
+                updatedAt: Date.now(),
+              });
+              await completeWorkItem({
+                libraryID: current.libraryID,
+                itemKey: current.itemKey,
+                stage: "inventory",
+              });
+              recorded += 1;
+              continue;
+            }
+            const attachmentInfos = await gateway.getAllChildAttachmentInfos(
+              liveItem.id,
+            );
+            const preferredReadingAttachment =
+              selectPreferredReadingAttachment(attachmentInfos);
+            if (preferredReadingAttachment) {
+              preferredReadingContextIds.set(
+                identity,
+                preferredReadingAttachment.contextItemId,
+              );
+            }
+            const attachmentItems = attachmentInfos
+              .map((attachment) => gateway.getItem(attachment.contextItemId))
+              .filter((attachment): attachment is Zotero.Item =>
+                Boolean(attachment),
+              );
+            const attachmentItemKeys = attachmentItems
+              .map((attachment) => String(attachment.key || "").trim())
+              .filter(Boolean);
+            const seenHashes = new Set<string>();
+            const duplicateAttachmentKeys: string[] = [];
+            for (const attachment of attachmentItems) {
+              const attachmentWithHash = attachment as Zotero.Item & {
+                attachmentHash?: string;
+                attachmentSyncedHash?: string;
+              };
+              const hash = String(
+                attachmentWithHash.attachmentHash ||
+                  attachmentWithHash.attachmentSyncedHash ||
+                  "",
+              ).trim();
+              if (!hash) continue;
+              if (seenHashes.has(hash)) {
+                const key = String(attachment.key || "").trim();
+                if (key) duplicateAttachmentKeys.push(key);
+              } else {
+                seenHashes.add(hash);
+              }
+            }
+            let hasLocalReadableAttachment = false;
+            for (const attachment of attachmentItems) {
+              if (
+                !attachmentInfos.some(
+                  (info) =>
+                    info.contextItemId === attachment.id &&
+                    selectPreferredReadingAttachment([info]),
+                )
+              ) {
+                continue;
+              }
+              try {
+                const path = await (
+                  attachment as Zotero.Item & {
+                    getFilePathAsync?: () => Promise<string | false>;
+                  }
+                ).getFilePathAsync?.();
+                if (
+                  path &&
+                  (await (
+                    globalThis as unknown as {
+                      IOUtils?: { exists?: (path: string) => Promise<boolean> };
+                    }
+                  ).IOUtils?.exists?.(path))
+                ) {
+                  hasLocalReadableAttachment = true;
+                  break;
+                }
+              } catch {
+                // Remote or missing attachments remain represented by their
+                // Zotero index/cache state below.
+              }
+            }
+            const indexed = attachmentInfos.some((attachment) =>
+              ["indexed", "partial"].includes(
+                String(attachment.indexingState || ""),
+              ),
+            );
+            const readable =
+              hasLocalReadableAttachment ||
+              indexed ||
+              attachmentInfos.some((attachment) =>
+                Boolean(attachment.mineruCacheDir),
+              );
+            const liveFingerprints = await getResearchItemFingerprints(
+              gateway,
+              liveItem.id,
+            );
             await saveResearchCorpusItem({
               ...current,
-              screeningStatus: "missing",
+              screeningStatus: "pending",
               inventoryRecorded: true,
-              hasAbstract: false,
-              attachmentItemKeys: [],
-              duplicateAttachmentKeys: [],
-              readable: false,
-              indexed: false,
-              decisionReason:
-                "Item is missing from the approved library snapshot",
+              hasAbstract: Boolean(
+                String(liveItem.getField?.("abstractNote") || "").trim(),
+              ),
+              attachmentItemKeys: [...new Set(attachmentItemKeys)],
+              duplicateAttachmentKeys: [...new Set(duplicateAttachmentKeys)],
+              readable,
+              indexed,
+              sourceFingerprint:
+                liveFingerprints.attachmentFingerprint ||
+                liveFingerprints.metadataFingerprint,
               updatedAt: Date.now(),
             });
             await completeWorkItem({
@@ -942,105 +1496,25 @@ export function createResearchUpdateTool(
               stage: "inventory",
             });
             recorded += 1;
-            continue;
           }
-          const attachmentInfos = await gateway.getAllChildAttachmentInfos(
-            liveItem.id,
-          );
-          const attachmentItems = attachmentInfos
-            .map((attachment) => gateway.getItem(attachment.contextItemId))
-            .filter((attachment): attachment is Zotero.Item =>
-              Boolean(attachment),
-            );
-          const attachmentItemKeys = attachmentItems
-            .map((attachment) => String(attachment.key || "").trim())
-            .filter(Boolean);
-          const seenHashes = new Set<string>();
-          const duplicateAttachmentKeys: string[] = [];
-          for (const attachment of attachmentItems) {
-            const attachmentWithHash = attachment as Zotero.Item & {
-              attachmentHash?: string;
-              attachmentSyncedHash?: string;
-            };
-            const hash = String(
-              attachmentWithHash.attachmentHash ||
-                attachmentWithHash.attachmentSyncedHash ||
-                "",
-            ).trim();
-            if (!hash) continue;
-            if (seenHashes.has(hash)) {
-              const key = String(attachment.key || "").trim();
-              if (key) duplicateAttachmentKeys.push(key);
-            } else {
-              seenHashes.add(hash);
-            }
-          }
-          let hasLocalReadableAttachment = false;
-          for (const attachment of attachmentItems) {
-            try {
-              const path = await (
-                attachment as Zotero.Item & {
-                  getFilePathAsync?: () => Promise<string | false>;
-                }
-              ).getFilePathAsync?.();
-              if (
-                path &&
-                (await (
-                  globalThis as unknown as {
-                    IOUtils?: { exists?: (path: string) => Promise<boolean> };
-                  }
-                ).IOUtils?.exists?.(path))
-              ) {
-                hasLocalReadableAttachment = true;
-                break;
-              }
-            } catch {
-              // Remote or missing attachments remain represented by their
-              // Zotero index/cache state below.
-            }
-          }
-          const indexed = attachmentInfos.some((attachment) =>
-            ["indexed", "partial"].includes(
-              String(attachment.indexingState || ""),
-            ),
-          );
-          const readable =
-            hasLocalReadableAttachment ||
-            indexed ||
-            attachmentInfos.some((attachment) =>
-              Boolean(attachment.mineruCacheDir),
-            );
-          const liveFingerprints = await getResearchItemFingerprints(
+          inventoriedItems = recorded;
+          const inventoriedCorpus = await listResearchCorpusItems({
+            researchJobId: job.researchJobId,
+          });
+          readingManifest = await buildReadingManifest({
+            corpus: inventoriedCorpus,
             gateway,
-            liveItem.id,
-          );
-          await saveResearchCorpusItem({
-            ...current,
-            screeningStatus: "pending",
-            inventoryRecorded: true,
-            hasAbstract: Boolean(
-              String(liveItem.getField?.("abstractNote") || "").trim(),
-            ),
-            attachmentItemKeys: [...new Set(attachmentItemKeys)],
-            duplicateAttachmentKeys: [...new Set(duplicateAttachmentKeys)],
-            readable,
-            indexed,
-            sourceFingerprint:
-              liveFingerprints.attachmentFingerprint ||
-              liveFingerprints.metadataFingerprint,
-            updatedAt: Date.now(),
+            requiredEvidenceDepth: investigation.requiredEvidenceDepth,
+            preferredContextItemIds: preferredReadingContextIds,
           });
-          await completeWorkItem({
-            libraryID: current.libraryID,
-            itemKey: current.itemKey,
-            stage: "inventory",
-          });
-          recorded += 1;
         }
-        inventoriedItems = recorded;
       }
 
       if (input.operation === "record_papers") {
+        const preferredReads = selectPreferredVerifiedReads(
+          taskEvidence,
+          new Set(corpusByKey.keys()),
+        );
         await Zotero.DB.executeTransaction(async () => {
           for (let index = 0; index < (input.papers || []).length; index += 1) {
             const raw = input.papers![index];
@@ -1101,8 +1575,14 @@ export function createResearchUpdateTool(
                 );
               }
             }
-            const status =
-              raw.screeningStatus as ResearchCorpusItem["screeningStatus"];
+            const status = (raw.screeningStatus ||
+              (adaptiveReview
+                ? current.readable
+                  ? "included"
+                  : current.hasAbstract
+                    ? "unresolved"
+                    : "unreadable"
+                : undefined)) as ResearchCorpusItem["screeningStatus"];
             if (!SCREENING_STATUSES.has(status)) {
               throw new Error(`papers[${index}].screeningStatus is invalid`);
             }
@@ -1121,8 +1601,36 @@ export function createResearchUpdateTool(
                 ].join(", ")}`,
               );
             }
+            const decisionReason =
+              typeof raw.decisionReason === "string"
+                ? raw.decisionReason.trim() || undefined
+                : undefined;
+            const decisionError = getTerminalScreeningDecisionError({
+              screeningStatus: status,
+              criterionResults: parsedCriterionResults,
+              decisionReason,
+              criteria: investigation.criteria,
+              totalItems: job.totalItems,
+              deepReadPlanned: job.deepReadPlanned,
+            });
+            if (decisionError) {
+              throw new Error(`papers[${index}] ${decisionError}`);
+            }
             const evidenceKeyMap = new Map<string, string>();
-            const rawEvidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+            const preferredRead = preferredReads.get(identity);
+            const rawEvidence = adaptiveReview
+              ? preferredRead
+                ? [
+                    {
+                      evidenceKey: "host_verified_read",
+                      sourceKind: preferredRead.evidenceDepth,
+                      sourceReadRef: preferredRead.sourceReadRef,
+                    },
+                  ]
+                : []
+              : Array.isArray(raw.evidence)
+                ? raw.evidence
+                : [];
             for (
               let evidenceIndex = 0;
               evidenceIndex < rawEvidence.length;
@@ -1205,23 +1713,16 @@ export function createResearchUpdateTool(
                     `Evidence ${evidenceKey} locator pageIndex is invalid`,
                   );
                 }
-                const trustedLocator = matchingReadObservations.find(
-                  (observation) =>
-                    observation.attachmentItemKey === attachmentItemKey &&
-                    observation.pageIndex === pageIndex,
-                );
-                if (!trustedLocator) {
-                  throw new Error(
-                    `Evidence ${evidenceKey} locator was not emitted by its verified read`,
-                  );
-                }
-                locator = {
-                  kind: "pdf_page",
-                  attachmentItemKey,
-                  pageIndex,
-                  sourceFingerprint:
-                    trustedLocator.sourceFingerprint || fingerprint,
-                };
+                locator = resolveTrustedPdfLocator({
+                  evidenceKey,
+                  sourceKind,
+                  requested: {
+                    attachmentItemKey,
+                    pageIndex,
+                  },
+                  observations: matchingReadObservations,
+                  fallbackFingerprint: fingerprint,
+                });
               }
               const evidenceRef = `${job.researchJobId}:${libraryID}:${itemKey}:${safeId(evidenceKey)}`;
               const record: ResearchEvidenceRecord = {
@@ -1257,38 +1758,18 @@ export function createResearchUpdateTool(
               ...current,
               screeningStatus: status,
               criterionResults: parsedCriterionResults,
-              decisionReason:
-                typeof raw.decisionReason === "string"
-                  ? raw.decisionReason.trim() || undefined
-                  : undefined,
+              decisionReason,
               inventoryRecorded:
                 current.inventoryRecorded || recordStage === "inventory",
-              hasAbstract:
-                typeof raw.hasAbstract === "boolean"
-                  ? raw.hasAbstract
-                  : current.hasAbstract,
-              attachmentItemKeys: Array.isArray(raw.attachmentItemKeys)
-                ? strings(
-                    raw.attachmentItemKeys,
-                    `papers[${index}].attachmentItemKeys`,
-                  )
-                : current.attachmentItemKeys,
-              duplicateAttachmentKeys: Array.isArray(
-                raw.duplicateAttachmentKeys,
-              )
-                ? strings(
-                    raw.duplicateAttachmentKeys,
-                    `papers[${index}].duplicateAttachmentKeys`,
-                  )
-                : current.duplicateAttachmentKeys,
-              readable:
-                typeof raw.readable === "boolean"
-                  ? raw.readable
-                  : current.readable,
-              indexed:
-                typeof raw.indexed === "boolean"
-                  ? raw.indexed
-                  : current.indexed,
+              // Inventory and attachment identity are authoritative host state.
+              // A model-produced paper understanding must never narrow or
+              // otherwise rewrite the inventory that was frozen during the
+              // scope pass.
+              hasAbstract: current.hasAbstract,
+              attachmentItemKeys: current.attachmentItemKeys,
+              duplicateAttachmentKeys: current.duplicateAttachmentKeys,
+              readable: current.readable,
+              indexed: current.indexed,
               sourceFingerprint:
                 liveFingerprints.attachmentFingerprint ||
                 liveFingerprints.metadataFingerprint,
@@ -1298,15 +1779,15 @@ export function createResearchUpdateTool(
             let workSubquestions: string[] = [];
             if (validateObject<Record<string, unknown>>(raw.finding)) {
               const finding = raw.finding;
-              const subquestionIds = strings(
-                finding.subquestionIds,
-                "finding.subquestionIds",
-              );
+              const subquestionIds =
+                adaptiveReview && finding.subquestionIds === undefined
+                  ? [...allowedSubquestions]
+                  : strings(finding.subquestionIds, "finding.subquestionIds");
               workSubquestions = subquestionIds;
-              const criterionIds = strings(
-                finding.criterionIds,
-                "finding.criterionIds",
-              );
+              const criterionIds =
+                adaptiveReview && finding.criterionIds === undefined
+                  ? []
+                  : strings(finding.criterionIds, "finding.criterionIds");
               if (subquestionIds.some((id) => !allowedSubquestions.has(id))) {
                 throw new Error(
                   `Finding for ${identity} references an unknown subquestion`,
@@ -1317,10 +1798,10 @@ export function createResearchUpdateTool(
                   `Finding for ${identity} references an unknown criterion`,
                 );
               }
-              const mappedEvidence = strings(
-                finding.evidenceKeys || [],
-                "finding.evidenceKeys",
-              ).map((key) => evidenceKeyMap.get(key) || key);
+              const evidenceKeys = [...evidenceKeyMap.keys()];
+              const mappedEvidence = evidenceKeys.map(
+                (key) => evidenceKeyMap.get(key) || key,
+              );
               for (const evidenceRef of mappedEvidence) {
                 const evidence = evidenceByRef.get(evidenceRef);
                 if (
@@ -1333,8 +1814,12 @@ export function createResearchUpdateTool(
                   );
                 }
               }
-              const inclusionDecision =
-                finding.inclusionDecision as PaperFinding["inclusionDecision"];
+              const inclusionDecision = (finding.inclusionDecision ||
+                (adaptiveReview
+                  ? status === "included"
+                    ? "include"
+                    : "unresolved"
+                  : undefined)) as PaperFinding["inclusionDecision"];
               const confidence =
                 finding.confidence as PaperFinding["confidence"];
               if (
@@ -1350,6 +1835,32 @@ export function createResearchUpdateTool(
                 throw new Error(
                   `Finding for ${identity} has invalid confidence`,
                 );
+              }
+              const roles =
+                finding.roles === undefined
+                  ? adaptiveReview
+                    ? status === "included"
+                      ? ["supporting_evidence"]
+                      : ["unresolved"]
+                    : undefined
+                  : strings(finding.roles, "finding.roles");
+              if (
+                roles?.some(
+                  (role) =>
+                    !(NARRATIVE_ROLES as readonly string[]).includes(role),
+                )
+              ) {
+                throw new Error(`Finding for ${identity} has an invalid role`);
+              }
+              if (adaptiveReview && status === "included") {
+                for (const field of [
+                  "mainMessage",
+                  "researchQuestion",
+                  "method",
+                  "relevance",
+                ] as const) {
+                  string(finding[field], `finding.${field}`);
+                }
               }
               const record: PaperFinding = {
                 version: 1,
@@ -1382,9 +1893,74 @@ export function createResearchUpdateTool(
                   finding.unresolvedQuestions || [],
                   "finding.unresolvedQuestions",
                 ),
+                ...(roles
+                  ? {
+                      roles: roles as NonNullable<PaperFinding["roles"]>,
+                    }
+                  : {}),
+                ...(finding.mainMessage === undefined
+                  ? {}
+                  : {
+                      mainMessage: string(
+                        finding.mainMessage,
+                        "finding.mainMessage",
+                      ),
+                    }),
+                ...(finding.researchQuestion === undefined
+                  ? {}
+                  : {
+                      researchQuestion: string(
+                        finding.researchQuestion,
+                        "finding.researchQuestion",
+                      ),
+                    }),
+                ...(finding.method === undefined
+                  ? {}
+                  : { method: string(finding.method, "finding.method") }),
+                ...(finding.mechanisms === undefined
+                  ? {}
+                  : {
+                      mechanisms: strings(
+                        finding.mechanisms,
+                        "finding.mechanisms",
+                      ),
+                    }),
+                ...(finding.relevance === undefined
+                  ? {}
+                  : {
+                      relevance: string(finding.relevance, "finding.relevance"),
+                    }),
+                ...(finding.relationships === undefined
+                  ? {}
+                  : {
+                      relationships: strings(
+                        finding.relationships,
+                        "finding.relationships",
+                      ),
+                    }),
                 createdAt: Date.now(),
               };
               await savePaperFinding(record);
+            } else if (adaptiveReview && status !== "missing") {
+              throw new Error(
+                `Adaptive review paper ${identity} requires a durable finding`,
+              );
+            } else if (
+              recordStage === "broad_screening" &&
+              status === "excluded"
+            ) {
+              await savePaperFinding(
+                buildExcludedScreeningFinding({
+                  researchJobId: job.researchJobId,
+                  executionId: job.executionId,
+                  parentTaskId: job.parentTaskId,
+                  libraryID,
+                  itemKey,
+                  criterionIds: [...allowedCriteria],
+                  decisionReason: next.decisionReason,
+                  sourceFingerprint: next.sourceFingerprint || "missing",
+                }),
+              );
             }
             await completeWorkItem({
               libraryID,
@@ -1478,6 +2054,12 @@ export function createResearchUpdateTool(
         const findingById = new Map(
           paperFindings.map((entry) => [entry.findingId, entry]),
         );
+        const findingByIdentity = new Map(
+          paperFindings.map((entry) => [
+            `${entry.libraryID}:${entry.itemKey}`,
+            entry,
+          ]),
+        );
         const evidenceRefs = new Set(evidenceByRef.keys());
         await Zotero.DB.executeTransaction(async () => {
           for (let index = 0; index < (input.themes || []).length; index += 1) {
@@ -1485,14 +2067,43 @@ export function createResearchUpdateTool(
             if (!validateObject<Record<string, unknown>>(raw)) {
               throw new Error(`themes[${index}] must be an object`);
             }
-            const paperFindingIds = strings(
-              raw.paperFindingIds,
-              `themes[${index}].paperFindingIds`,
-            );
-            const themeEvidenceRefs = strings(
-              raw.evidenceRefs,
-              `themes[${index}].evidenceRefs`,
-            );
+            const paperFindingIds = [
+              ...(raw.paperFindingIds === undefined
+                ? []
+                : strings(
+                    raw.paperFindingIds,
+                    `themes[${index}].paperFindingIds`,
+                  )),
+              ...(raw.paperIdentities === undefined
+                ? []
+                : strings(
+                    raw.paperIdentities,
+                    `themes[${index}].paperIdentities`,
+                  ).map((identity) => {
+                    const finding = findingByIdentity.get(identity);
+                    if (!finding) {
+                      throw new Error(
+                        `themes[${index}] references unknown paper identity ${identity}`,
+                      );
+                    }
+                    return finding.findingId;
+                  })),
+            ].filter((id, position, all) => all.indexOf(id) === position);
+            if (!paperFindingIds.length) {
+              throw new Error(
+                `themes[${index}] requires paperIdentities or paperFindingIds`,
+              );
+            }
+            const themeEvidenceRefs =
+              raw.evidenceRefs === undefined
+                ? [
+                    ...new Set(
+                      paperFindingIds.flatMap(
+                        (id) => findingById.get(id)?.evidenceRefs || [],
+                      ),
+                    ),
+                  ]
+                : strings(raw.evidenceRefs, `themes[${index}].evidenceRefs`);
             if (paperFindingIds.some((id) => !findingIds.has(id))) {
               throw new Error(
                 `themes[${index}] references an unknown paper finding`,
@@ -1535,18 +2146,58 @@ export function createResearchUpdateTool(
         });
       }
 
+      let automaticStage = input.stage;
+      let remainingReadingManifest: ReadingManifestEntry[] | undefined;
+      if (
+        adaptiveReview &&
+        input.operation === "inventory_scope" &&
+        job.activeStage === "inventory"
+      ) {
+        automaticStage = "broad_screening";
+      }
+      if (adaptiveReview && input.operation === "record_papers") {
+        const [currentCorpus, currentFindings] = await Promise.all([
+          listResearchCorpusItems({ researchJobId: job.researchJobId }),
+          listPaperFindings(job.researchJobId),
+        ]);
+        const findingKeys = new Set(
+          currentFindings.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+        );
+        const everyPaperUnderstood = currentCorpus.every(
+          (entry) =>
+            entry.screeningStatus === "missing" ||
+            (!["pending", "candidate"].includes(entry.screeningStatus) &&
+              findingKeys.has(`${entry.libraryID}:${entry.itemKey}`)),
+        );
+        if (everyPaperUnderstood) {
+          automaticStage = "hierarchical_synthesis";
+          remainingReadingManifest = [];
+        } else {
+          remainingReadingManifest = await buildReadingManifest({
+            corpus: currentCorpus.filter(
+              (entry) =>
+                entry.screeningStatus !== "missing" &&
+                !findingKeys.has(`${entry.libraryID}:${entry.itemKey}`),
+            ),
+            gateway,
+            requiredEvidenceDepth: investigation.requiredEvidenceDepth,
+          });
+        }
+      }
       let next = await recomputeJob({
         job,
         conversationKey: context.request.conversationKey,
-        activeStage: input.stage,
+        activeStage: automaticStage,
       });
       const checkpointRequired =
+        !adaptiveReview &&
         shouldCheckpointResearchExpansion({
           approvedEstimate: investigation.estimatedDeepReadPapers,
           actualDeepReadCandidates: next.candidateItems,
           approvedLargeCorpus: investigation.approvedLargeCorpus,
           policy: next.policy,
-        }) && next.deepReadPlanned < next.candidateItems;
+        }) &&
+        next.deepReadPlanned < next.candidateItems;
       if (checkpointRequired && input.operation !== "finalize") {
         next = await recomputeJob({
           job: next,
@@ -1593,42 +2244,15 @@ export function createResearchUpdateTool(
               `${unfinished.length} frozen papers are not terminal`,
             );
           }
-          const criteriaById = new Map(
-            investigation.criteria.map((criterion) => [
-              criterion.id,
-              criterion,
-            ]),
+          const invalidDecisions = allCorpus.filter(
+            (entry) =>
+              !isCriterionCompleteScreeningDecision({
+                entry,
+                criteria: investigation.criteria,
+                totalItems: next.totalItems,
+                deepReadPlanned: next.deepReadPlanned,
+              }),
           );
-          const invalidDecisions = allCorpus.filter((entry) => {
-            if (entry.screeningStatus === "missing") return false;
-            const results = investigation.criteria.map(
-              (criterion) => entry.criterionResults[criterion.id],
-            );
-            if (results.some((result) => !result)) return true;
-            if (["unresolved", "unreadable"].includes(entry.screeningStatus)) {
-              return !results.includes("unknown");
-            }
-            if (entry.screeningStatus === "included") {
-              return investigation.criteria.some((criterion) => {
-                const result = entry.criterionResults[criterion.id];
-                return criterion.kind === "include"
-                  ? result !== "met"
-                  : result !== "not_met";
-              });
-            }
-            if (entry.screeningStatus === "excluded") {
-              return !Object.entries(entry.criterionResults).some(
-                ([criterionId, result]) => {
-                  const criterion = criteriaById.get(criterionId);
-                  return (
-                    (criterion?.kind === "include" && result === "not_met") ||
-                    (criterion?.kind === "exclude" && result === "met")
-                  );
-                },
-              );
-            }
-            return false;
-          });
           if (invalidDecisions.length) {
             throw new Error(
               `${invalidDecisions.length} papers lack criterion-complete screening decisions`,
@@ -1688,8 +2312,11 @@ export function createResearchUpdateTool(
                 !bodyKeys.has(`${entry.libraryID}:${entry.itemKey}`),
             );
             if (shallow.length) {
+              const identities = shallow
+                .map((entry) => `${entry.libraryID}:${entry.itemKey}`)
+                .join(", ");
               throw new Error(
-                `${shallow.length} included papers lack required body evidence`,
+                `${shallow.length} included papers lack required body evidence: ${identities}. Deep-read them, or if they were screened but not selected for the bounded deep-read subset, record screeningStatus "excluded" with an explicit relative-ranking decisionReason; excluded papers remain in frozen coverage.`,
               );
             }
           }
@@ -1796,6 +2423,19 @@ export function createResearchUpdateTool(
             type: "plan_execution_updated",
             ledger: exceptionLedger,
           });
+        } else if (
+          coverageStatus === "complete" ||
+          coverageStatus === "complete_with_limitations"
+        ) {
+          const advancedLedger =
+            await planExecutionCoordinator.advanceVerifiedTasks({
+              executionId: job.executionId,
+              requirementKinds: ["verified_read", "research_coverage"],
+            });
+          await context.publishPlanEvent?.({
+            type: "plan_execution_updated",
+            ledger: advancedLedger,
+          });
         }
       }
 
@@ -1803,12 +2443,58 @@ export function createResearchUpdateTool(
         type: "plan_research_progress",
         progress: progress(next),
       });
-      return {
+      const content = {
         progress: progress(next),
         inventoriedItems,
+        ...(readingManifest
+          ? {
+              readingManifest,
+              instruction: adaptiveReview
+                ? readingManifest.length
+                  ? "Read one capacity-sized semantic group with paper_read overview, then immediately record a rich understanding for every identity in that group before reading more. The host will checkpoint raw text and return the exact remaining manifest."
+                  : "No unread papers remain. Continue from list_findings or list_themes without rereading PDFs."
+                : "Request the next systematic-review screening batch.",
+            }
+          : {}),
         checkpointRequired,
         evidenceRefs: newEvidenceRefs,
       };
+      if (
+        adaptiveReview &&
+        input.operation === "record_papers" &&
+        remainingReadingManifest
+      ) {
+        const compactRemainingManifest = remainingReadingManifest.map(
+          (entry) => ({
+            identity: entry.identity,
+            title: entry.title,
+            readable: entry.readable,
+            evidenceDepthTarget: entry.evidenceDepthTarget,
+            target: entry.target,
+          }),
+        );
+        if (!compactRemainingManifest.length) {
+          const advancedLedger =
+            await planExecutionCoordinator.advanceVerifiedTasks({
+              executionId: job.executionId,
+              requirementKinds: ["verified_read"],
+            });
+          await context.publishPlanEvent?.({
+            type: "plan_execution_updated",
+            ledger: advancedLedger,
+          });
+        }
+        return {
+          content,
+          continuationCheckpoint: {
+            reason: "research_batch_durable",
+            instruction: compactRemainingManifest.length
+              ? `The completed paper-understanding group is durable. Raw PDF text from that group has been released. The exact remaining frozen-scope manifest below is authoritative. Do not call inventory_scope or otherwise re-verify it. Call paper_read now for one capacity-sized semantic group from this manifest, immediately persist that group with research_update record_papers, and do not reread recorded papers.\n\n${JSON.stringify(compactRemainingManifest)}`
+              : "All paper understandings are durable and the raw PDF text has been released. Do not call inventory_scope again. Call research_update list_findings now, build and persist the cross-paper themes, finalize research, and do not reread the PDFs unless resolving a decisive uncertainty.",
+          },
+        };
+      }
+      return content;
     },
   };
 }

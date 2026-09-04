@@ -1,7 +1,6 @@
 import {
   buildReasoningPayload,
   buildPromptCachePayloadHints,
-  normalizeMaxTokensForRequest,
   postWithReasoningFallback,
   resolveRequestAuthState,
   uploadFilesForResponses,
@@ -17,6 +16,7 @@ import type {
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
+import { resolveAgentOutputTokenBudget } from "./limits";
 import {
   buildResponsesContinuationInput,
   buildResponsesInitialInput,
@@ -130,15 +130,10 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
           tool_choice: "auto",
           store: false,
           stream: true,
-          max_output_tokens: normalizeMaxTokensForRequest({
-            value: request.advanced?.maxTokens,
-            maxTokensExplicit: request.advanced?.maxTokensExplicit,
-            model: request.model || "",
-            apiBase: request.apiBase,
-            protocol: "responses_api",
-            authMode: request.authMode,
-            profileOverride: request.advanced?.profileOverride,
-          }),
+          max_output_tokens: resolveAgentOutputTokenBudget(
+            request,
+            "responses_api",
+          ),
           ...reasoningPayload.extra,
           ...(reasoningPayload.omitTemperature
             ? {}

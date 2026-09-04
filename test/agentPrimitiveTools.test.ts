@@ -269,7 +269,7 @@ describe("primitive agent tools", function () {
       ],
       getEditableArticleMetadata: () =>
         makeMetadataSnapshot(99, "Example Paper"),
-      getItem: () => ({ id: 99 }) as any,
+      getItem: () => ({ id: 99, key: "ITEMKEY" }) as any,
       getActiveContextItem: () => null,
       listCollectionSummaries: () => [],
       listLibraryPaperTargets: async () => ({ papers: [], totalCount: 0 }),
@@ -313,6 +313,7 @@ describe("primitive agent tools", function () {
     const first = (result as { results: Array<Record<string, unknown>> })
       .results[0];
     assert.equal(first.itemId, 99);
+    assert.equal(first.itemKey, "ITEMKEY");
     assert.equal((first.metadata as { title?: string }).title, "Example Paper");
     assert.deepEqual(first.attachments, [
       { contextItemId: 501, title: "PDF", contentType: "application/pdf" },
@@ -324,6 +325,23 @@ describe("primitive agent tools", function () {
     assert.equal((result as { totalCount: number }).totalCount, 3);
     assert.equal((result as { returnedCount: number }).returnedCount, 1);
     assert.equal((result as { limited: boolean }).limited, true);
+
+    const compactValidated = tool.validate({
+      entity: "items",
+      mode: "search",
+      text: "example",
+    });
+    assert.isTrue(compactValidated.ok);
+    if (!compactValidated.ok) return;
+    const compactResult = await tool.execute(
+      compactValidated.value,
+      baseContext,
+    );
+    const compactFirst = (
+      compactResult as { results: Array<Record<string, unknown>> }
+    ).results[0];
+    assert.equal(compactFirst.itemKey, "ITEMKEY");
+    assert.notProperty(compactFirst, "metadata");
   });
 
   it("query_library lists libraries without requiring an active library", async function () {

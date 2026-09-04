@@ -314,6 +314,40 @@ export async function loadResearchJobForExecution(
   return parse(rows?.[0], decodeResearchJob);
 }
 
+export async function interruptResearchExecution(params: {
+  executionId: string;
+  conversationKey: number;
+  now?: number;
+}): Promise<ResearchJob | null> {
+  const job = await loadResearchJobForExecution(params.executionId);
+  if (!job) return null;
+  if (["completed", "failed", "cancelled"].includes(job.status)) return job;
+  const now = params.now ?? Date.now();
+  const interrupted: ResearchJob = {
+    ...job,
+    status: "interrupted",
+    updatedAt: now,
+    completedAt: undefined,
+  };
+  await Zotero.DB.executeTransaction(async () => {
+    await saveResearchJob(interrupted, params.conversationKey);
+    const issued = await listResearchWorkItems({
+      researchJobId: job.researchJobId,
+      statuses: ["in_progress"],
+    });
+    for (const item of issued) {
+      await saveResearchWorkItem({
+        ...item,
+        status: "interrupted",
+        leaseOwner: undefined,
+        leaseExpiresAt: undefined,
+        updatedAt: now,
+      });
+    }
+  });
+  return interrupted;
+}
+
 export async function saveResearchCorpusItem(
   item: ResearchCorpusItem,
 ): Promise<void> {
@@ -376,6 +410,31 @@ export async function saveResearchWorkItem(
       item.updatedAt,
     ],
   );
+}
+
+export async function listResearchWorkItems(params: {
+  researchJobId: string;
+  stage?: ResearchWorkItem["stage"];
+  statuses?: readonly ResearchWorkItem["status"][];
+}): Promise<ResearchWorkItem[]> {
+  const values: unknown[] = [params.researchJobId];
+  const clauses = ["research_job_id = ?"];
+  if (params.stage) {
+    clauses.push("stage = ?");
+    values.push(params.stage);
+  }
+  if (params.statuses?.length) {
+    clauses.push(`status IN (${params.statuses.map(() => "?").join(", ")})`);
+    values.push(...params.statuses);
+  }
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_WORK_ITEMS_TABLE}
+     WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC`,
+    values,
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchWorkItem))
+    .filter((item): item is ResearchWorkItem => Boolean(item));
 }
 
 export async function claimResearchWorkItems(params: {

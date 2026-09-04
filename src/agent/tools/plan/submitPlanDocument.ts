@@ -357,7 +357,7 @@ export function createSubmitDocumentTool(
     guidance: {
       matches: (request) => request.documentOutcomePolicy?.required === true,
       instruction:
-        "This turn requires a document artifact, so do not stop with ordinary answer text. Finish the requested work and call submit_document exactly once. Write complete Markdown with natural headings. For a literature review include a Scope and limitations section, put [[cite:C1]] tokens at supported claims, and copy the host-issued evidence IDs returned by read tools into each citation source. For other authored documents, citations and evidence IDs are optional. Record grounding concerns in groundingIssues. Do not hand-write References; the host generates them through Zotero CSL. Never place internal citation tokens outside this terminal submission.",
+        "This turn requires a document artifact, so do not stop with ordinary answer text. Finish the requested work and call submit_document exactly once. Write complete Markdown with natural headings. For a literature review include explicit scope and limitations coverage and put [[cite:C1]] tokens at supported claims. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. For other authored documents, citations are optional. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
     planInvocation: () =>

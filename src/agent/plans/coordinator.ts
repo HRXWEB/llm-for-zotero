@@ -35,6 +35,7 @@ import {
   saveResearchJob,
   saveResearchWorkItem,
 } from "../research/store";
+import { resolvePlannedReadingPapers } from "../research/readingBudget";
 import { resolveResearchPolicy } from "../research/policy";
 
 function normalizedText(value: unknown, label: string): string {
@@ -412,6 +413,153 @@ function assignCompletionRequirements(params: {
   });
 }
 
+/** A planned deep read is a body-evidence promise, regardless of provider wording. */
+export function canonicalizePlanResearchEvidenceDepth(
+  contract: PlanContract,
+): PlanContract {
+  const investigation = contract.investigation;
+  if (
+    !investigation ||
+    (investigation.readingStrategy !== "adaptive" &&
+      investigation.estimatedDeepReadPapers <= 0) ||
+    investigation.requiredEvidenceDepth === "body"
+  ) {
+    return contract;
+  }
+  return {
+    ...contract,
+    investigation: {
+      ...investigation,
+      requiredEvidenceDepth: "body",
+    },
+  };
+}
+
+/**
+ * Completion verifier placement is a host contract, not a provider formatting
+ * exercise. Preserve the model-authored criterion text and IDs while moving
+ * research coverage to the final research step and document integrity and
+ * publication to the final artifact step.
+ */
+export function canonicalizePlanVerifierOwnership(params: {
+  contract: PlanContract;
+  steps: readonly Omit<PlanStep, "completionRequirements">[];
+}): Omit<PlanStep, "completionRequirements">[] {
+  const steps = params.steps.map((step) => ({
+    ...step,
+    acceptanceCriteria: (
+      step.acceptanceCriteria as readonly PlanAcceptanceCriterion[]
+    ).map((criterion) => ({ ...criterion })),
+  }));
+  const existingIds = new Set(
+    steps.flatMap((step) =>
+      (step.acceptanceCriteria as readonly PlanAcceptanceCriterion[]).map(
+        (criterion) => criterion.criterionId,
+      ),
+    ),
+  );
+  const uniqueId = (base: string) => {
+    let id = base;
+    let suffix = 2;
+    while (existingIds.has(id)) id = `${base}-${suffix++}`;
+    existingIds.add(id);
+    return id;
+  };
+  const moveKinds = (
+    kinds: readonly PlanCompletionRequirementKind[],
+    ownerIndex: number,
+    defaults: readonly PlanAcceptanceCriterion[],
+  ) => {
+    const selected: PlanAcceptanceCriterion[] = [];
+    for (let index = 0; index < steps.length; index += 1) {
+      const retained: PlanAcceptanceCriterion[] = [];
+      for (const criterion of steps[index]
+        .acceptanceCriteria as readonly PlanAcceptanceCriterion[]) {
+        if (kinds.includes(criterion.verifier)) selected.push(criterion);
+        else retained.push(criterion);
+      }
+      steps[index] = { ...steps[index], acceptanceCriteria: retained };
+    }
+    for (const fallback of defaults) {
+      if (!selected.some((entry) => entry.verifier === fallback.verifier)) {
+        selected.push({
+          ...fallback,
+          criterionId: uniqueId(fallback.criterionId),
+        });
+      }
+    }
+    steps[ownerIndex] = {
+      ...steps[ownerIndex],
+      acceptanceCriteria: [
+        ...(steps[ownerIndex]
+          .acceptanceCriteria as readonly PlanAcceptanceCriterion[]),
+        ...selected,
+      ],
+    };
+  };
+
+  if (params.contract.investigation) {
+    let researchOwner = -1;
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+      if (
+        steps[index].expectedEffect === "read" ||
+        steps[index].expectedEffect === "reasoning"
+      ) {
+        researchOwner = index;
+        break;
+      }
+    }
+    if (researchOwner < 0) {
+      throw new Error("A research plan requires a read or reasoning step");
+    }
+    moveKinds(["research_coverage"], researchOwner, [
+      {
+        criterionId: "host-research-coverage",
+        description:
+          "The frozen corpus is durably screened and the approved evidence depth is complete",
+        verifier: "research_coverage",
+      },
+    ]);
+  }
+
+  if (params.contract.deliverable.kind === "document") {
+    const documentOwner = steps.length - 1;
+    moveKinds(["document_integrity", "document_published"], documentOwner, [
+      {
+        criterionId: "host-document-integrity",
+        description:
+          "The finalized document satisfies the approved document contract",
+        verifier: "document_integrity",
+      },
+      {
+        criterionId: "host-document-published",
+        description: "The finalized document is published to the conversation",
+        verifier: "document_published",
+      },
+    ]);
+  }
+  for (let index = 0; index < steps.length; index += 1) {
+    if (steps[index].acceptanceCriteria.length) continue;
+    const verifier: PlanCompletionRequirementKind =
+      steps[index].expectedEffect === "read"
+        ? "verified_read"
+        : steps[index].expectedEffect === "mutation"
+          ? "mutation_receipts"
+          : "bounded_reasoning";
+    steps[index] = {
+      ...steps[index],
+      acceptanceCriteria: [
+        {
+          criterionId: uniqueId(`host-step-${index + 1}`),
+          description: `Verified completion of: ${steps[index].content}`,
+          verifier,
+        },
+      ],
+    };
+  }
+  return steps;
+}
+
 function validatePlanStepContract(params: {
   contract: PlanContract;
   steps: readonly PlanStep[];
@@ -718,13 +866,15 @@ export class PlanExecutionCoordinator {
     }
     if (!params.steps.length)
       throw new Error("A plan requires at least one step");
-    const decodedContract = decodePlanContract(
-      params.contract ||
-        buildDefaultPlanContract({
-          actionContract: params.actionContract,
-          steps: params.steps,
-        }),
-      { requireSnapshot: params.ready === true },
+    const decodedContract = canonicalizePlanResearchEvidenceDepth(
+      decodePlanContract(
+        params.contract ||
+          buildDefaultPlanContract({
+            actionContract: params.actionContract,
+            steps: params.steps,
+          }),
+        { requireSnapshot: params.ready === true },
+      ),
     );
     const mutationEffect = decodedContract.effects?.libraryMutation;
     const initialMutation =
@@ -791,8 +941,12 @@ export class PlanExecutionCoordinator {
         targetBoundary: step.targetBoundary,
       };
     });
-    const steps = assignCompletionRequirements({
+    const canonicalSteps = canonicalizePlanVerifierOwnership({
+      contract: decodedContract,
       steps: normalizedSteps,
+    });
+    const steps = assignCompletionRequirements({
+      steps: canonicalSteps,
       contractDigest,
     });
     validatePlanStepContract({ contract: decodedContract, steps });
@@ -981,7 +1135,10 @@ export class PlanExecutionCoordinator {
             screenedItems: 0,
             candidateItems: 0,
             deepReadCompleted: 0,
-            deepReadPlanned: investigation.estimatedDeepReadPapers,
+            deepReadPlanned: resolvePlannedReadingPapers(
+              investigation,
+              snapshotItems.length,
+            ),
             createdAt: now,
             updatedAt: now,
           },
@@ -1052,6 +1209,53 @@ export class PlanExecutionCoordinator {
       },
       now,
     );
+  }
+
+  /**
+   * Advance consecutive tasks whose complete contracts are already satisfied
+   * by host-issued evidence. Research tools call this at durable boundaries so
+   * the model never has to mirror verified host state through task_update.
+   */
+  async advanceVerifiedTasks(params: {
+    executionId: string;
+    requirementKinds: readonly PlanCompletionRequirementKind[];
+    now?: number;
+  }): Promise<PlanExecutionLedger> {
+    const allowed = new Set(params.requirementKinds);
+    let ledger = await this.requireLedger(params.executionId);
+    let now = params.now ?? Date.now();
+
+    while (true) {
+      if (!ledger.tasks.some((task) => task.status === "in_progress")) {
+        ledger = await this.startNextTask(params.executionId, now);
+      }
+      const active = ledger.tasks.find(
+        (task) => task.taskId === ledger.activeTaskId,
+      );
+      if (!active || active.status !== "in_progress") return ledger;
+      const requirements = active.completionRequirements || [];
+      if (
+        !requirements.length ||
+        requirements.some((requirement) => !allowed.has(requirement.kind))
+      ) {
+        return ledger;
+      }
+      try {
+        await this.assertCompletionEvidence(active);
+      } catch {
+        return ledger;
+      }
+      ledger = await this.requestTransition(
+        {
+          executionId: params.executionId,
+          taskId: active.taskId,
+          toStatus: "completed",
+          requestedBy: "host",
+        },
+        now,
+      );
+      now += 1;
+    }
   }
 
   async attachReceiptEvidence(params: {

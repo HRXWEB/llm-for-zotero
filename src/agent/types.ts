@@ -614,6 +614,13 @@ export type AgentModelStep =
       assistantMessage?: AgentAssistantMessage;
     }
   | {
+      kind: "incomplete";
+      reason: "output_limit";
+      text: string;
+      recoveryInstruction: string;
+      assistantMessage?: AgentAssistantMessage;
+    }
+  | {
       kind: "tool_calls";
       calls: AgentToolCall[];
       assistantMessage: AgentAssistantMessage;
@@ -660,6 +667,11 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   documentReadObservations?: readonly TrustedReadObservation[];
   /** Host-observed tool artifacts eligible for direct document embedding. */
   documentArtifactObservations?: readonly AgentToolArtifact[];
+  /** Live model-context state supplied by the runtime to capacity-aware tools. */
+  runtimeContextBudget?: Readonly<{
+    contextWindowTokens: number;
+    usedContextTokens: number;
+  }>;
   item?: Zotero.Item | null;
   history?: ChatMessage[];
   authMode?: ModelProviderAuthMode;
@@ -800,6 +812,17 @@ export type AgentToolArtifact =
  */
 export type AgentToolEffect = "applied" | "partial" | "none";
 
+/**
+ * A tool can request a clean provider continuation after it has durably
+ * reduced large transient inputs into compact application-owned state.
+ * The instruction must contain everything needed to continue without replaying
+ * the discarded raw payload.
+ */
+export type AgentToolContinuationCheckpoint = Readonly<{
+  reason: string;
+  instruction: string;
+}>;
+
 export type AgentToolResult = {
   callId: string;
   name: string;
@@ -808,6 +831,7 @@ export type AgentToolResult = {
   actionReceipts: AgentActionReceipt[];
   content: unknown;
   artifacts?: AgentToolArtifact[];
+  continuationCheckpoint?: AgentToolContinuationCheckpoint;
 };
 
 export type AgentToolReviewResolution =
@@ -843,6 +867,7 @@ export type AgentToolExecutionOutput<TResult = unknown> =
       artifacts?: AgentToolArtifact[];
       effect?: AgentToolEffect;
       actionEvidence?: AgentActionEvidence[];
+      continuationCheckpoint?: AgentToolContinuationCheckpoint;
     };
 
 /** Explicit execution contract for tools whose validated operation can write. */

@@ -637,20 +637,38 @@ function decodeResearchContract(
   } else if (options.requireSnapshot) {
     throw new Error("A ready research plan requires a frozen scope snapshot");
   }
+  const criteria = decodeCriteria(input.criteria);
+  const reviewMode =
+    input.reviewMode === "narrative" ||
+    input.reviewMode === "scoping" ||
+    input.reviewMode === "systematic"
+      ? input.reviewMode
+      : criteria.length
+        ? "systematic"
+        : "narrative";
+  const estimatedDeepReadPapers = nonNegativeInteger(
+    input.estimatedDeepReadPapers,
+    "investigation.estimatedDeepReadPapers",
+  );
+  const readingStrategy =
+    input.readingStrategy === "adaptive" || input.readingStrategy === "selected"
+      ? input.readingStrategy
+      : estimatedDeepReadPapers > 0
+        ? "selected"
+        : "adaptive";
   return {
     question: text(input.question, "investigation.question"),
     subquestions: decodeSubquestions(input.subquestions),
-    criteria: decodeCriteria(input.criteria),
+    criteria,
+    reviewMode,
+    readingStrategy,
     scope: decodeScope(input.scope),
     scopeSnapshot,
     queryVariants: Array.isArray(input.queryVariants)
       ? stringArray(input.queryVariants, "investigation.queryVariants")
       : undefined,
     requiredEvidenceDepth,
-    estimatedDeepReadPapers: nonNegativeInteger(
-      input.estimatedDeepReadPapers,
-      "investigation.estimatedDeepReadPapers",
-    ),
+    estimatedDeepReadPapers,
     approvedLargeCorpus: input.approvedLargeCorpus === true,
   };
 }

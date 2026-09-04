@@ -30,6 +30,33 @@ function acceptingActionSession(): AgentFinalActionSession {
 }
 
 describe("AgentFinalAnswerController", function () {
+  it("lets Plan correction policy observe successful tool progress", async function () {
+    const observedCounts: number[] = [];
+    const controller = new AgentFinalAnswerController(
+      makeRequest(),
+      acceptingActionSession(),
+      [],
+      {
+        evaluateFinal: async (params) => {
+          observedCounts.push(params.successfulToolResultCount || 0);
+          return { kind: "accept" as const };
+        },
+      } as never,
+    );
+
+    await controller.evaluate({
+      candidateText: "Done.",
+      canCorrect: true,
+      toolExecutionRecords: [
+        { name: "research_update", ok: true },
+        { name: "research_update", ok: false },
+        { name: "task_update", ok: true },
+      ],
+    });
+
+    assert.deepEqual(observedCounts, [2]);
+  });
+
   it("allows one required-document correction and then fails closed", async function () {
     const controller = new AgentFinalAnswerController(
       makeRequest({

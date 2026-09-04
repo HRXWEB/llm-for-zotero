@@ -8,6 +8,7 @@ import type {
   AgentToolCall,
   AgentToolContext,
   AgentToolDefinition,
+  AgentToolContinuationCheckpoint,
   AgentToolEffect,
   PreparedToolExecution,
   PreparedToolExecutionResult,
@@ -244,6 +245,7 @@ function normalizeExecutionOutput(value: AgentToolExecutionOutput<any>): {
   artifacts?: AgentToolArtifact[];
   effect?: AgentToolEffect;
   actionEvidence?: AgentActionEvidence[];
+  continuationCheckpoint?: AgentToolContinuationCheckpoint;
 } {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as {
@@ -251,6 +253,7 @@ function normalizeExecutionOutput(value: AgentToolExecutionOutput<any>): {
       artifacts?: unknown;
       effect?: unknown;
       actionEvidence?: unknown;
+      continuationCheckpoint?: unknown;
     };
     if (Object.prototype.hasOwnProperty.call(record, "content")) {
       return {
@@ -267,6 +270,16 @@ function normalizeExecutionOutput(value: AgentToolExecutionOutput<any>): {
         actionEvidence: Array.isArray(record.actionEvidence)
           ? (record.actionEvidence as AgentActionEvidence[])
           : undefined,
+        continuationCheckpoint:
+          record.continuationCheckpoint &&
+          typeof record.continuationCheckpoint === "object" &&
+          !Array.isArray(record.continuationCheckpoint) &&
+          typeof (record.continuationCheckpoint as Record<string, unknown>)
+            .reason === "string" &&
+          typeof (record.continuationCheckpoint as Record<string, unknown>)
+            .instruction === "string"
+            ? (record.continuationCheckpoint as AgentToolContinuationCheckpoint)
+            : undefined,
       };
     }
   }
@@ -1030,6 +1043,7 @@ export class AgentToolRegistry {
               }),
               content: executionOutput.content,
               artifacts: executionOutput.artifacts,
+              continuationCheckpoint: executionOutput.continuationCheckpoint,
             },
           };
         } catch (error) {

@@ -2,7 +2,6 @@ import { usesMaxCompletionTokens } from "../../utils/apiHelpers";
 import {
   buildReasoningPayload,
   buildPromptCachePayloadHints,
-  normalizeMaxTokensForRequest,
   postWithReasoningFallback,
   resolveRequestAuthState,
 } from "../../utils/llmClient";
@@ -25,8 +24,10 @@ import {
   parseToolCallArguments,
 } from "./shared";
 import { resolveContentParts } from "./adapterUtils";
+import { resolveAgentOutputTokenBudget } from "./limits";
 
 type ChatCompletionChoice = {
+  finish_reason?: string | null;
   message?: {
     content?: string | null;
     reasoning_content?: string | null;
@@ -241,6 +242,7 @@ async function parseOpenAIChatCompletionStream(
   toolCalls: AgentToolCall[];
   reasoningText: string;
   reasoningContentText: string;
+  finishReason?: string;
 }> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
@@ -248,6 +250,7 @@ async function parseOpenAIChatCompletionStream(
   let fullText = "";
   let reasoningText = "";
   let reasoningContentText = "";
+  let finishReason: string | undefined;
   const toolCallMap = new Map<number, StreamedToolCallAccumulator>();
 
   try {
@@ -292,6 +295,9 @@ async function parseOpenAIChatCompletionStream(
             }
           }
           const choice = parsed?.choices?.[0];
+          if (typeof choice?.finish_reason === "string") {
+            finishReason = choice.finish_reason;
+          }
           const delta = choice?.delta;
           if (!delta) continue;
 
@@ -362,8 +368,17 @@ async function parseOpenAIChatCompletionStream(
     });
   }
 
-  return { text: fullText, toolCalls, reasoningText, reasoningContentText };
+  return {
+    text: fullText,
+    toolCalls,
+    reasoningText,
+    reasoningContentText,
+    finishReason,
+  };
 }
+
+const OUTPUT_LIMIT_RECOVERY_INSTRUCTION =
+  "The provider stopped at its output limit before completing this step. Do not repeat the analysis. Make the next required tool call immediately, using a smaller bounded work unit when applicable.";
 
 function isStreamingResponse(response: Response): boolean {
   const ct = (response.headers.get("content-type") || "").toLowerCase();
@@ -433,26 +448,16 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           stream_options: { include_usage: true },
           ...(usesMaxCompletionTokens(request.model || "")
             ? {
-                max_completion_tokens: normalizeMaxTokensForRequest({
-                  value: request.advanced?.maxTokens,
-                  maxTokensExplicit: request.advanced?.maxTokensExplicit,
-                  model: request.model || "",
-                  apiBase: request.apiBase,
-                  protocol: "openai_chat_compat",
-                  authMode: request.authMode,
-                  profileOverride: request.advanced?.profileOverride,
-                }),
+                max_completion_tokens: resolveAgentOutputTokenBudget(
+                  request,
+                  "openai_chat_compat",
+                ),
               }
             : {
-                max_tokens: normalizeMaxTokensForRequest({
-                  value: request.advanced?.maxTokens,
-                  maxTokensExplicit: request.advanced?.maxTokensExplicit,
-                  model: request.model || "",
-                  apiBase: request.apiBase,
-                  protocol: "openai_chat_compat",
-                  authMode: request.authMode,
-                  profileOverride: request.advanced?.profileOverride,
-                }),
+                max_tokens: resolveAgentOutputTokenBudget(
+                  request,
+                  "openai_chat_compat",
+                ),
               }),
           ...reasoningPayload.extra,
           ...(reasoningPayload.omitTemperature
@@ -483,13 +488,15 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
       );
       this.conversationMessages = [
         ...resolvedMessages,
-        buildNativeAssistantMessage({
-          modelName: request.model,
-          text: result.text,
-          reasoningText: result.reasoningText,
-          reasoningContentText: result.reasoningContentText,
-          toolCalls: result.toolCalls,
-        }),
+        result.finishReason === "length" && !result.toolCalls.length
+          ? { role: "assistant", content: result.text }
+          : buildNativeAssistantMessage({
+              modelName: request.model,
+              text: result.text,
+              reasoningText: result.reasoningText,
+              reasoningContentText: result.reasoningContentText,
+              toolCalls: result.toolCalls,
+            }),
       ];
       if (result.toolCalls.length) {
         return {
@@ -499,6 +506,18 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
             role: "assistant",
             content: result.text,
             tool_calls: result.toolCalls,
+          },
+        };
+      }
+      if (result.finishReason === "length") {
+        return {
+          kind: "incomplete",
+          reason: "output_limit",
+          text: result.text,
+          recoveryInstruction: OUTPUT_LIMIT_RECOVERY_INSTRUCTION,
+          assistantMessage: {
+            role: "assistant",
+            content: result.text,
           },
         };
       }
@@ -542,6 +561,7 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
       }
     }
     const message = data.choices?.[0]?.message;
+    const finishReason = data.choices?.[0]?.finish_reason;
     const reasoningContentText =
       typeof message?.reasoning_content === "string"
         ? message.reasoning_content
@@ -571,6 +591,18 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           role: "assistant",
           content: text,
           tool_calls: toolCalls,
+        },
+      };
+    }
+    if (finishReason === "length") {
+      return {
+        kind: "incomplete",
+        reason: "output_limit",
+        text,
+        recoveryInstruction: OUTPUT_LIMIT_RECOVERY_INSTRUCTION,
+        assistantMessage: {
+          role: "assistant",
+          content: text,
         },
       };
     }

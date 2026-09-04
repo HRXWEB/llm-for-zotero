@@ -39,6 +39,7 @@ import {
 import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
+import { planRequiresModelTaskUpdates } from "../plans/taskOwnership";
 import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
@@ -197,6 +198,10 @@ function buildFullUserMessage(
     );
   }
   if (request.planContext?.phase === "planning") {
+    const priorPlan = request.metadata?.priorPlanArtifact as
+      | import("../plans/types").PlanArtifact
+      | null
+      | undefined;
     contextLines.push(
       [
         "PLAN MODE — pre-approval boundary:",
@@ -205,6 +210,31 @@ function buildFullUserMessage(
         "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps. Every acceptance criterion must provide a stable criterionId, an objective description, and its verifier; the host derives requirements from those criteria. Keep each step content to one short sentence. Then set ready=true and stop for user review.",
       ].join("\n"),
     );
+    if (
+      priorPlan?.version === 4 &&
+      priorPlan.planId === request.planContext.planId &&
+      priorPlan.revision === request.planContext.revision - 1
+    ) {
+      contextLines.push(
+        [
+          "HOST-PERSISTED PLAN REVISION BASE:",
+          "Revise this exact contract and step list according to the user's feedback. Do not rediscover or reconstruct this plan, its frozen item scope, or unchanged evidence strategy from prior tool handles.",
+          JSON.stringify({
+            explanation: priorPlan.explanation,
+            contract: priorPlan.contract,
+            steps: priorPlan.steps.map((step) => ({
+              planStepId: step.planStepId,
+              content: step.content,
+              activeForm: step.activeForm,
+              acceptanceCriteria: step.acceptanceCriteria,
+              expectedCapability: step.expectedCapability,
+              expectedEffect: step.expectedEffect,
+              targetBoundary: step.targetBoundary,
+            })),
+          }),
+        ].join("\n"),
+      );
+    }
   } else if (request.planContext?.phase === "executing") {
     const ledger = request.metadata?.planExecutionLedger as
       | import("../plans/types").PlanExecutionLedger
@@ -215,6 +245,9 @@ function buildFullUserMessage(
       | null
       | undefined;
     if (ledger) {
+      const taskProgressInstruction = planRequiresModelTaskUpdates(ledger)
+        ? "The host has already started the first pending task and owns the full ledger. It automatically advances tasks verified by research_update or submit_document; never call task_update for tasks whose requirements are only verified_read, research_coverage, document_integrity, or document_published. For other active tasks, call task_update with only the task whose status changes, using its exact taskId, after its required evidence exists. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks."
+        : "The host automatically advances these research and document tasks from verified evidence produced by research_update and submit_document. Do not call task_update for these tasks, including tasks already shown as completed; continue with the active scholarly or document tool instead.";
       const deliverableLines = approvedContract
         ? approvedContract.deliverable.kind === "document"
           ? [
@@ -234,6 +267,7 @@ function buildFullUserMessage(
           "APPROVED PLAN EXECUTION:",
           `Plan identity: ${ledger.planId} revision ${ledger.revision}; execution ${ledger.executionId}.`,
           `Approved digest: ${ledger.planDigest}.`,
+          "The host has already frozen and fingerprinted the exact scope. Do not re-enumerate or re-verify it with library_search; research_update inventory_scope is the authoritative scope check and supplies the durable corpus.",
           "Execute required tasks in order. Provider task status is only a request; the host accepts completion only from verified evidence.",
           ...ledger.tasks.map(
             (task, index) =>
@@ -249,7 +283,7 @@ function buildFullUserMessage(
                 .join("; ")}`,
           ),
           ...deliverableLines,
-          "The host has already started the first pending task and owns the full ledger. After evidence exists, call task_update with only the task or tasks whose status changes, using their exact taskId values. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks.",
+          taskProgressInstruction,
           "Your final answer should answer the original request naturally. Do not expose plan IDs, execution IDs, task IDs, digests, or append a plan-status/checklist recap; the host renders progress separately.",
         ].join("\n"),
       );

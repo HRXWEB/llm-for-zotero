@@ -761,6 +761,75 @@ describe("semantic tool surface", function () {
     assert.deepEqual(first.paperContext, collectionPaper);
   });
 
+  it("paper_read adaptively covers every explicit overview target from live model capacity", async function () {
+    const papers = Array.from({ length: 12 }, (_, index) => ({
+      libraryID: 1,
+      itemId: index + 1,
+      contextItemId: index + 101,
+      title: `Paper ${index + 1}`,
+    }));
+    const receivedMaxChars: number[] = [];
+    const tool = createPaperReadTool(
+      {
+        getOverviewExcerpt: async ({
+          paperContext,
+          maxChars,
+        }: {
+          paperContext: unknown;
+          maxChars: number;
+        }) => {
+          receivedMaxChars.push(maxChars);
+          return { backend: "raw_pdf_text", text: "body", paperContext };
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {
+        listPaperContexts: () => [],
+        resolvePaperContextTarget: (target: { itemId?: number }) =>
+          papers.find((paper) => paper.itemId === target.itemId) || null,
+      } as never,
+    );
+    const validated = tool.validate({
+      mode: "overview",
+      targets: papers.map(({ itemId, contextItemId }) => ({
+        itemId,
+        contextItemId,
+      })),
+    });
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+
+    const output = (await tool.execute(validated.value, {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKind: "global",
+        runtimeContextBudget: {
+          contextWindowTokens: 1_000_000,
+          usedContextTokens: 100_000,
+        },
+        advanced: { maxTokens: 16_000, maxTokensExplicit: true },
+      },
+    })) as {
+      results: unknown[];
+      readingReceipt: {
+        requestedPapers: number;
+        returnedPapers: number;
+        maxCharactersPerPaper: number;
+      };
+    };
+
+    assert.lengthOf(output.results, papers.length);
+    assert.equal(output.readingReceipt.requestedPapers, papers.length);
+    assert.equal(output.readingReceipt.returnedPapers, papers.length);
+    assert.isAbove(output.readingReceipt.maxCharactersPerPaper, 9_000);
+    assert.deepEqual(
+      receivedMaxChars,
+      Array(papers.length).fill(output.readingReceipt.maxCharactersPerPaper),
+    );
+  });
+
   it("paper_read overview falls back to Zotero metadata when PDF text is unavailable", async function () {
     const paperContext = {
       itemId: 11,

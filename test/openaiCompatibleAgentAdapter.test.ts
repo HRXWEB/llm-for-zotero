@@ -151,6 +151,47 @@ describe("OpenAICompatibleAgentAdapter", function () {
     );
   });
 
+  it("does not let the untouched generic output default truncate max-reasoning agent work", async function () {
+    let capturedBody: Record<string, unknown> = {};
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "application/json" },
+            json: async () => ({ choices: [{ message: { content: "OK" } }] }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+
+    await adapter.runStep({
+      request: makeRequest({
+        model: "deepseek-v4-pro",
+        apiBase: "https://api.deepseek.com/v1",
+        providerProtocol: "openai_chat_compat",
+        reasoning: { provider: "deepseek", level: "xhigh" },
+        advanced: { maxTokens: 8192 },
+      }),
+      messages: [{ role: "user", content: "Call the next plan tool." }],
+      tools,
+    });
+
+    assert.equal(capturedBody.max_tokens, 384_000);
+  });
+
   it("redacts malformed streamed tool argument JSON", async function () {
     (
       globalThis as typeof globalThis & {
@@ -208,6 +249,80 @@ describe("OpenAICompatibleAgentAdapter", function () {
     if (!isMalformedToolArgumentsDiagnostic(args)) return;
     assert.include(args.rawPreview, "[redacted]");
     assert.notInclude(args.rawPreview, "secret generated script");
+  });
+
+  it("preserves a streamed provider output-limit stop instead of reporting a final answer", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: { get: () => "text/event-stream" },
+          body: makeSseStream([
+            'data: {"choices":[{"delta":{"reasoning_content":"Long unfinished analysis"}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+          json: async () => ({}),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await adapter.runStep({
+      request: makeRequest({ providerProtocol: "openai_chat_compat" }),
+      messages: [{ role: "user", content: "Screen the next batch" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
+    assert.include(step.recoveryInstruction, "required tool call");
+  });
+
+  it("preserves a non-streamed provider output-limit stop", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: { get: () => "application/json" },
+          body: undefined,
+          json: async () => ({
+            choices: [
+              {
+                finish_reason: "length",
+                message: { content: "Partial draft" },
+              },
+            ],
+          }),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await adapter.runStep({
+      request: makeRequest({ providerProtocol: "openai_chat_compat" }),
+      messages: [{ role: "user", content: "Write the document" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
   });
 
   it("round-trips DeepSeek reasoning_content across tool continuations", async function () {

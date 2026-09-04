@@ -900,6 +900,7 @@ export class AgentRuntime {
     let webSourceRunId: string | undefined;
     let runTerminalized = false;
     let redactRunTerminalText = (value: string) => value;
+    let planSession: PlanExecutionRunSession | undefined;
     try {
       const latestPriorRun = await getLatestAgentRunForConversation(
         request.conversationKey,
@@ -962,7 +963,8 @@ export class AgentRuntime {
         contracts: this.registry,
         emit,
       });
-      const planSession = new PlanExecutionRunSession(request, emit);
+      const activePlanSession = new PlanExecutionRunSession(request, emit);
+      planSession = activePlanSession;
 
       const context: AgentToolContext = {
         request,
@@ -1338,7 +1340,7 @@ export class AgentRuntime {
           });
         }
       }
-      const planInitialization = await planSession.initialize();
+      const planInitialization = await activePlanSession.initialize();
       if (planInitialization.kind === "failed") {
         const text = planInitialization.userMessage;
         await emit({ type: "final", text });
@@ -1618,7 +1620,7 @@ export class AgentRuntime {
         request,
         actionContractSession,
         transcriptMessagesForPrompt,
-        planSession,
+        activePlanSession,
       );
       let toolCallOverflowCorrectionUsed = false;
       const shouldFlushStreamBuffer = (value: string): boolean => {
@@ -1638,7 +1640,7 @@ export class AgentRuntime {
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
         if (status === "failed") {
-          await planSession.interrupt(
+          await activePlanSession.interrupt(
             redactedFinalText ||
               "The agent run ended before the plan completed",
           );
@@ -1838,6 +1840,10 @@ export class AgentRuntime {
           preflight.inputLimitSource === "advanced" ||
           preflight.inputLimitSource === "user";
         const stepContextTokens = preflight.estimatedAfterTokens;
+        request.runtimeContextBudget = {
+          contextWindowTokens: stepContextWindow,
+          usedContextTokens: stepContextTokens,
+        };
         if (stepContextTokens > 0 && stepContextWindow > 0) {
           await emit({
             type: "usage",
@@ -2334,7 +2340,7 @@ export class AgentRuntime {
         await actionContractSession.recordToolReceipts(
           toolResult.actionReceipts,
         );
-        await planSession.recordToolResult({
+        await activePlanSession.recordToolResult({
           toolName: toolResult.name,
           executionClass: executedCall.toolDefinition?.spec.executionClass,
           input: executedCall.input,
@@ -2637,6 +2643,31 @@ export class AgentRuntime {
               { documentId: terminalOutcome.documentId },
             );
           }
+          if (step.kind === "incomplete") {
+            await rollbackCommittedStreamedText(stepStreamedText);
+            if (segmentRound >= maxRounds) {
+              return completeRun(
+                "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.",
+                "failed",
+              );
+            }
+            const assistantMessage: AgentAssistantMessage =
+              step.assistantMessage || {
+                role: "assistant",
+                content: step.text,
+              };
+            newTranscriptMessages.push(
+              ...continuationSession.appendFinalCorrection({
+                assistantMessage,
+                correctionMessage: {
+                  role: "user",
+                  content: step.recoveryInstruction,
+                },
+              }),
+            );
+            await persistTranscriptCheckpoint();
+            continue;
+          }
           if (step.kind === "final") {
             const returnedText = step.text || "";
             const streamedTextOffset = stepStreamedText
@@ -2740,6 +2771,9 @@ export class AgentRuntime {
           newTranscriptMessages.push(assistantToolMessage);
           const roundToolMessages: AgentToolMessage[] = [];
           const roundFollowupMessages: AgentModelMessage[] = [];
+          let continuationCheckpoint:
+            | NonNullable<AgentToolResult["continuationCheckpoint"]>
+            | undefined;
           const appendRoundContinuation = () => {
             const delta = continuationSession.completeToolStep({
               toolMessages: roundToolMessages,
@@ -2751,6 +2785,13 @@ export class AgentRuntime {
             const outcome = await executeToolWorkflow(call, round, {
               modelCallId: call.id,
             });
+            if (
+              outcome.toolResult.ok &&
+              outcome.toolResult.continuationCheckpoint
+            ) {
+              continuationCheckpoint =
+                outcome.toolResult.continuationCheckpoint;
+            }
             if (outcome.delivery) {
               const toolMessage: AgentToolMessage = {
                 role: "tool",
@@ -2791,7 +2832,22 @@ export class AgentRuntime {
             }
           }
           appendRoundContinuation();
-          await persistTranscriptCheckpoint();
+          if (continuationCheckpoint) {
+            await restartFromSemanticCheckpoint({
+              sourceMessages: messages,
+              retryInstruction: continuationCheckpoint.instruction,
+            });
+            await emit({
+              type: "provider_event",
+              providerType: "agent_context_budget",
+              payload: {
+                action: "checkpoint_durable_tool_state",
+                reason: continuationCheckpoint.reason,
+              },
+            });
+          } else {
+            await persistTranscriptCheckpoint();
+          }
         }
 
         const newFingerprints = toolExecutionRecords
@@ -2825,6 +2881,11 @@ export class AgentRuntime {
         segment += 1;
       }
     } catch (error) {
+      if (params.signal?.aborted) {
+        await planSession
+          ?.interrupt("The user stopped the approved plan execution")
+          .catch(() => undefined);
+      }
       if (webSourceRunId && !runTerminalized) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),
