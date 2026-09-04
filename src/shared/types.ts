@@ -44,11 +44,19 @@ export type PaperContentSourceMode =
 
 export type ModelInputMode = "text_only" | "vision_allowed";
 
+/**
+ * User intent for the maximum output of one provider inference.
+ *
+ * Auto delegates the ceiling to the provider/runtime. Custom is deliberately
+ * distinct from model capability metadata and from whole-Agent run limits.
+ */
+export type OutputTokenLimitSetting =
+  | { mode: "auto" }
+  | { mode: "custom"; tokens: number };
+
 export type AdvancedModelParams = {
   temperature: number;
-  maxTokens: number;
-  /** True when the user deliberately set maxTokens, even to the default value. */
-  maxTokensExplicit?: boolean;
+  outputTokenLimit: OutputTokenLimitSetting;
   inputTokenCap?: number;
   inputMode?: ModelInputMode;
   /**

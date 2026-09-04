@@ -1,7 +1,9 @@
 import {
   getGeminiReasoningProfile,
+  normalizeProviderCompletion,
   resolveUserExtraBody,
 } from "../../utils/llmClient";
+import type { ModelTurnCompletion } from "../../shared/llm";
 import {
   compileReasoningControls,
   isRecord,
@@ -24,7 +26,11 @@ import type {
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
-import { resolveAgentOutputTokenBudget } from "./limits";
+import { resolveAgentOutputRequestPolicy } from "./limits";
+import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+} from "./completion";
 import {
   resolveRequestContentInputs,
   stringifyMessageContent,
@@ -45,6 +51,7 @@ type GeminiMessage = {
 
 type GeminiResponse = {
   candidates?: Array<{
+    finishReason?: unknown;
     content?: {
       parts?: GeminiPart[];
     };
@@ -526,6 +533,7 @@ function normalizeGeminiResponse(data: GeminiResponse): {
   reasoningText: string;
   toolCalls: AgentToolCall[];
   responseParts: GeminiPart[];
+  completion: ModelTurnCompletion;
 } {
   const parts = extractGeminiResponseParts(data);
   const toolCalls: AgentToolCall[] = [];
@@ -573,6 +581,7 @@ function normalizeGeminiResponse(data: GeminiResponse): {
     reasoningText: reasoningParts.join(""),
     toolCalls,
     responseParts: parts,
+    completion: normalizeProviderCompletion(data.candidates?.[0]?.finishReason),
   };
 }
 
@@ -587,12 +596,14 @@ async function parseGeminiStepStream(
   text: string;
   toolCalls: AgentToolCall[];
   responseParts: GeminiPart[];
+  completion: ModelTurnCompletion;
 }> {
   const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
   let reasoningText = "";
+  let completion: ModelTurnCompletion = { status: "complete" };
   // Streaming chunks each carry only the new parts; accumulate them all so
   // the cached model turn keeps every functionCall and thoughtSignature
   // (parallel calls and trailing signature-only parts can arrive in separate
@@ -604,6 +615,7 @@ async function parseGeminiStepStream(
     if (!payload || payload === "[DONE]") return;
     const parsed = JSON.parse(payload) as GeminiResponse;
     const normalized = normalizeGeminiResponse(parsed);
+    completion = normalized.completion;
     allParts.push(...normalized.responseParts);
     if (normalized.reasoningText) {
       let reasoningDelta = normalized.reasoningText;
@@ -655,7 +667,12 @@ async function parseGeminiStepStream(
   const aggregate = normalizeGeminiResponse({
     candidates: [{ content: { parts: allParts } }],
   });
-  return { text, toolCalls: aggregate.toolCalls, responseParts: allParts };
+  return {
+    text,
+    toolCalls: aggregate.toolCalls,
+    responseParts: allParts,
+    completion,
+  };
 }
 
 function buildAssistantConversationMessage(step: {
@@ -731,6 +748,10 @@ export class GeminiNativeAgentAdapter implements AgentModelAdapter {
         string,
         unknown
       >;
+    const outputPolicy = resolveAgentOutputRequestPolicy(
+      request,
+      "gemini_native",
+    );
     const payload = {
       ...extraTop,
       ...(this.systemInstruction
@@ -752,10 +773,9 @@ export class GeminiNativeAgentAdapter implements AgentModelAdapter {
           );
           return temperature !== undefined ? { temperature } : {};
         })(),
-        maxOutputTokens: resolveAgentOutputTokenBudget(
-          request,
-          "gemini_native",
-        ),
+        ...(outputPolicy.mode === "numeric"
+          ? { maxOutputTokens: outputPolicy.tokens }
+          : {}),
         ...(resolveGeminiReasoningConfig(request)
           ? { thinkingConfig: resolveGeminiReasoningConfig(request) }
           : {}),
@@ -792,11 +812,37 @@ export class GeminiNativeAgentAdapter implements AgentModelAdapter {
           params.onReasoning,
         )
       : normalizeGeminiResponse((await response.json()) as GeminiResponse);
-    if (!normalized.text && !normalized.toolCalls.length) {
+    if (
+      normalized.completion.status === "complete" &&
+      !normalized.text &&
+      !normalized.toolCalls.length
+    ) {
       const fallbackResponse = await fetchGemini(false);
       normalized = normalizeGeminiResponse(
         (await fallbackResponse.json()) as GeminiResponse,
       );
+    }
+    const recoveryReason = resolveAgentRecoverableCompletion(
+      normalized.completion,
+    );
+    if (recoveryReason) {
+      this.conversationMessages = normalized.text
+        ? [...contents, { role: "model", parts: [{ text: normalized.text }] }]
+        : contents;
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: normalized.completion.providerReason,
+        text: normalized.text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "function call",
+        ),
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+        },
+      };
     }
     this.conversationMessages = [
       ...contents,

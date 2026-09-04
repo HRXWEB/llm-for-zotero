@@ -624,7 +624,8 @@ export type AgentModelStep =
     }
   | {
       kind: "incomplete";
-      reason: "output_limit";
+      reason: "output_limit" | "provider_pause";
+      providerReason?: string;
       text: string;
       recoveryInstruction: string;
       assistantMessage?: AgentAssistantMessage;

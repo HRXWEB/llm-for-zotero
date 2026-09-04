@@ -1,4 +1,5 @@
 import { callLLM, type ChatParams } from "./llmClient";
+import type { ModelTurnOutcome } from "../shared/llm";
 
 /** Default bound for short, internal model calls. */
 export const DEFAULT_LLM_CALL_TIMEOUT_MS = 10_000;
@@ -7,7 +8,7 @@ export type LLMCallWithTimeoutParams = Omit<ChatParams, "signal"> & {
   parentSignal?: AbortSignal;
   timeoutMs?: number;
   /** Test seam: replaces callLLM. */
-  llmCall?: (chatParams: ChatParams) => Promise<string>;
+  llmCall?: (chatParams: ChatParams) => Promise<ModelTurnOutcome>;
 };
 
 /**
@@ -18,7 +19,7 @@ export type LLMCallWithTimeoutParams = Omit<ChatParams, "signal"> & {
  */
 export async function callLLMWithTimeout(
   params: LLMCallWithTimeoutParams,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const { parentSignal, timeoutMs, llmCall, ...chatParams } = params;
   const budgetMs = timeoutMs || DEFAULT_LLM_CALL_TIMEOUT_MS;
   const AbortControllerCtor = (

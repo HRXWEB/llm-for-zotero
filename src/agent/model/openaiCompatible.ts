@@ -2,6 +2,7 @@ import { usesMaxCompletionTokens } from "../../utils/apiHelpers";
 import {
   buildReasoningPayload,
   buildPromptCachePayloadHints,
+  normalizeProviderCompletion,
   postWithReasoningFallback,
   resolveRequestAuthState,
 } from "../../utils/llmClient";
@@ -24,7 +25,11 @@ import {
   parseToolCallArguments,
 } from "./shared";
 import { resolveContentParts } from "./adapterUtils";
-import { resolveAgentOutputTokenBudget } from "./limits";
+import { resolveAgentOutputRequestPolicy } from "./limits";
+import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+} from "./completion";
 
 type ChatCompletionChoice = {
   finish_reason?: string | null;
@@ -377,9 +382,6 @@ async function parseOpenAIChatCompletionStream(
   };
 }
 
-const OUTPUT_LIMIT_RECOVERY_INSTRUCTION =
-  "The provider stopped at its output limit before completing this step. Do not repeat the analysis. Make the next required tool call immediately, using a smaller bounded work unit when applicable.";
-
 function isStreamingResponse(response: Response): boolean {
   const ct = (response.headers.get("content-type") || "").toLowerCase();
   return ct.includes("text/event-stream") || ct.includes("octet-stream");
@@ -430,6 +432,10 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
       modelName: request.model,
       initialReasoning: request.reasoning,
       buildPayload: (reasoningOverride) => {
+        const outputPolicy = resolveAgentOutputRequestPolicy(
+          request,
+          "openai_chat_compat",
+        );
         const reasoningPayload = buildReasoningPayload(
           reasoningOverride,
           false,
@@ -446,19 +452,11 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           tool_choice: "auto",
           stream: true,
           stream_options: { include_usage: true },
-          ...(usesMaxCompletionTokens(request.model || "")
-            ? {
-                max_completion_tokens: resolveAgentOutputTokenBudget(
-                  request,
-                  "openai_chat_compat",
-                ),
-              }
-            : {
-                max_tokens: resolveAgentOutputTokenBudget(
-                  request,
-                  "openai_chat_compat",
-                ),
-              }),
+          ...(outputPolicy.mode === "numeric"
+            ? usesMaxCompletionTokens(request.model || "")
+              ? { max_completion_tokens: outputPolicy.tokens }
+              : { max_tokens: outputPolicy.tokens }
+            : {}),
           ...reasoningPayload.extra,
           ...(reasoningPayload.omitTemperature
             ? {}
@@ -486,9 +484,11 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
         params.onReasoning,
         params.onUsage,
       );
+      const completion = normalizeProviderCompletion(result.finishReason);
+      const recoveryReason = resolveAgentRecoverableCompletion(completion);
       this.conversationMessages = [
         ...resolvedMessages,
-        result.finishReason === "length" && !result.toolCalls.length
+        recoveryReason
           ? { role: "assistant", content: result.text }
           : buildNativeAssistantMessage({
               modelName: request.model,
@@ -498,6 +498,22 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
               toolCalls: result.toolCalls,
             }),
       ];
+      if (recoveryReason) {
+        return {
+          kind: "incomplete",
+          reason: recoveryReason,
+          providerReason: completion.providerReason,
+          text: result.text,
+          recoveryInstruction: buildAgentRecoveryInstruction(
+            recoveryReason,
+            "tool call",
+          ),
+          assistantMessage: {
+            role: "assistant",
+            content: result.text,
+          },
+        };
+      }
       if (result.toolCalls.length) {
         return {
           kind: "tool_calls",
@@ -506,18 +522,6 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
             role: "assistant",
             content: result.text,
             tool_calls: result.toolCalls,
-          },
-        };
-      }
-      if (result.finishReason === "length") {
-        return {
-          kind: "incomplete",
-          reason: "output_limit",
-          text: result.text,
-          recoveryInstruction: OUTPUT_LIMIT_RECOVERY_INSTRUCTION,
-          assistantMessage: {
-            role: "assistant",
-            content: result.text,
           },
         };
       }
@@ -573,16 +577,36 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
     }
     const toolCalls = normalizeToolCalls(message?.tool_calls);
     const text = typeof message?.content === "string" ? message.content : "";
+    const completion = normalizeProviderCompletion(finishReason);
+    const recoveryReason = resolveAgentRecoverableCompletion(completion);
     this.conversationMessages = [
       ...resolvedMessages,
-      buildNativeAssistantMessage({
-        modelName: request.model,
-        text,
-        reasoningText,
-        reasoningContentText,
-        toolCalls,
-      }),
+      recoveryReason
+        ? { role: "assistant", content: text }
+        : buildNativeAssistantMessage({
+            modelName: request.model,
+            text,
+            reasoningText,
+            reasoningContentText,
+            toolCalls,
+          }),
     ];
+    if (recoveryReason) {
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: completion.providerReason,
+        text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "tool call",
+        ),
+        assistantMessage: {
+          role: "assistant",
+          content: text,
+        },
+      };
+    }
     if (toolCalls.length) {
       return {
         kind: "tool_calls",
@@ -591,18 +615,6 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           role: "assistant",
           content: text,
           tool_calls: toolCalls,
-        },
-      };
-    }
-    if (finishReason === "length") {
-      return {
-        kind: "incomplete",
-        reason: "output_limit",
-        text,
-        recoveryInstruction: OUTPUT_LIMIT_RECOVERY_INSTRUCTION,
-        assistantMessage: {
-          role: "assistant",
-          content: text,
         },
       };
     }

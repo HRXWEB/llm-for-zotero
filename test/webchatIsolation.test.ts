@@ -495,7 +495,7 @@ describe("webchat isolation", function () {
       "restoreRetryUserSnapshot(retryPair.userMessage, userSnapshot);",
       resolvedGuard,
     );
-    const streamCall = retryBlock.indexOf("callLLMStream");
+    const streamCall = retryBlock.indexOf("callDirectChatTurnWithRecovery");
     assert.isAtLeast(
       resolvedGuard,
       0,

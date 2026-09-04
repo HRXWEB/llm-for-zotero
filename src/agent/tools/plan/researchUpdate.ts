@@ -43,7 +43,7 @@ import {
   buildAdaptiveScreeningBatch,
   type ScreeningBatchPaper,
 } from "../../research/screeningBatch";
-import { normalizeMaxTokensForRequest } from "../../../utils/llmClient";
+import { resolveOutputReserve } from "../../../utils/outputTokenPolicy";
 import type {
   PaperFinding,
   ResearchCorpusItem,
@@ -982,15 +982,16 @@ export function createResearchUpdateTool(
             };
           },
         );
-        const outputTokenBudget = normalizeMaxTokensForRequest({
-          value: context.request.advanced?.maxTokens,
-          maxTokensExplicit: context.request.advanced?.maxTokensExplicit,
-          model: context.request.model || context.modelName,
-          apiBase: context.request.apiBase,
-          protocol: context.request.providerProtocol,
-          authMode: context.request.authMode,
-          profileOverride: context.request.advanced?.profileOverride,
-        });
+        const outputTokenBudget = resolveOutputReserve(
+          context.request.advanced?.outputTokenLimit,
+          context.request.model || context.modelName,
+          {
+            apiBase: context.request.apiBase,
+            protocol: context.request.providerProtocol,
+            authMode: context.request.authMode,
+            profileOverride: context.request.advanced?.profileOverride,
+          },
+        );
         const projected = buildAdaptiveScreeningBatch({
           papers: materialized,
           criterionIds: investigation.criteria.map((entry) => entry.id),

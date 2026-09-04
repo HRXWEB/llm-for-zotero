@@ -12,6 +12,11 @@ import type { AgentSkill } from "../src/agent/skills/skillLoader";
 import type { AgentRuntimeRequestInput } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
+const completeOutcome = (text: string) => ({
+  text,
+  completion: { status: "complete" as const },
+});
+
 function normalizeRequest(input: AgentRuntimeRequestInput) {
   return resolvedAgentRequest({
     conversationKey: 1,
@@ -332,7 +337,7 @@ describe("detectTurnIntent", function () {
         providerProtocol: "openai_chat_compat",
         advanced: {
           temperature: 0,
-          maxTokens: 4_000,
+          outputTokenLimit: { mode: "custom", tokens: 4_000 },
           profileOverride,
         },
       } as any,
@@ -340,7 +345,9 @@ describe("detectTurnIntent", function () {
       {
         llmCall: async (params) => {
           captured = params as unknown as Record<string, unknown>;
-          return '{"schemaVersion":1,"taskKind":"read","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","externalSearchIntent":"none","wantedSections":[],"queryLanguage":"en"}';
+          return completeOutcome(
+            '{"schemaVersion":1,"taskKind":"read","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","externalSearchIntent":"none","wantedSections":[],"queryLanguage":"en"}',
+          );
         },
       },
     );
@@ -377,7 +384,7 @@ describe("detectTurnIntent", function () {
         providerProtocol: "openai_chat_compat",
       } as any,
       SKILLS,
-      { llmCall: async () => "not JSON" },
+      { llmCall: async () => completeOutcome("not JSON") },
     );
 
     assert.isTrue(result.degraded);
@@ -398,9 +405,11 @@ describe("detectTurnIntent", function () {
       {
         llmCall: async () => {
           calls += 1;
-          return calls === 1
-            ? '{"schemaVersion":1,"taskKind":"write","requestedScopes":["note"],"selections":[],"retrievalIntent":"none","wantedSections":[]}'
-            : '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[]}';
+          return completeOutcome(
+            calls === 1
+              ? '{"schemaVersion":1,"taskKind":"write","requestedScopes":["note"],"selections":[],"retrievalIntent":"none","wantedSections":[]}'
+              : '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[]}',
+          );
         },
       },
     );
@@ -425,9 +434,11 @@ describe("detectTurnIntent", function () {
       SKILLS,
       {
         llmCall: async (params) =>
-          String(params.prompt).includes("Classify only the exact mutation")
-            ? '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[{"operation":"set_item_tags","coverage":"one","targetKind":"papers","parameters":{"tags":["reviewed"]}}]}'
-            : '{"schemaVersion":1,"taskKind":"write","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+          completeOutcome(
+            String(params.prompt).includes("Classify only the exact mutation")
+              ? '{"retrievalIntent":"none","wantedSections":[],"writeDisposition":"required","actionIntents":[{"operation":"set_item_tags","coverage":"one","targetKind":"papers","parameters":{"tags":["reviewed"]}}]}'
+              : '{"schemaVersion":1,"taskKind":"write","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+          ),
       },
     );
 
@@ -460,7 +471,9 @@ describe("detectTurnIntent", function () {
       [compareSkill],
       {
         llmCall: async () =>
-          '{"schemaVersion":1,"taskKind":"read","requestedScopes":["single-paper"],"selections":[{"skillId":"compare-papers","requestedScope":"single-paper","evidenceText":"compare"}],"retrievalIntent":"none","wantedSections":[]}',
+          completeOutcome(
+            '{"schemaVersion":1,"taskKind":"read","requestedScopes":["single-paper"],"selections":[{"skillId":"compare-papers","requestedScope":"single-paper","evidenceText":"compare"}],"retrievalIntent":"none","wantedSections":[]}',
+          ),
       },
     );
     assert.deepEqual(result.skillIds, []);
@@ -478,7 +491,9 @@ describe("detectTurnIntent", function () {
       SKILLS,
       {
         llmCall: async () =>
-          '{"schemaVersion":1,"taskKind":"read","requestedScopes":["paper-set"],"selections":[{"skillId":"compare-papers","requestedScope":"paper-set","evidenceText":"比较这两篇论文"}],"retrievalIntent":"summarize","wantedSections":[]}',
+          completeOutcome(
+            '{"schemaVersion":1,"taskKind":"read","requestedScopes":["paper-set"],"selections":[{"skillId":"compare-papers","requestedScope":"paper-set","evidenceText":"比较这两篇论文"}],"retrievalIntent":"summarize","wantedSections":[]}',
+          ),
       },
     );
     const activation = result.routingReceipt?.skills[0];

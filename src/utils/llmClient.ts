@@ -5,7 +5,7 @@
  */
 
 import { config } from "../../package.json";
-import { DEFAULT_MAX_TOKENS, DEFAULT_SYSTEM_PROMPT } from "./llmDefaults";
+import { DEFAULT_SYSTEM_PROMPT } from "./llmDefaults";
 import {
   getAnthropicReasoningProfileForModel,
   getDeepseekReasoningProfileForModel,
@@ -42,6 +42,8 @@ import type {
   ReasoningEvent,
   TextContent,
   UsageStats,
+  ModelTurnCompletion,
+  ModelTurnOutcome,
 } from "../shared/llm";
 export type {
   ChatMessage,
@@ -51,6 +53,8 @@ export type {
   ReasoningEvent,
   TextContent,
   UsageStats,
+  ModelTurnCompletion,
+  ModelTurnOutcome,
 } from "../shared/llm";
 import {
   EMBEDDINGS_ENDPOINT,
@@ -61,9 +65,7 @@ import {
 import { pathToFileUrl } from "./localPath";
 import { fingerprintSecret } from "./secretFingerprint";
 import {
-  normalizeMaxTokens,
   normalizeTemperature,
-  normalizeMaxTokensForModel,
   resolveGeminiTemperature,
 } from "./normalization";
 import {
@@ -103,7 +105,7 @@ import {
   extractContextCacheUsage,
   type ContextCachePlan,
 } from "../contextCache/manager";
-import type { ModelInputMode } from "../shared/types";
+import type { ModelInputMode, OutputTokenLimitSetting } from "../shared/types";
 import {
   compileReasoningControls,
   ensureModelCapabilities,
@@ -123,6 +125,12 @@ import {
   assertCodexDirectModelAvailable,
   sanitizeCodexDirectReasoningConfig,
 } from "../codexAuth/modelCatalog";
+import {
+  AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+  resolveOutputRequestPolicy,
+  resolveOutputReserve,
+  type OutputRequestPolicy,
+} from "./outputTokenPolicy";
 
 // =============================================================================
 // Types
@@ -156,10 +164,8 @@ export type ChatParams = {
   reasoning?: ReasoningConfig;
   /** Optional custom sampling temperature */
   temperature?: number;
-  /** Optional custom token budget for completion/output */
-  maxTokens?: number;
-  /** Whether maxTokens was deliberately set rather than inherited as a default. */
-  maxTokensExplicit?: boolean;
+  /** Per-response provider output policy. Missing is Auto. */
+  outputTokenLimit?: OutputTokenLimitSetting;
   /** Optional override for input token cap. */
   inputTokenCap?: number;
   /** Optional per-model input capability override. Missing means auto. */
@@ -172,6 +178,8 @@ export type ChatParams = {
   providerProtocol?: ProviderProtocol;
   /** Provider-side prompt/context cache plan resolved by the context planner. */
   contextCache?: ContextCachePlan;
+  /** Session-only opaque state for resuming an incomplete provider response. */
+  continuationState?: unknown;
   /**
    * User-authored capability overrides for the selected model. Threaded through
    * so capability resolution, token clamping and the request body all see the
@@ -223,7 +231,140 @@ interface CompletionResponse {
   choices?: Array<{
     message?: { content?: string };
     text?: string;
+    finish_reason?: string | null;
   }>;
+}
+
+const COMPLETE_MODEL_TURN = { status: "complete" } as const;
+
+function modelTurnOutcome(
+  text: string,
+  completion: ModelTurnCompletion = COMPLETE_MODEL_TURN,
+  continuationState?: unknown,
+): ModelTurnOutcome {
+  return {
+    text,
+    completion,
+    ...(continuationState === undefined ? {} : { continuationState }),
+  };
+}
+
+/** Normalize terminal metadata without inspecting or retaining model content. */
+export function normalizeProviderCompletion(
+  providerReason: unknown,
+  options?: { responseStatus?: unknown },
+): ModelTurnCompletion {
+  const rawReason =
+    typeof providerReason === "string" ? providerReason.trim() : "";
+  const reason = rawReason.toLowerCase();
+  const responseStatus =
+    typeof options?.responseStatus === "string"
+      ? options.responseStatus.trim().toLowerCase()
+      : "";
+
+  if (responseStatus === "incomplete" && !reason) {
+    return {
+      status: "blocked",
+      reason: "other",
+      providerReason: "incomplete",
+    };
+  }
+
+  if (
+    reason === "length" ||
+    reason === "max_tokens" ||
+    reason === "max_output_tokens" ||
+    reason === "max_tokens_exceeded" ||
+    reason === "max_completion_tokens"
+  ) {
+    return {
+      status: "incomplete",
+      reason: "output_limit",
+      ...(rawReason ? { providerReason: rawReason } : {}),
+    };
+  }
+  if (
+    reason === "model_context_window_exceeded" ||
+    reason === "context_length_exceeded" ||
+    reason === "context_window_exceeded" ||
+    reason === "max_context_length"
+  ) {
+    return {
+      status: "incomplete",
+      reason: "context_limit",
+      providerReason: rawReason,
+    };
+  }
+  if (reason === "pause_turn" || reason === "provider_pause") {
+    return {
+      status: "incomplete",
+      reason: "provider_pause",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    reason === "content_filter" ||
+    reason === "safety" ||
+    reason === "blocked" ||
+    reason === "blocklist" ||
+    reason === "prohibited_content" ||
+    reason === "spii"
+  ) {
+    return {
+      status: "blocked",
+      reason: "safety",
+      providerReason: rawReason,
+    };
+  }
+  if (reason === "refusal" || reason === "refused") {
+    return {
+      status: "blocked",
+      reason: "refusal",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    reason === "malformed_tool_call" ||
+    reason === "malformed_function_call" ||
+    reason === "unexpected_tool_call"
+  ) {
+    return {
+      status: "blocked",
+      reason: "malformed_tool_call",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    (!reason && !responseStatus) ||
+    reason === "stop" ||
+    reason === "end_turn" ||
+    reason === "tool_use" ||
+    reason === "tool_calls" ||
+    reason === "completed" ||
+    responseStatus === "completed"
+  ) {
+    return COMPLETE_MODEL_TURN;
+  }
+  return {
+    status: "blocked",
+    reason: "other",
+    providerReason: rawReason || responseStatus || "unknown",
+  };
+}
+
+export function requireCompleteModelText(
+  outcome: ModelTurnOutcome,
+  operation = "Model utility call",
+): string {
+  if (outcome.completion.status !== "complete") {
+    const reason =
+      "reason" in outcome.completion ? outcome.completion.reason : "other";
+    throw new Error(`${operation} did not complete (${reason}).`);
+  }
+  if (!outcome.text.trim()) {
+    throw new Error(`${operation} returned no visible text.`);
+  }
+  return outcome.text;
 }
 
 interface EmbeddingResponse {
@@ -1247,8 +1388,7 @@ export function estimateAvailableContextBudget(params: {
   images?: string[];
   model: string;
   reasoning?: ReasoningConfig;
-  maxTokens?: number;
-  maxTokensExplicit?: boolean;
+  outputTokenLimit?: OutputTokenLimitSetting;
   inputTokenCap?: number;
   systemPrompt?: string;
   apiBase?: string;
@@ -1274,15 +1414,16 @@ export function estimateAvailableContextBudget(params: {
   const limitTokens = resolvedInputLimit.limitTokens;
   const modelLimitTokens = limitTokens;
   const softLimitTokens = Math.max(1, Math.floor(limitTokens * 0.9));
-  const outputReserveTokens = normalizeMaxTokensForRequest({
-    value: params.maxTokens,
-    maxTokensExplicit: params.maxTokensExplicit,
-    model: normalizedModel,
-    apiBase: params.apiBase,
-    protocol: params.providerProtocol,
-    authMode: params.authMode,
-    profileOverride: params.profileOverride,
-  });
+  const outputReserveTokens = resolveOutputReserve(
+    params.outputTokenLimit,
+    normalizedModel,
+    {
+      apiBase: params.apiBase,
+      protocol: params.providerProtocol,
+      authMode: params.authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
   const reasoningReserveTokens = getReasoningReserveTokens(params.reasoning);
 
   const baseMessages = buildMessages(
@@ -1525,36 +1666,15 @@ function resolveUnterminatedThought(state: ThoughtTagState): {
   return { asAnswer: !state.inThought, text };
 }
 
-function buildTokenParam(model: string, maxTokens: number) {
+function buildTokenParam(model: string, policy: OutputRequestPolicy) {
+  if (policy.mode !== "numeric") return {};
   return usesMaxCompletionTokens(model)
-    ? { max_completion_tokens: maxTokens }
-    : { max_tokens: maxTokens };
+    ? { max_completion_tokens: policy.tokens }
+    : { max_tokens: policy.tokens };
 }
 
-function buildResponsesTokenParam(maxTokens: number) {
-  return { max_output_tokens: maxTokens };
-}
-
-export function normalizeMaxTokensForRequest(params: {
-  value?: number;
-  maxTokensExplicit?: boolean;
-  model: string;
-  apiBase?: string;
-  protocol?: ProviderProtocol;
-  authMode?: ModelProviderAuthMode;
-  profileOverride?: ModelProfileOverride;
-}): number {
-  if (params.maxTokensExplicit) return normalizeMaxTokens(params.value);
-  const normalized = normalizeMaxTokensForModel(params.value, params.model, {
-    provider: params.apiBase
-      ? detectProviderPreset(params.apiBase).toString()
-      : undefined,
-    apiBase: params.apiBase,
-    protocol: params.protocol,
-    authMode: params.authMode,
-    profileOverride: params.profileOverride,
-  });
-  return normalized;
+function buildResponsesTokenParam(policy: OutputRequestPolicy) {
+  return policy.mode === "numeric" ? { max_output_tokens: policy.tokens } : {};
 }
 
 const OPENAI_EFFORT_ORDER: OpenAIReasoningEffort[] = [
@@ -2387,11 +2507,12 @@ async function parseAnthropicStreamResponse(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
 
   try {
     while (true) {
@@ -2412,9 +2533,15 @@ async function parseAnthropicStreamResponse(
         try {
           const parsed = JSON.parse(data) as {
             type?: string;
-            delta?: { type?: string; text?: string; thinking?: string };
+            delta?: {
+              type?: string;
+              text?: string;
+              thinking?: string;
+              stop_reason?: string | null;
+            };
             usage?: { output_tokens?: number };
             message?: {
+              stop_reason?: string | null;
               usage?: {
                 input_tokens?: number;
                 output_tokens?: number;
@@ -2423,6 +2550,11 @@ async function parseAnthropicStreamResponse(
               };
             };
           };
+          const stopReason =
+            parsed.delta?.stop_reason ?? parsed.message?.stop_reason;
+          if (typeof stopReason === "string") {
+            completion = normalizeProviderCompletion(stopReason);
+          }
           if (
             parsed.type === "content_block_delta" &&
             parsed.delta?.type === "text_delta" &&
@@ -2478,14 +2610,14 @@ async function parseAnthropicStreamResponse(
     reader.releaseLock();
   }
 
-  return fullText;
+  return modelTurnOutcome(fullText, completion);
 }
 
 function buildGeminiNativePayload(params: {
   model: string;
   apiBase?: string;
   messages: ChatMessage[];
-  effectiveMaxTokens: number;
+  outputPolicy: OutputRequestPolicy;
   /** Omitted from the payload when undefined (Gemini 3 server default). */
   temperature: number | undefined;
   reasoning?: ReasoningConfig;
@@ -2551,7 +2683,9 @@ function buildGeminiNativePayload(params: {
     contents,
     generationConfig: {
       ...(isRecord(extraGenerationConfig) ? extraGenerationConfig : {}),
-      maxOutputTokens: params.effectiveMaxTokens,
+      ...(params.outputPolicy.mode === "numeric"
+        ? { maxOutputTokens: params.outputPolicy.tokens }
+        : {}),
       ...(params.temperature !== undefined
         ? { temperature: params.temperature }
         : {}),
@@ -2659,11 +2793,12 @@ async function parseGeminiNativeStreamResponse(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
 
   try {
     while (true) {
@@ -2682,6 +2817,7 @@ async function parseGeminiNativeStreamResponse(
         try {
           const parsed = JSON.parse(data) as {
             candidates?: Array<{
+              finishReason?: string;
               content?: {
                 parts?: Array<{ text?: string; thought?: unknown }>;
               };
@@ -2693,6 +2829,10 @@ async function parseGeminiNativeStreamResponse(
               cachedContentTokenCount?: number;
             };
           };
+          const finishReason = parsed.candidates?.[0]?.finishReason;
+          if (typeof finishReason === "string") {
+            completion = normalizeProviderCompletion(finishReason);
+          }
           const parts = parsed.candidates?.[0]?.content?.parts || [];
           const thoughtText = parts
             .filter((p) => isGeminiThoughtSummaryPart(p))
@@ -2734,7 +2874,7 @@ async function parseGeminiNativeStreamResponse(
     reader.releaseLock();
   }
 
-  return fullText;
+  return modelTurnOutcome(fullText, completion);
 }
 
 // ── Ollama native (/api/chat) ────────────────────────────────────────────────
@@ -2823,20 +2963,13 @@ export function buildOllamaChatPayload(params: {
   };
 }
 
-/**
- * Ollama's own `num_predict` default is -1 (unlimited). The plugin's 8192
- * default is a hazard here: a thinking model can spend the entire budget
- * reasoning and return empty content. Treat the untouched plugin default as
- * "unset" and let the server decide; any other value is the user's explicit
- * choice and is honoured.
- */
+/** Ollama represents its runtime-managed/unlimited output policy as -1. */
 export function resolveOllamaNumPredict(
-  effectiveMaxTokens: number,
-  maxTokensExplicit = false,
-): number {
-  return !maxTokensExplicit && effectiveMaxTokens === DEFAULT_MAX_TOKENS
-    ? -1
-    : effectiveMaxTokens;
+  policy: OutputRequestPolicy,
+): number | undefined {
+  if (policy.mode === "numeric") return policy.tokens;
+  if (policy.mode === "unlimited") return -1;
+  return undefined;
 }
 
 /**
@@ -2895,11 +3028,12 @@ export async function parseOllamaChatStream(
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
   onUsage?: (usage: UsageStats) => void | Promise<void>,
   onToolCall?: (call: OllamaRawToolCall) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
 
   const handleLine = async (line: string) => {
     const trimmed = line.trim();
@@ -2913,6 +3047,9 @@ export async function parseOllamaChatStream(
     }
     if (parsed.error) {
       throw new Error(`Ollama error: ${parsed.error}`);
+    }
+    if (parsed.done) {
+      completion = normalizeProviderCompletion(parsed.done_reason);
     }
     const thinking = normalizeStreamText(parsed.message?.thinking ?? "");
     if (thinking && onReasoning) await onReasoning({ details: thinking });
@@ -2959,7 +3096,7 @@ export async function parseOllamaChatStream(
     reader.releaseLock();
   }
 
-  return fullText;
+  return modelTurnOutcome(fullText, completion);
 }
 
 function createChatPayloadBuilder(params: {
@@ -2971,10 +3108,12 @@ function createChatPayloadBuilder(params: {
   apiBase: string;
   providerProtocol?: ProviderProtocol;
   effectiveTemperature: number;
-  effectiveMaxTokens: number;
+  outputPolicy: OutputRequestPolicy;
+  outputReserveTokens: number;
   stream: boolean;
   contextCache?: ContextCachePlan;
   profileOverride?: ModelProfileOverride;
+  continuationState?: unknown;
 }) {
   const {
     model,
@@ -2985,7 +3124,8 @@ function createChatPayloadBuilder(params: {
     apiBase,
     providerProtocol,
     effectiveTemperature,
-    effectiveMaxTokens,
+    outputPolicy,
+    outputReserveTokens,
     stream,
     contextCache,
   } = params;
@@ -3032,7 +3172,10 @@ function createChatPayloadBuilder(params: {
       apiBase,
       providerProtocol,
       {
-        maxTokens: effectiveMaxTokens,
+        maxTokens:
+          outputPolicy.mode === "numeric"
+            ? outputPolicy.tokens
+            : outputReserveTokens,
         profileOverride: params.profileOverride,
       },
     );
@@ -3045,10 +3188,14 @@ function createChatPayloadBuilder(params: {
       ? {
           model,
           ...responsesInput,
+          ...(isRecord(params.continuationState) &&
+          typeof params.continuationState.responseId === "string"
+            ? { previous_response_id: params.continuationState.responseId }
+            : {}),
           ...cachePayloadHints,
           ...reasoningPayload.extra,
           ...temperatureParam,
-          ...buildResponsesTokenParam(effectiveMaxTokens),
+          ...buildResponsesTokenParam(outputPolicy),
         }
       : {
           model,
@@ -3056,7 +3203,7 @@ function createChatPayloadBuilder(params: {
           ...cachePayloadHints,
           ...reasoningPayload.extra,
           ...temperatureParam,
-          ...buildTokenParam(model, effectiveMaxTokens),
+          ...buildTokenParam(model, outputPolicy),
         };
 
     if (stream) {
@@ -3482,7 +3629,39 @@ function extractResponsesOutputText(data: {
       ?.flatMap((item) => item.content || [])
       .find((content) => content.type === "output_text" && content.text)
       ?.text || "";
-  return firstText || JSON.stringify(data);
+  return firstText;
+}
+
+function extractResponsesOutcome(data: {
+  id?: string;
+  status?: string;
+  incomplete_details?: { reason?: string } | null;
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+}): ModelTurnOutcome {
+  let completion = normalizeProviderCompletion(
+    data.incomplete_details?.reason,
+    { responseStatus: data.status },
+  );
+  if (
+    data.status?.toLowerCase() === "incomplete" &&
+    completion.status === "complete"
+  ) {
+    completion = {
+      status: "blocked",
+      reason: "other",
+      providerReason: "incomplete",
+    };
+  }
+  return modelTurnOutcome(
+    extractResponsesOutputText(data),
+    completion,
+    completion.status === "incomplete" && data.id
+      ? { responseId: data.id }
+      : undefined,
+  );
 }
 
 export async function resolveRequestAuthState(params: {
@@ -3526,6 +3705,28 @@ export async function resolveRequestAuthState(params: {
 // API Functions
 // =============================================================================
 
+function resolveAndLogOutputPolicy(params: {
+  setting?: OutputTokenLimitSetting;
+  model: string;
+  apiBase: string;
+  protocol: ProviderProtocol;
+  authMode: ModelProviderAuthMode;
+  profileOverride?: ModelProfileOverride;
+}): OutputRequestPolicy {
+  const policy = resolveOutputRequestPolicy(params);
+  ztoolkit.log("LLM: Resolved per-response output policy", {
+    model: params.model,
+    protocol: params.protocol,
+    settingMode: params.setting?.mode || "auto",
+    resolutionSource: policy.source,
+    transmittedPolicy:
+      policy.mode === "numeric"
+        ? { mode: "numeric", tokens: policy.tokens }
+        : { mode: policy.mode },
+  });
+  return policy;
+}
+
 /**
  * Handles anthropic_messages, gemini_native and ollama_native protocols for
  * both streaming and non-streaming calls. Passing onDelta enables streaming.
@@ -3536,8 +3737,7 @@ async function callNativeProtocol(params: {
   apiKey: string;
   model: string;
   messages: ChatMessage[];
-  effectiveMaxTokens: number;
-  maxTokensExplicit?: boolean;
+  outputPolicy: OutputRequestPolicy;
   /** Raw request temperature; protocol-specific defaults are applied here. */
   rawTemperature?: number | string;
   signal?: AbortSignal;
@@ -3550,14 +3750,14 @@ async function callNativeProtocol(params: {
   /** ollama_native only: runtime context window to allocate. */
   numCtx?: number;
   profileOverride?: ModelProfileOverride;
-}): Promise<string> {
+}): Promise<ModelTurnOutcome> {
   const {
     protocol,
     apiBase,
     apiKey,
     model,
     messages,
-    effectiveMaxTokens,
+    outputPolicy,
     rawTemperature,
     signal,
     onDelta,
@@ -3600,10 +3800,7 @@ async function callNativeProtocol(params: {
           messages,
           stream: isStreaming,
           temperature: normalizeTemperature(rawTemperature),
-          numPredict: resolveOllamaNumPredict(
-            effectiveMaxTokens,
-            params.maxTokensExplicit,
-          ),
+          numPredict: resolveOllamaNumPredict(outputPolicy),
           numCtx: params.numCtx,
           reasoningExtra: buildReasoningPayload(
             reasoningOverride,
@@ -3618,7 +3815,10 @@ async function callNativeProtocol(params: {
         ? buildAnthropicMessagesPayload({
             model,
             messages,
-            effectiveMaxTokens,
+            effectiveMaxTokens:
+              outputPolicy.mode === "numeric"
+                ? outputPolicy.tokens
+                : AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
             effectiveTemperature: normalizeTemperature(rawTemperature),
             stream: isStreaming,
             reasoning: reasoningOverride,
@@ -3632,7 +3832,7 @@ async function callNativeProtocol(params: {
             model,
             apiBase,
             messages,
-            effectiveMaxTokens,
+            outputPolicy,
             temperature: resolveGeminiTemperature(model, rawTemperature),
             reasoning: reasoningOverride,
             pdfParts: pdfParts.length ? pdfParts : undefined,
@@ -3674,34 +3874,40 @@ async function callNativeProtocol(params: {
     // Deliberately no fallback to `thinking` when content is empty: if the
     // server put the answer in the reasoning field that is the server's bug,
     // and silently promoting it would hide a misconfiguration (see #363).
-    return normalizeStreamText(data?.message?.content ?? "");
+    return modelTurnOutcome(
+      normalizeStreamText(data?.message?.content ?? ""),
+      normalizeProviderCompletion(data.done_reason),
+    );
   }
   if (protocol === "anthropic_messages") {
     const data = (await res.json()) as {
       content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string | null;
     };
-    return (
-      data?.content?.find((c) => c.type === "text")?.text ??
-      JSON.stringify(data)
+    return modelTurnOutcome(
+      data?.content?.find((c) => c.type === "text")?.text ?? "",
+      normalizeProviderCompletion(data.stop_reason),
     );
   }
   const data = (await res.json()) as {
     candidates?: Array<{
+      finishReason?: string;
       content?: { parts?: Array<{ text?: string; thought?: unknown }> };
     }>;
   };
-  return (
+  return modelTurnOutcome(
     data.candidates?.[0]?.content?.parts
       ?.filter((p) => !isGeminiThoughtSummaryPart(p))
       .map((p) => p.text || "")
-      .join("") ?? JSON.stringify(data)
+      .join("") ?? "",
+    normalizeProviderCompletion(data.candidates?.[0]?.finishReason),
   );
 }
 
 /**
  * Call LLM API (non-streaming)
  */
-export async function callLLM(params: ChatParams): Promise<string> {
+export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
   await preflightRequestModelCapabilities(params);
   const prepared = prepareChatRequest(params);
   const {
@@ -3716,6 +3922,14 @@ export async function callLLM(params: ChatParams): Promise<string> {
   if (authMode === "codex_auth") {
     assertCodexDirectModelAvailable(model);
   }
+  const outputPolicy = resolveAndLogOutputPolicy({
+    setting: params.outputTokenLimit,
+    model,
+    apiBase,
+    protocol: providerProtocol,
+    authMode,
+    profileOverride: params.profileOverride,
+  });
   if (
     providerProtocol === "anthropic_messages" ||
     providerProtocol === "gemini_native" ||
@@ -3727,16 +3941,7 @@ export async function callLLM(params: ChatParams): Promise<string> {
       apiKey,
       model,
       messages,
-      effectiveMaxTokens: normalizeMaxTokensForRequest({
-        value: params.maxTokens,
-        maxTokensExplicit: params.maxTokensExplicit,
-        model,
-        apiBase,
-        protocol: providerProtocol,
-        authMode,
-        profileOverride: params.profileOverride,
-      }),
-      maxTokensExplicit: params.maxTokensExplicit === true,
+      outputPolicy,
       rawTemperature: params.temperature,
       signal: params.signal,
       attachments: params.attachments,
@@ -3748,16 +3953,7 @@ export async function callLLM(params: ChatParams): Promise<string> {
   }
   assertCodexAppServerUsesNativeRuntime(authMode);
   if (authMode === "codex_auth") {
-    let output = "";
-    const streamed = await callLLMStream(
-      params,
-      (delta) => {
-        output += delta;
-      },
-      undefined,
-      undefined,
-    );
-    return output.trim() || streamed.trim() || "OK";
+    return callLLMStream(params, () => undefined, undefined, undefined);
   }
   const auth = await resolveRequestAuthState({
     authMode,
@@ -3790,15 +3986,16 @@ export async function callLLM(params: ChatParams): Promise<string> {
       })
     : [];
   const effectiveTemperature = normalizeTemperature(params.temperature);
-  const effectiveMaxTokens = normalizeMaxTokensForRequest({
-    value: params.maxTokens,
-    maxTokensExplicit: params.maxTokensExplicit,
+  const outputReserveTokens = resolveOutputReserve(
+    params.outputTokenLimit,
     model,
-    apiBase,
-    protocol: providerProtocol,
-    authMode,
-    profileOverride: params.profileOverride,
-  });
+    {
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
 
   const url = resolveProviderTransportEndpoint({
     protocol: providerProtocol,
@@ -3821,10 +4018,12 @@ export async function callLLM(params: ChatParams): Promise<string> {
     apiBase,
     providerProtocol,
     effectiveTemperature,
-    effectiveMaxTokens,
+    outputPolicy,
+    outputReserveTokens,
     stream: false,
     contextCache: params.contextCache,
     profileOverride: params.profileOverride,
+    continuationState: params.continuationState,
   });
   const res = await postWithReasoningFallback({
     url,
@@ -3837,16 +4036,18 @@ export async function callLLM(params: ChatParams): Promise<string> {
   });
 
   const data = (await res.json()) as CompletionResponse & {
+    id?: string;
+    status?: string;
+    incomplete_details?: { reason?: string } | null;
     output_text?: string;
     output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
   };
   if (useResponses) {
-    return extractResponsesOutputText(data);
+    return extractResponsesOutcome(data);
   }
-  return (
-    data?.choices?.[0]?.message?.content ??
-    data?.choices?.[0]?.text ??
-    JSON.stringify(data)
+  return modelTurnOutcome(
+    data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? "",
+    normalizeProviderCompletion(data?.choices?.[0]?.finish_reason),
   );
 }
 
@@ -3858,7 +4059,7 @@ export async function callLLMStream(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   await preflightRequestModelCapabilities(params);
   const prepared = prepareChatRequest(params);
   const {
@@ -3873,6 +4074,14 @@ export async function callLLMStream(
   if (authMode === "codex_auth") {
     assertCodexDirectModelAvailable(model);
   }
+  const outputPolicy = resolveAndLogOutputPolicy({
+    setting: params.outputTokenLimit,
+    model,
+    apiBase,
+    protocol: providerProtocol,
+    authMode,
+    profileOverride: params.profileOverride,
+  });
   if (
     providerProtocol === "anthropic_messages" ||
     providerProtocol === "gemini_native" ||
@@ -3884,16 +4093,7 @@ export async function callLLMStream(
       apiKey,
       model,
       messages,
-      effectiveMaxTokens: normalizeMaxTokensForRequest({
-        value: params.maxTokens,
-        maxTokensExplicit: params.maxTokensExplicit,
-        model,
-        apiBase,
-        protocol: providerProtocol,
-        authMode,
-        profileOverride: params.profileOverride,
-      }),
-      maxTokensExplicit: params.maxTokensExplicit === true,
+      outputPolicy,
       rawTemperature: params.temperature,
       signal: params.signal,
       onDelta,
@@ -3947,15 +4147,16 @@ export async function callLLMStream(
       })
     : [];
   const effectiveTemperature = normalizeTemperature(params.temperature);
-  const effectiveMaxTokens = normalizeMaxTokensForRequest({
-    value: params.maxTokens,
-    maxTokensExplicit: params.maxTokensExplicit,
+  const outputReserveTokens = resolveOutputReserve(
+    params.outputTokenLimit,
     model,
-    apiBase,
-    protocol: providerProtocol,
-    authMode,
-    profileOverride: params.profileOverride,
-  });
+    {
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
 
   const url = resolveProviderTransportEndpoint({
     protocol: providerProtocol,
@@ -3978,7 +4179,8 @@ export async function callLLMStream(
     apiBase,
     providerProtocol,
     effectiveTemperature,
-    effectiveMaxTokens,
+    outputPolicy,
+    outputReserveTokens,
     stream: true,
     contextCache: params.contextCache,
     profileOverride: params.profileOverride,
@@ -3997,10 +4199,13 @@ export async function callLLMStream(
   if (!res.body) {
     if (useResponses) {
       const data = (await res.json()) as {
+        id?: string;
+        status?: string;
+        incomplete_details?: { reason?: string } | null;
         output_text?: string;
         output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
       };
-      return extractResponsesOutputText(data);
+      return extractResponsesOutcome(data);
     }
     return callLLM(params);
   }
@@ -4118,11 +4323,12 @@ export async function parseStreamResponse(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
   const thoughtState: ThoughtTagState = {
     inThought: false,
     buffer: "",
@@ -4147,7 +4353,7 @@ export async function parseStreamResponse(
 
         try {
           const parsed = JSON.parse(data) as {
-            choices?: StreamChoice[];
+            choices?: Array<StreamChoice & { finish_reason?: string | null }>;
             usage?: {
               prompt_tokens?: number;
               completion_tokens?: number;
@@ -4177,6 +4383,9 @@ export async function parseStreamResponse(
             }
           }
           const choice = parsed?.choices?.[0];
+          if (typeof choice?.finish_reason === "string") {
+            completion = normalizeProviderCompletion(choice.finish_reason);
+          }
           const reasoningDelta = normalizeStreamText(
             choice?.delta?.reasoning_content ??
               choice?.delta?.reasoning ??
@@ -4225,19 +4434,20 @@ export async function parseStreamResponse(
     reader.releaseLock();
   }
 
-  return fullText;
+  return modelTurnOutcome(fullText, completion);
 }
 
-async function parseResponsesStream(
+export async function parseResponsesStream(
   body: ReadableStream<Uint8Array>,
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-): Promise<string> {
+): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
   const thoughtState: ThoughtTagState = {
     inThought: false,
     buffer: "",
@@ -4249,6 +4459,7 @@ async function parseResponsesStream(
   let sawDetailsDelta = false;
   let sawSummaryFinal = false;
   let sawDetailsFinal = false;
+  let responseId: string | undefined;
 
   const normalizeReasoningText = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -4463,6 +4674,9 @@ async function parseResponsesStream(
               text?: unknown;
             };
             response?: {
+              id?: string;
+              status?: string;
+              incomplete_details?: { reason?: string } | null;
               output_text?: unknown;
               output?: unknown;
               usage?: {
@@ -4477,6 +4691,23 @@ async function parseResponsesStream(
 
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+          if (typeof parsed.response?.id === "string") {
+            responseId = parsed.response.id;
+          }
+
+          if (eventType === "response.incomplete") {
+            completion = normalizeProviderCompletion(
+              parsed.response?.incomplete_details?.reason,
+              { responseStatus: parsed.response?.status || "incomplete" },
+            );
+            if (completion.status === "complete") {
+              completion = {
+                status: "blocked",
+                reason: "other",
+                providerReason: "incomplete",
+              };
+            }
+          }
 
           if (eventType === "response.output_text.delta" && parsed.delta) {
             emitAnswer(parsed.delta, "delta");
@@ -4656,6 +4887,7 @@ async function parseResponsesStream(
           }
 
           if (eventType === "response.completed") {
+            completion = COMPLETE_MODEL_TURN;
             emitAnswer(
               parsed.response?.output_text ??
                 extractOutputTextFromOutputs(parsed.response?.output),
@@ -4710,5 +4942,11 @@ async function parseResponsesStream(
     reader.releaseLock();
   }
 
-  return fullText;
+  return modelTurnOutcome(
+    fullText,
+    completion,
+    completion.status === "incomplete" && responseId
+      ? { responseId }
+      : undefined,
+  );
 }

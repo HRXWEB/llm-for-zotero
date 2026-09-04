@@ -1865,6 +1865,135 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("rolls back a streamed output cutoff and continues from the preserved step", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      let continuationMessages: AgentModelMessage[] = [];
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            modelSteps += 1;
+            if (modelSteps === 1) {
+              await params.onTextDelta?.("Partial scratch text");
+              return {
+                kind: "incomplete",
+                reason: "output_limit",
+                text: "Partial scratch text",
+                recoveryInstruction:
+                  "Continue without repeating prior text and emit only complete tool arguments.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Partial scratch text",
+                },
+              };
+            }
+            continuationMessages = structuredClone(params.messages);
+            return {
+              kind: "final",
+              text: "Complete answer",
+              assistantMessage: {
+                role: "assistant",
+                content: "Complete answer",
+              },
+            };
+          },
+        }),
+      });
+      const events: AgentEvent[] = [];
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1_909,
+          mode: "agent",
+          userText: "finish this task",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      assert.equal(modelSteps, 2);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.equal(outcome.text, "Complete answer");
+      }
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "message_rollback" &&
+            event.text === "Partial scratch text",
+        ),
+      );
+      assert.include(
+        JSON.stringify(continuationMessages),
+        "Continue without repeating prior text",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("keeps a repeated Custom cap authoritative and terminates with guidance", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            modelSteps += 1;
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: "",
+              recoveryInstruction: "Continue with a complete tool call.",
+              assistantMessage: { role: "assistant", content: "" },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1_910,
+          mode: "agent",
+          userText: "finish this task",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+          advanced: {
+            outputTokenLimit: { mode: "custom", tokens: 128 },
+          },
+        },
+      });
+
+      assert.equal(modelSteps, MAX_AGENT_ROUNDS);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.include(outcome.text, "128 tokens");
+        assert.include(outcome.text, "Raise the limit");
+      }
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("does not expose a local PDF path split across answer or reasoning deltas", async function () {
     const restoreDb = installMockDb();
     const rawPath = "/private/papers/stream-selected.pdf";

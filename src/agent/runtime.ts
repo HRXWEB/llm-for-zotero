@@ -2644,12 +2644,26 @@ export class AgentRuntime {
             );
           }
           if (step.kind === "incomplete") {
+            (
+              globalThis as typeof globalThis & {
+                ztoolkit?: { log?: (...args: unknown[]) => void };
+              }
+            ).ztoolkit?.log?.("LLM Agent: Recovering incomplete model step", {
+              settingMode: request.advanced?.outputTokenLimit?.mode || "auto",
+              incompleteReason: step.reason,
+              providerStopReason: step.providerReason,
+              recoveryCount: segmentRound,
+            });
             await rollbackCommittedStreamedText(stepStreamedText);
             if (segmentRound >= maxRounds) {
-              return completeRun(
-                "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.",
-                "failed",
-              );
+              const customLimit = request.advanced?.outputTokenLimit;
+              const exhaustionMessage =
+                step.reason === "provider_pause"
+                  ? "The provider repeatedly paused before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit."
+                  : customLimit?.mode === "custom"
+                    ? `The custom per-response output limit (${customLimit.tokens} tokens) repeatedly prevented the model from completing the required structured step. Raise the limit in Advanced settings, then continue; durable Plan progress was preserved.`
+                    : "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.";
+              return completeRun(exhaustionMessage, "failed");
             }
             const assistantMessage: AgentAssistantMessage =
               step.assistantMessage || {

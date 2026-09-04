@@ -183,13 +183,14 @@ describe("OpenAICompatibleAgentAdapter", function () {
         apiBase: "https://api.deepseek.com/v1",
         providerProtocol: "openai_chat_compat",
         reasoning: { provider: "deepseek", level: "xhigh" },
-        advanced: { maxTokens: 8192 },
+        advanced: { outputTokenLimit: { mode: "auto" } },
       }),
       messages: [{ role: "user", content: "Call the next plan tool." }],
       tools,
     });
 
-    assert.equal(capturedBody.max_tokens, 384_000);
+    assert.notProperty(capturedBody, "max_tokens");
+    assert.notProperty(capturedBody, "max_completion_tokens");
   });
 
   it("redacts malformed streamed tool argument JSON", async function () {

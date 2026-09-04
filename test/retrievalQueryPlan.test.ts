@@ -397,7 +397,10 @@ describe("probe reformulation", function () {
       },
       llmCall: async (params) => {
         captured = params as unknown as Record<string, unknown>;
-        return '{"readIntent":"targeted","variants":["developmental representational drift"]}';
+        return {
+          text: '{"readIntent":"targeted","variants":["developmental representational drift"]}',
+          completion: { status: "complete" as const },
+        };
       },
     });
 
@@ -406,7 +409,10 @@ describe("probe reformulation", function () {
       provider: "openai",
       level: "low",
     });
-    assert.equal(captured.maxTokens, 1_284);
+    assert.deepEqual(captured.outputTokenLimit, {
+      mode: "custom",
+      tokens: 1_284,
+    });
     assert.deepEqual(captured.profileOverride, {
       forModel: "gpt-5.4",
       limits: { outputTokens: 2_000 },
@@ -426,9 +432,13 @@ describe("probe reformulation", function () {
         calls += 1;
         // A budget-truncated first response is exactly what the second
         // attempt exists for; treating it as terminal wastes the retry.
-        return calls === 1
-          ? "   "
-          : '{"readIntent":"targeted","variants":["developmental representational drift"]}';
+        return {
+          text:
+            calls === 1
+              ? "   "
+              : '{"readIntent":"targeted","variants":["developmental representational drift"]}',
+          completion: { status: "complete" as const },
+        };
       },
     });
 
@@ -473,7 +483,7 @@ describe("callLLMWithTimeout runtime safety", function () {
           apiBase: "https://example.invalid",
           apiKey: "k",
           timeoutMs: 40,
-          llmCall: () => new Promise<string>(() => {}),
+          llmCall: () => new Promise<never>(() => {}),
         });
       } catch {
         timedOut = true;
@@ -495,11 +505,14 @@ describe("callLLMWithTimeout runtime safety", function () {
       timeoutMs: 5000,
       llmCall: async (params: { signal?: AbortSignal }) => {
         receivedSignal = params.signal;
-        return "ok";
+        return {
+          text: "ok",
+          completion: { status: "complete" as const },
+        };
       },
     });
 
-    assert.equal(result, "ok");
+    assert.equal(result.text, "ok");
     assert.isOk(receivedSignal);
   });
 });

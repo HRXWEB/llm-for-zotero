@@ -53,7 +53,7 @@ import type {
   ProjectedPaperMetadata,
   ZoteroMetadataResolver,
 } from "../../../services/zoteroMetadata/types";
-import { normalizeMaxTokensForRequest } from "../../../utils/llmClient";
+import { resolveOutputReserve } from "../../../utils/outputTokenPolicy";
 import { resolveAdaptiveReadingBudget } from "../../research/readingBudget";
 
 type PaperReadMode =
@@ -1309,15 +1309,16 @@ export function createPaperReadTool(
         const adaptiveBudget = runtimeBudget
           ? resolveAdaptiveReadingBudget({
               ...runtimeBudget,
-              outputReserveTokens: normalizeMaxTokensForRequest({
-                value: context.request.advanced?.maxTokens,
-                maxTokensExplicit: context.request.advanced?.maxTokensExplicit,
-                model: context.request.model || context.modelName,
-                apiBase: context.request.apiBase,
-                protocol: context.request.providerProtocol,
-                authMode: context.request.authMode,
-                profileOverride: context.request.advanced?.profileOverride,
-              }),
+              outputReserveTokens: resolveOutputReserve(
+                context.request.advanced?.outputTokenLimit,
+                context.request.model || context.modelName,
+                {
+                  apiBase: context.request.apiBase,
+                  protocol: context.request.providerProtocol,
+                  authMode: context.request.authMode,
+                  profileOverride: context.request.advanced?.profileOverride,
+                },
+              ),
               paperCount: targets.length,
             })
           : undefined;

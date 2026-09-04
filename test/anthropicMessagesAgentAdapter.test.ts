@@ -121,6 +121,114 @@ describe("AnthropicMessagesAgentAdapter", function () {
     assert.deepEqual(step.calls[0].arguments, { query: "methods" });
   });
 
+  it("recovers from max_tokens without exposing a truncated tool call", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          body: undefined,
+          json: async () => ({
+            content: [
+              { type: "text", text: "Partial analysis" },
+              {
+                type: "tool_use",
+                id: "truncated-call",
+                name: "read_paper",
+                input: { query: "unfinished" },
+              },
+            ],
+            stop_reason: "max_tokens",
+          }),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await new AnthropicMessagesAgentAdapter().runStep({
+      request: makeRequest(),
+      messages: [{ role: "user", content: "Search methods" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
+    assert.equal(step.text, "Partial analysis");
+    assert.notProperty(step, "calls");
+  });
+
+  it("keeps Anthropic provider pauses distinct from output limits", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          body: undefined,
+          json: async () => ({ content: [], stop_reason: "pause_turn" }),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await new AnthropicMessagesAgentAdapter().runStep({
+      request: makeRequest(),
+      messages: [{ role: "user", content: "Continue" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind === "incomplete") {
+      assert.equal(step.reason, "provider_pause");
+    }
+  });
+
+  it("reports Anthropic context exhaustion instead of retrying it as an output cutoff", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          body: undefined,
+          json: async () => ({
+            content: [],
+            stop_reason: "model_context_window_exceeded",
+          }),
+          text: async () => "",
+        });
+      },
+    };
+
+    try {
+      await new AnthropicMessagesAgentAdapter().runStep({
+        request: makeRequest(),
+        messages: [{ role: "user", content: "Continue" }],
+        tools,
+      });
+      assert.fail("expected context exhaustion to stop the step");
+    } catch (error) {
+      assert.include(String(error), "context window was exhausted");
+    }
+  });
+
   it("serializes the real paper_read schema with a portable object root", async function () {
     const paperRead = createPaperReadTool(
       {} as never,
@@ -1007,7 +1115,9 @@ describe("AnthropicMessagesAgentAdapter", function () {
         model: "deepseek-v4-pro",
         apiBase: "https://api.deepseek.com/anthropic",
         reasoning: { provider: "deepseek", level: "xhigh" },
-        advanced: { maxTokens: 384000 },
+        advanced: {
+          outputTokenLimit: { mode: "custom", tokens: 384000 },
+        },
       }),
       messages: [{ role: "user", content: "Think" }],
       tools,
@@ -1073,7 +1183,10 @@ describe("AnthropicMessagesAgentAdapter", function () {
         model: "claude-sonnet-4-6",
         apiBase: "https://third-party.example/v1",
         reasoning: { provider: "anthropic", level: "high" },
-        advanced: { temperature: 0.4, maxTokens: 4096 },
+        advanced: {
+          temperature: 0.4,
+          outputTokenLimit: { mode: "custom", tokens: 4096 },
+        },
       }),
       messages: [{ role: "user", content: "Think" }],
       tools,

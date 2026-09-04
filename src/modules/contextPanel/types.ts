@@ -117,6 +117,16 @@ export interface Message {
    * normal `text` column, but this flag is not stored across restarts.
    */
   interrupted?: boolean;
+  /** Durable terminal state for provider-normalized direct-chat responses. */
+  completionStatus?: "complete" | "incomplete" | "blocked";
+  completionReason?:
+    | "output_limit"
+    | "context_limit"
+    | "provider_pause"
+    | "safety"
+    | "refusal"
+    | "malformed_tool_call"
+    | "other";
   webchatRunState?: "done" | "incomplete" | "error";
   webchatCompletionReason?:
     | "settled"

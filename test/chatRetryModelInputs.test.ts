@@ -35,8 +35,7 @@ describe("chat retry model inputs", function () {
       reasoning: { provider: "openai", level: "high" },
       advanced: {
         temperature: 1.7,
-        maxTokens: 99_999,
-        maxTokensExplicit: true,
+        outputTokenLimit: { mode: "custom", tokens: 99_999 },
         inputTokenCap: 123,
         inputMode: "text_only",
         profileOverride: { extraBody: { top_k: 10 } },

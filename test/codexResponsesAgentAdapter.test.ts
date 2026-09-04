@@ -289,6 +289,67 @@ describe("CodexResponsesAgentAdapter", function () {
     assert.equal(step.text, "Final answer.");
   });
 
+  it("treats Responses incomplete output as recovery before tool execution", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          body: undefined,
+          json: async () => ({
+            id: "resp_incomplete",
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            output: [
+              {
+                type: "message",
+                content: [{ type: "output_text", text: "Partial answer" }],
+              },
+              {
+                type: "function_call",
+                call_id: "truncated-call",
+                name: "library_search",
+                arguments: '{"query":"unfinished"}',
+              },
+            ],
+          }),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await new OpenAIResponsesAgentAdapter().runStep({
+      request: makeRequest({
+        apiBase: "https://api.openai.com/v1/responses",
+        apiKey: "test",
+        authMode: "api_key",
+        providerProtocol: "responses_api",
+      }),
+      messages: [{ role: "user", content: "Search" }],
+      tools: [
+        {
+          name: "library_search",
+          description: "search",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+      ],
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
+    assert.equal(step.text, "Partial answer");
+    assert.notProperty(step, "calls");
+  });
+
   it("preserves a complete native responses step for runtime overflow handling", function () {
     const step = normalizeStepFromPayload({
       id: "resp_789",
@@ -480,7 +541,7 @@ describe("CodexResponsesAgentAdapter", function () {
         },
         advanced: {
           temperature: 1.7,
-          maxTokens: 123,
+          outputTokenLimit: { mode: "custom", tokens: 123 },
           profileOverride: {
             forModel: "gpt-codex",
             extraBody: { custom_advanced_value: true },

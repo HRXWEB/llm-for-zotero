@@ -16,7 +16,11 @@ import type {
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
-import { resolveAgentOutputTokenBudget } from "./limits";
+import { resolveAgentOutputRequestPolicy } from "./limits";
+import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+} from "./completion";
 import {
   buildResponsesContinuationInput,
   buildResponsesInitialInput,
@@ -112,6 +116,10 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       modelName: request.model,
       initialReasoning: request.reasoning,
       buildPayload: (reasoningOverride) => {
+        const outputPolicy = resolveAgentOutputRequestPolicy(
+          request,
+          "responses_api",
+        );
         const reasoningPayload = buildReasoningPayload(
           reasoningOverride,
           true,
@@ -130,10 +138,9 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
           tool_choice: "auto",
           store: false,
           stream: true,
-          max_output_tokens: resolveAgentOutputTokenBudget(
-            request,
-            "responses_api",
-          ),
+          ...(outputPolicy.mode === "numeric"
+            ? { max_output_tokens: outputPolicy.tokens }
+            : {}),
           ...reasoningPayload.extra,
           ...(reasoningPayload.omitTemperature
             ? {}
@@ -156,6 +163,35 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       : normalizeResponsesStepFromPayload(
           (await response.json()) as ResponsesPayload,
         );
+    const recoveryReason = resolveAgentRecoverableCompletion(
+      normalized.completion,
+    );
+    if (recoveryReason) {
+      this.conversationItems = [
+        ...inputItems,
+        ...normalized.outputItems.filter((item) => {
+          if (!item || typeof item !== "object") return true;
+          const type = String(
+            (item as { type?: unknown }).type ?? "",
+          ).toLowerCase();
+          return type !== "function_call" && type !== "tool_call";
+        }),
+      ];
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: normalized.completion.providerReason,
+        text: normalized.text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "tool call",
+        ),
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+        },
+      };
+    }
     this.conversationItems = [...inputItems, ...normalized.outputItems];
     if (normalized.toolCalls.length) {
       return {

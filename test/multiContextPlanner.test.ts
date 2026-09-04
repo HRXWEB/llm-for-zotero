@@ -508,7 +508,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 2048,
       },
     });
@@ -547,7 +547,10 @@ describe("multiContextPlanner", function () {
       historyPaperContexts: [],
       history: [],
       model: "gpt-4o-mini",
-      advanced: { inputTokenCap: 2048, maxTokens: 256 },
+      advanced: {
+        inputTokenCap: 2048,
+        outputTokenLimit: { mode: "custom", tokens: 256 },
+      },
       queryPlan: buildRetrievalQueryPlan({
         query: "请先通读整篇论文，再回答。",
         readIntent: "full-once",
@@ -591,7 +594,10 @@ describe("multiContextPlanner", function () {
       historyPaperContexts: [],
       history: [],
       model: "gpt-4o-mini",
-      advanced: { inputTokenCap: 4096, maxTokens: 256 },
+      advanced: {
+        inputTokenCap: 4096,
+        outputTokenLimit: { mode: "custom", tokens: 256 },
+      },
       queryPlan: buildRetrievalQueryPlan({
         query: "Read the complete paper.",
         readIntent: "full-once",
@@ -639,7 +645,10 @@ describe("multiContextPlanner", function () {
       historyPaperContexts: [],
       history: [],
       model: "gpt-4o-mini",
-      advanced: { inputTokenCap: 4096, maxTokens: 256 },
+      advanced: {
+        inputTokenCap: 4096,
+        outputTokenLimit: { mode: "custom", tokens: 256 },
+      },
       queryPlan: buildRetrievalQueryPlan({
         query: "Read the complete second selected paper.",
         readIntent: "full-once",
@@ -677,7 +686,10 @@ describe("multiContextPlanner", function () {
         historyPaperContexts: [],
         history: [],
         model: "gpt-4o-mini",
-        advanced: { inputTokenCap: 4096, maxTokens: 256 },
+        advanced: {
+          inputTokenCap: 4096,
+          outputTokenLimit: { mode: "custom", tokens: 256 },
+        },
         queryPlan: buildRetrievalQueryPlan({
           query: "Read the full paper.",
           readIntent: "full-once",
@@ -1030,7 +1042,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 1200,
+        outputTokenLimit: { mode: "custom", tokens: 1200 },
         inputTokenCap: 8000,
       },
     });
@@ -1062,7 +1074,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-5.4",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 1_000_000,
       },
     });
@@ -1118,7 +1130,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 8_000,
       },
     });
@@ -1202,7 +1214,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 3_000,
       },
     });
@@ -1269,7 +1281,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 2_000,
       },
     });
@@ -1339,7 +1351,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 1_600,
       },
     });
@@ -1401,7 +1413,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 1,
       },
     });
@@ -1465,7 +1477,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 12_000,
       },
     });
@@ -1530,7 +1542,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 8_000,
       },
     });
@@ -1593,7 +1605,7 @@ describe("multiContextPlanner", function () {
       model: "gpt-4o-mini",
       advanced: {
         temperature: 0.2,
-        maxTokens: 512,
+        outputTokenLimit: { mode: "custom", tokens: 512 },
         inputTokenCap: 8_000,
       },
     });

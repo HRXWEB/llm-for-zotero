@@ -1,11 +1,15 @@
 import {
-  normalizeMaxTokensForRequest,
   parseStatusFromErrorMessage,
+  requireCompleteModelText,
   type ChatParams,
   type ReasoningConfig,
 } from "./llmClient";
+import { resolveOutputRequestPolicy } from "./outputTokenPolicy";
 import type { ModelProviderAuthMode } from "./modelProviders";
-import type { ProviderProtocol } from "./providerProtocol";
+import {
+  inferLegacyProviderProtocol,
+  type ProviderProtocol,
+} from "./providerProtocol";
 import {
   getModelCapabilities,
   type ModelCapabilityProvider,
@@ -14,6 +18,7 @@ import {
   type ReasoningCapabilityOption,
 } from "../modelCapabilities";
 import type { ReasoningLevel, ReasoningProvider } from "./reasoningProfiles";
+import type { ModelTurnOutcome } from "../shared/llm";
 import { getGeminiReasoningProfileForModel } from "./reasoningProfiles";
 import { callLLMWithTimeout } from "./llmCallTimeout";
 
@@ -89,7 +94,7 @@ export type UtilityLLMParams = {
   timeoutMs: number;
   systemMessages?: string[];
   /** Test seam: replaces the actual model call. */
-  llmCall?: (chatParams: ChatParams) => Promise<string>;
+  llmCall?: (chatParams: ChatParams) => Promise<ModelTurnOutcome>;
 };
 
 type UtilityReasoningPlan = {
@@ -245,7 +250,12 @@ function buildReasoningPlan(params: {
   const capabilities = getModelCapabilities({
     model: params.model,
     apiBase: params.apiBase,
-    protocol: params.providerProtocol,
+    protocol:
+      params.providerProtocol ||
+      inferLegacyProviderProtocol({
+        authMode: params.authMode,
+        apiBase: params.apiBase,
+      }),
     authMode: params.authMode,
     profileOverride: params.profileOverride,
   });
@@ -363,14 +373,21 @@ export async function callUtilityLLM(
 
   const jsonBudget = Math.max(1, Math.floor(params.jsonBudget));
   const requiredBudget = jsonBudget + plan.reserveTokens;
-  const maxTokens = normalizeMaxTokensForRequest({
-    value: requiredBudget,
+  const outputPolicy = resolveOutputRequestPolicy({
+    setting: { mode: "custom", tokens: requiredBudget },
     model,
     apiBase: params.apiBase,
-    protocol: params.providerProtocol,
+    protocol:
+      params.providerProtocol ||
+      inferLegacyProviderProtocol({
+        authMode: params.authMode,
+        apiBase: params.apiBase,
+      }),
     authMode: params.authMode,
     profileOverride: params.profileOverride,
   });
+  const maxTokens =
+    outputPolicy.mode === "numeric" ? outputPolicy.tokens : requiredBudget;
   if (maxTokens < requiredBudget) {
     return {
       ok: false,
@@ -380,7 +397,7 @@ export async function callUtilityLLM(
   }
 
   try {
-    const text = await callLLMWithTimeout({
+    const outcome = await callLLMWithTimeout({
       prompt: params.prompt,
       model,
       apiBase: params.apiBase,
@@ -390,12 +407,16 @@ export async function callUtilityLLM(
       profileOverride: params.profileOverride,
       reasoning: plan.reasoning,
       temperature: params.temperature ?? 0,
-      maxTokens,
+      outputTokenLimit: { mode: "custom", tokens: maxTokens },
       parentSignal: params.signal,
       timeoutMs: params.timeoutMs,
       systemMessages: params.systemMessages,
       llmCall: params.llmCall,
     });
+    const text =
+      outcome.completion.status === "complete"
+        ? outcome.text
+        : requireCompleteModelText(outcome, "Structured utility call");
     if (!text.trim()) {
       return {
         ok: false,

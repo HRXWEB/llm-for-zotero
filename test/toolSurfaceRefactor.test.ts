@@ -841,7 +841,9 @@ describe("semantic tool surface", function () {
           contextWindowTokens: 1_000_000,
           usedContextTokens: 100_000,
         },
-        advanced: { maxTokens: 16_000, maxTokensExplicit: true },
+        advanced: {
+          outputTokenLimit: { mode: "custom", tokens: 16_000 },
+        },
       },
     })) as {
       results: unknown[];

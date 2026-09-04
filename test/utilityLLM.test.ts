@@ -4,6 +4,11 @@ import {
   resolveUtilityReasoningPlan,
 } from "../src/utils/utilityLLM";
 
+const completeOutcome = (text: string) => ({
+  text,
+  completion: { status: "complete" as const },
+});
+
 describe("utility LLM policy", function () {
   function capture(params: {
     model: string;
@@ -28,7 +33,7 @@ describe("utility LLM policy", function () {
       timeoutMs: 10_000,
       llmCall: async (chatParams) => {
         request = chatParams as unknown as Record<string, unknown>;
-        return "{}";
+        return completeOutcome("{}");
       },
     }).then((result) => ({ result, request }));
   }
@@ -45,7 +50,10 @@ describe("utility LLM policy", function () {
       provider: "openai",
       level: "low",
     });
-    assert.equal(captured.request.maxTokens, 1_224);
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 1_224,
+    });
   });
 
   it("selects the lowest supported effort for GPT-5 Pro variants with a reserve", async function () {
@@ -64,12 +72,18 @@ describe("utility LLM policy", function () {
       provider: "openai",
       level: "medium",
     });
-    assert.equal(pro.request.maxTokens, 2_248);
+    assert.deepEqual(pro.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 2_248,
+    });
     assert.deepEqual(highOnly.request.reasoning, {
       provider: "openai",
       level: "high",
     });
-    assert.equal(highOnly.request.maxTokens, 4_296);
+    assert.deepEqual(highOnly.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 4_296,
+    });
   });
 
   it("sends no reasoning and reserves nothing for a pre-reasoning OpenAI model", async function () {
@@ -83,7 +97,10 @@ describe("utility LLM policy", function () {
     // Forcing `low` here would 400 on gpt-4o, cost a recovery round trip, and
     // reserve 1024 tokens the model never spends.
     assert.isUndefined(captured.request.reasoning);
-    assert.equal(captured.request.maxTokens, 200);
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 200,
+    });
     assert.equal(captured.request.temperature, 0);
   });
 
@@ -96,7 +113,10 @@ describe("utility LLM policy", function () {
 
     assert.isTrue(captured.result.ok);
     assert.isUndefined(captured.request.reasoning);
-    assert.equal(captured.request.maxTokens, 200);
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 200,
+    });
   });
 
   it("uses disabled Gemini thinking when the model supports it and reserves numeric thinking otherwise", async function () {
@@ -115,12 +135,18 @@ describe("utility LLM policy", function () {
       provider: "gemini",
       level: "minimal",
     });
-    assert.equal(flash.request.maxTokens, 200);
+    assert.deepEqual(flash.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 200,
+    });
     assert.deepEqual(pro.request.reasoning, {
       provider: "gemini",
       level: "low",
     });
-    assert.equal(pro.request.maxTokens, 328);
+    assert.deepEqual(pro.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 328,
+    });
   });
 
   it("does not send a utility request when the matching profile cap cannot fit its reserve", async function () {
@@ -139,7 +165,7 @@ describe("utility LLM policy", function () {
       timeoutMs: 10_000,
       llmCall: async () => {
         calls += 1;
-        return "{}";
+        return completeOutcome("{}");
       },
     });
 
@@ -166,7 +192,10 @@ describe("utility LLM policy", function () {
     });
 
     assert.isTrue(captured.result.ok);
-    assert.equal(captured.request.maxTokens, 1_224);
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 1_224,
+    });
   });
 
   it("applies a profile-authored disabled control", async function () {
@@ -232,7 +261,7 @@ describe("utility LLM policy", function () {
       providerProtocol: "openai_chat_compat",
       jsonBudget: 200,
       timeoutMs: 10_000,
-      llmCall: async () => "   ",
+      llmCall: async () => completeOutcome("   "),
     });
 
     assert.isFalse(result.ok);

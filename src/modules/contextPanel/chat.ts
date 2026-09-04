@@ -80,7 +80,6 @@ import { formatCodexZoteroMcpError } from "../../codexAppServer/mcpErrors";
 import { preflightClaudeBridgeLocalPdfCapability } from "../../agent/externalBackendBridge";
 import { validateLocalPdfDocumentBatch } from "../../agent/context/localDocumentBatch";
 import {
-  callLLMStream,
   type ChatParams,
   ChatFileAttachment,
   ChatMessage,
@@ -92,7 +91,14 @@ import {
   ReasoningLevel as LLMReasoningLevel,
   UsageStats,
   checkEmbeddingAvailability,
+  type ModelTurnOutcome,
 } from "../../utils/llmClient";
+import {
+  appendContinuationText,
+  callDirectChatTurnWithRecovery,
+  EMPTY_OUTPUT_LIMIT_MESSAGE,
+  resolveEmptyModelOutcomeMessage,
+} from "./directChatCompletion";
 import {
   getModelCapabilities,
   type ModelProfileOverride,
@@ -139,6 +145,7 @@ export {
   isScrollUpdateSuspended,
   withScrollGuard,
 } from "./chatScrollSnapshots";
+
 import {
   createBlockStreamCoalescer,
   type BlockStreamCoalescer,
@@ -2368,6 +2375,8 @@ function toPanelMessage(message: StoredChatMessage): Message {
     reasoningOpen: isReasoningExpandedByDefault(),
     compactMarker: Boolean((message as StoredChatMessage).compactMarker),
     interrupted: message.interrupted || undefined,
+    completionStatus: message.completionStatus,
+    completionReason: message.completionReason,
     webchatRunState: message.webchatRunState,
     webchatCompletionReason: message.webchatCompletionReason,
     quoteCitations: message.quoteCitations,
@@ -6181,6 +6190,8 @@ type AssistantMessageSnapshot = Pick<
   | "reasoningDetails"
   | "reasoningOpen"
   | "interrupted"
+  | "completionStatus"
+  | "completionReason"
   | "webchatRunState"
   | "webchatCompletionReason"
   | "quoteCitations"
@@ -6222,6 +6233,8 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
     reasoningDetails: message.reasoningDetails,
     reasoningOpen: message.reasoningOpen,
     interrupted: message.interrupted,
+    completionStatus: message.completionStatus,
+    completionReason: message.completionReason,
     webchatRunState: message.webchatRunState,
     webchatCompletionReason: message.webchatCompletionReason,
     quoteCitations: message.quoteCitations
@@ -6260,6 +6273,8 @@ function restoreAssistantSnapshot(
   message.reasoningDetails = snapshot.reasoningDetails;
   message.reasoningOpen = snapshot.reasoningOpen;
   message.interrupted = snapshot.interrupted;
+  message.completionStatus = snapshot.completionStatus;
+  message.completionReason = snapshot.completionReason;
   message.webchatRunState = snapshot.webchatRunState;
   message.webchatCompletionReason = snapshot.webchatCompletionReason;
   message.quoteCitations = snapshot.quoteCitations
@@ -6295,6 +6310,8 @@ function finalizeCancelledAssistantMessage(
   message.pendingAgentTraceEvents = undefined;
   message.streaming = false;
   message.interrupted = undefined;
+  message.completionStatus = undefined;
+  message.completionReason = undefined;
   message.webchatRunState = undefined;
   message.webchatCompletionReason = null;
 }
@@ -8390,6 +8407,7 @@ export async function retryLatestAssistantResponse(
   modelAttachmentsOverride?: ChatAttachment[],
   requestId?: number,
   onProviderDispatch?: () => void,
+  retryOptions?: { continueIncomplete?: boolean },
 ) {
   const ownershipLease = capturePanelOperationLease(body);
   if (
@@ -8494,13 +8512,20 @@ export async function retryLatestAssistantResponse(
   );
   const assistantMessage = retryPair.assistantMessage;
   const assistantSnapshot = takeAssistantSnapshot(assistantMessage);
+  const continueIncomplete = Boolean(
+    retryOptions?.continueIncomplete &&
+    assistantSnapshot.completionStatus === "incomplete" &&
+    assistantSnapshot.completionReason === "output_limit",
+  );
   // The retry rewrites (and later persists) the paired user row's model
   // identity and rebuilt contexts before any output exists. A failed retry
   // that restores the previous answer must roll the user row back with it,
   // or the stored turn pairs the old answer with the failed retry's metadata.
   const userSnapshot = takeRetryUserSnapshot(retryPair.userMessage);
-  assistantMessage.text = "";
+  assistantMessage.text = continueIncomplete ? assistantSnapshot.text : "";
   assistantMessage.interrupted = undefined;
+  assistantMessage.completionStatus = undefined;
+  assistantMessage.completionReason = undefined;
   assistantMessage.reasoningSummary = undefined;
   assistantMessage.reasoningDetails = undefined;
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
@@ -8571,7 +8596,10 @@ export async function retryLatestAssistantResponse(
     return;
   }
 
-  const historyForLLM = history.slice(0, retryPair.userIndex);
+  const historyForLLM = history.slice(
+    0,
+    continueIncomplete ? retryPair.userIndex + 2 : retryPair.userIndex,
+  );
   const retrySelectedTextContexts = synthesizeSelectedTextContexts({
     selectedTextContexts: retryPair.userMessage.selectedTextContexts,
     selectedTexts: retryPair.userMessage.selectedTexts,
@@ -8613,6 +8641,9 @@ export async function retryLatestAssistantResponse(
     // wants inline anchor context in the rebuilt payload.
     includeAnchorContext: false,
   });
+  const dispatchQuestion = continueIncomplete
+    ? "Continue from the incomplete response. Resume exactly where it stopped, do not repeat prior text, and finish the answer."
+    : question;
   retryPair.userMessage.paperContexts = paperContexts.length
     ? paperContexts
     : undefined;
@@ -8912,7 +8943,7 @@ export async function retryLatestAssistantResponse(
       ? [...(retryScreenshotImages || []), ...(contextPlan.modelImages || [])]
       : [];
     const requestParams = {
-      prompt: question,
+      prompt: dispatchQuestion,
       context: combinedContext,
       history: llmHistory,
       signal: getAbortController(conversationKey)?.signal,
@@ -8925,9 +8956,7 @@ export async function retryLatestAssistantResponse(
       providerProtocol: effectiveRequestConfig.providerProtocol,
       reasoning: effectiveRequestConfig.reasoning,
       temperature: effectiveRequestConfig.advanced?.temperature,
-      maxTokens: effectiveRequestConfig.advanced?.maxTokens,
-      maxTokensExplicit:
-        effectiveRequestConfig.advanced?.maxTokensExplicit === true,
+      outputTokenLimit: effectiveRequestConfig.advanced?.outputTokenLimit,
       inputTokenCap: effectiveRequestConfig.advanced?.inputTokenCap,
       profileOverride: effectiveRequestConfig.advanced?.profileOverride,
       inputMode: effectiveRequestConfig.advanced?.inputMode,
@@ -9005,7 +9034,7 @@ export async function retryLatestAssistantResponse(
       )
     )
       return;
-    const answer = isCodexNativeTurn
+    const modelOutcome: ModelTurnOutcome = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
             scope: codexScope!,
@@ -9055,17 +9084,20 @@ export async function retryLatestAssistantResponse(
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
-          return result.text;
+          return {
+            text: result.text,
+            completion: { status: "complete" as const },
+          };
         })()
-      : await callLLMStream(
-          {
+      : await callDirectChatTurnWithRecovery({
+          request: {
             ...requestParams,
             systemMessages,
           },
-          handleDelta,
-          handleReasoning,
-          handleUsage,
-        );
+          onDelta: handleDelta,
+          onReasoning: handleReasoning,
+          onUsage: handleUsage,
+        });
 
     if (
       getCancelledRequestId(conversationKey) >= thisRequestId ||
@@ -9079,12 +9111,30 @@ export async function retryLatestAssistantResponse(
     const hasGeneratedOutput = normalizeGeneratedChatImages(
       assistantMessage.generatedImages,
     ).length;
+    const outputLimited =
+      modelOutcome.completion.status === "incomplete" &&
+      modelOutcome.completion.reason === "output_limit";
+    const responseText =
+      sanitizeText(modelOutcome.text) ||
+      responseStreamCoalescer?.getFullText() ||
+      "";
+    const visibleResponseText = continueIncomplete
+      ? appendContinuationText(assistantSnapshot.text, responseText)
+      : responseText;
     assistantMessage.text =
       (assistantMessage.documentId || assistantMessage.planDocumentId
         ? assistantMessage.text
-        : sanitizeText(answer)) ||
-      responseStreamCoalescer?.getFullText() ||
-      (hasGeneratedOutput ? "" : "No response.");
+        : visibleResponseText) ||
+      (hasGeneratedOutput
+        ? ""
+        : outputLimited
+          ? EMPTY_OUTPUT_LIMIT_MESSAGE
+          : resolveEmptyModelOutcomeMessage(modelOutcome.completion));
+    assistantMessage.completionStatus = modelOutcome.completion.status;
+    assistantMessage.completionReason =
+      "reason" in modelOutcome.completion
+        ? modelOutcome.completion.reason
+        : undefined;
     await finalizeAssistantMessageQuoteCitations(assistantMessage, {
       pairedUserMessage: retryPair.userMessage,
       paperContexts: contextPlan.paperContexts,
@@ -9121,6 +9171,8 @@ export async function retryLatestAssistantResponse(
         documentId: assistantMessage.documentId,
         planDocumentId: assistantMessage.planDocumentId,
         interrupted: assistantMessage.interrupted,
+        completionStatus: assistantMessage.completionStatus,
+        completionReason: assistantMessage.completionReason,
         modelName: assistantMessage.modelName,
         modelEntryId: assistantMessage.modelEntryId,
         modelProviderLabel: assistantMessage.modelProviderLabel,
@@ -11486,6 +11538,8 @@ export async function sendQuestion(
         modelEntryId: assistantMessage.modelEntryId,
         modelProviderLabel: assistantMessage.modelProviderLabel,
         interrupted: assistantMessage.interrupted,
+        completionStatus: assistantMessage.completionStatus,
+        completionReason: assistantMessage.completionReason,
         reasoningSummary: assistantMessage.reasoningSummary,
         reasoningDetails: assistantMessage.reasoningDetails,
         webchatRunState: assistantMessage.webchatRunState,
@@ -11801,9 +11855,7 @@ export async function sendQuestion(
       providerProtocol: effectiveRequestConfig.providerProtocol,
       reasoning: effectiveRequestConfig.reasoning,
       temperature: effectiveRequestConfig.advanced?.temperature,
-      maxTokens: effectiveRequestConfig.advanced?.maxTokens,
-      maxTokensExplicit:
-        effectiveRequestConfig.advanced?.maxTokensExplicit === true,
+      outputTokenLimit: effectiveRequestConfig.advanced?.outputTokenLimit,
       inputTokenCap: effectiveRequestConfig.advanced?.inputTokenCap,
       profileOverride: effectiveRequestConfig.advanced?.profileOverride,
       inputMode: effectiveRequestConfig.advanced?.inputMode,
@@ -11905,7 +11957,7 @@ export async function sendQuestion(
     ) {
       return;
     }
-    const answer = isCodexNativeTurn
+    const modelOutcome: ModelTurnOutcome = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
             scope: codexScope!,
@@ -11959,21 +12011,24 @@ export async function sendQuestion(
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
-          return result.text;
+          return {
+            text: result.text,
+            completion: { status: "complete" as const },
+          };
         })()
-      : await callLLMStream(
-          {
+      : await callDirectChatTurnWithRecovery({
+          request: {
             ...requestParams,
             systemMessages,
           },
-          handleDelta,
-          handleReasoning,
-          handleUsage,
-        );
+          onDelta: handleDelta,
+          onReasoning: handleReasoning,
+          onUsage: handleUsage,
+        });
     if (isCodexNativeTurn) {
       await finalizeCodexPlanExecution({
         planContext: opts.planContext,
-        answer,
+        answer: modelOutcome.text,
         assistantMessage,
         trace: codexActivityTrace,
       });
@@ -11991,10 +12046,22 @@ export async function sendQuestion(
     const hasGeneratedOutput = normalizeGeneratedChatImages(
       assistantMessage.generatedImages,
     ).length;
+    const outputLimited =
+      modelOutcome.completion.status === "incomplete" &&
+      modelOutcome.completion.reason === "output_limit";
     assistantMessage.text =
-      sanitizeText(answer) ||
+      sanitizeText(modelOutcome.text) ||
       assistantMessage.text ||
-      (hasGeneratedOutput ? "" : "No response.");
+      (hasGeneratedOutput
+        ? ""
+        : outputLimited
+          ? EMPTY_OUTPUT_LIMIT_MESSAGE
+          : resolveEmptyModelOutcomeMessage(modelOutcome.completion));
+    assistantMessage.completionStatus = modelOutcome.completion.status;
+    assistantMessage.completionReason =
+      "reason" in modelOutcome.completion
+        ? modelOutcome.completion.reason
+        : undefined;
     await finalizeAssistantMessageQuoteCitations(assistantMessage, {
       pairedUserMessage: userMessage,
       paperContexts: contextPlan.paperContexts,
@@ -13800,6 +13867,75 @@ export function refreshChat(
       interruptedRow.appendChild(note);
     }
 
+    let outputLimitRow: HTMLDivElement | null = null;
+    if (
+      !isUser &&
+      msg.completionStatus === "incomplete" &&
+      msg.completionReason === "output_limit"
+    ) {
+      outputLimitRow = doc.createElement("div") as HTMLDivElement;
+      outputLimitRow.className = "llm-message-interrupted-row";
+      const note = doc.createElement("span") as HTMLSpanElement;
+      note.className = "llm-message-interrupted-note";
+      note.textContent = "⚠ Response reached the model’s output limit";
+      outputLimitRow.appendChild(note);
+
+      const originalEntry = getAvailableModelEntries().find(
+        (entry) =>
+          (msg.modelEntryId && entry.entryId === msg.modelEntryId) ||
+          (!msg.modelEntryId &&
+            entry.model === msg.modelName &&
+            entry.providerLabel === msg.modelProviderLabel),
+      );
+      const continueButton = doc.createElementNS(
+        HTML_NS,
+        "button",
+      ) as HTMLButtonElement;
+      continueButton.type = "button";
+      continueButton.className =
+        "llm-message-action llm-message-output-limit-continue";
+      continueButton.textContent = "Continue";
+      const isLatestIncomplete = index === latestAssistantIndex;
+      continueButton.disabled =
+        !item || !originalEntry || !conversationIsIdle || !isLatestIncomplete;
+      continueButton.title = !isLatestIncomplete
+        ? "Only the latest response can be continued"
+        : originalEntry
+          ? "Continue with the original model profile"
+          : "The original model profile is no longer available";
+      continueButton.addEventListener("click", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!item || !originalEntry || continueButton.disabled) return;
+        const continueReasoning = getSelectedReasoningForItem(
+          item.id,
+          originalEntry.model,
+          originalEntry.apiBase,
+          originalEntry.providerProtocol,
+          originalEntry.advanced?.profileOverride,
+        );
+        void retryLatestAssistantResponse(
+          body,
+          item,
+          originalEntry.model,
+          originalEntry.apiBase,
+          originalEntry.apiKey,
+          originalEntry.authMode,
+          originalEntry.providerProtocol,
+          originalEntry.entryId,
+          originalEntry.providerLabel,
+          continueReasoning,
+          originalEntry.advanced,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { continueIncomplete: true },
+        );
+      });
+      outputLimitRow.appendChild(continueButton);
+    }
+
     if (isUser && inlineEditEl) {
       wrapper.appendChild(inlineEditEl);
     } else {
@@ -13808,6 +13944,7 @@ export function refreshChat(
     wrapper.appendChild(meta);
     if (webchatStatusRow) wrapper.appendChild(webchatStatusRow);
     if (interruptedRow) wrapper.appendChild(interruptedRow);
+    if (outputLimitRow) wrapper.appendChild(outputLimitRow);
     const existingTargetedWrapper = targetedMessageWrappers.get(msg);
     if (useTargetedRerender && existingTargetedWrapper) {
       existingTargetedWrapper.replaceWith(wrapper);

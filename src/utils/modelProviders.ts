@@ -1,5 +1,5 @@
 import { config } from "../../package.json";
-import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from "./llmDefaults";
+import { DEFAULT_TEMPERATURE } from "./llmDefaults";
 import {
   normalizeMaxTokens,
   normalizeOptionalInputTokenCap,
@@ -13,7 +13,7 @@ import {
 } from "./providerProtocol";
 import { detectProviderPreset, getProviderPreset } from "./providerPresets";
 import type { ProviderPresetId } from "./providerPresets";
-import type { ModelInputMode } from "../shared/types";
+import type { ModelInputMode, OutputTokenLimitSetting } from "../shared/types";
 import {
   CATALOG_EXCLUDED_AUTH_MODES,
   refreshConfiguredModelCatalogs,
@@ -35,9 +35,7 @@ export type LegacyModelSlotKey =
 
 export type AdvancedModelConfig = {
   temperature: number;
-  maxTokens: number;
-  /** Distinguishes an untouched default from an explicit equal-valued choice. */
-  maxTokensExplicit?: boolean;
+  outputTokenLimit: OutputTokenLimitSetting;
   inputTokenCap?: number;
   inputMode?: ModelInputMode;
   /**
@@ -153,8 +151,7 @@ export type LegacyMigrationResult = {
 
 type AdvancedModelConfigInput = {
   temperature?: number | string | null;
-  maxTokens?: number | string | null;
-  maxTokensExplicit?: boolean;
+  outputTokenLimit?: unknown;
   inputTokenCap?: number | string | null;
   inputMode?: unknown;
   profileOverride?: unknown;
@@ -168,10 +165,11 @@ type ZoteroPrefsAPI = {
 const MODEL_PROVIDER_GROUPS_PREF_KEY = "modelProviderGroups";
 const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION_PREF_KEY =
   "modelProviderGroupsMigrationVersion";
+const OUTPUT_TOKEN_AUTO_MIGRATION_NOTICE_PREF_KEY =
+  "outputTokenAutoMigrationNoticePending";
 const LAST_USED_MODEL_ENTRY_ID_PREF_KEY = "lastUsedModelEntryId";
 const LEGACY_LAST_MODEL_PROFILE_PREF_KEY = "lastUsedModelProfile";
-const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 8;
-const PREVIOUS_DEFAULT_MAX_TOKENS = 4096;
+const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 9;
 const modelProviderGroupListeners = new Set<() => void>();
 
 function getZoteroPrefs(): ZoteroPrefsAPI | null {
@@ -237,21 +235,24 @@ function normalizeAdvancedModelConfig(
   // enforced where the override is consumed — `applyProfileOverride` for
   // capabilities, `resolveUserExtraBody` for request parameters.
   const profileOverride = normalizeProfileOverride(value?.profileOverride);
-  const maxTokens = normalizeMaxTokens(
-    `${value?.maxTokens ?? DEFAULT_MAX_TOKENS}`,
-  );
-  const maxTokensExplicit =
-    value?.maxTokensExplicit === true ||
-    (value?.maxTokensExplicit === undefined &&
-      value?.maxTokens !== undefined &&
-      value?.maxTokens !== null &&
-      maxTokens !== DEFAULT_MAX_TOKENS);
+  const rawOutputTokenLimit = value?.outputTokenLimit;
+  const outputTokenLimit: OutputTokenLimitSetting =
+    rawOutputTokenLimit &&
+    typeof rawOutputTokenLimit === "object" &&
+    !Array.isArray(rawOutputTokenLimit) &&
+    (rawOutputTokenLimit as { mode?: unknown }).mode === "custom"
+      ? {
+          mode: "custom",
+          tokens: normalizeMaxTokens(
+            (rawOutputTokenLimit as { tokens?: number | string }).tokens,
+          ),
+        }
+      : { mode: "auto" };
   return {
     temperature: normalizeTemperature(
       `${value?.temperature ?? DEFAULT_TEMPERATURE}`,
     ),
-    maxTokens,
-    ...(maxTokensExplicit ? { maxTokensExplicit: true } : {}),
+    outputTokenLimit,
     inputTokenCap: normalizeOptionalInputTokenCap(value?.inputTokenCap),
     ...(inputMode ? { inputMode } : {}),
     ...(profileOverride ? { profileOverride } : {}),
@@ -615,29 +616,21 @@ function normalizeGroupModel(
     id?: unknown;
     model?: unknown;
     temperature?: unknown;
-    maxTokens?: unknown;
-    maxTokensExplicit?: unknown;
+    outputTokenLimit?: unknown;
     inputTokenCap?: unknown;
     inputMode?: unknown;
     providerProtocol?: unknown;
     profileOverride?: unknown;
   };
   const modelName = normalizeString(rawModel.model);
-  const rawMaxTokens = Number(rawModel.maxTokens);
-  const maxTokens =
-    migrateStoredDefaults &&
-    rawModel.maxTokensExplicit !== true &&
-    rawMaxTokens === PREVIOUS_DEFAULT_MAX_TOKENS
-      ? DEFAULT_MAX_TOKENS
-      : rawMaxTokens;
   const advanced = normalizeAdvancedModelConfig(
     {
       temperature: Number(rawModel.temperature),
-      maxTokens,
-      maxTokensExplicit:
-        typeof rawModel.maxTokensExplicit === "boolean"
-          ? rawModel.maxTokensExplicit
-          : undefined,
+      // Version 9 deliberately resets every old or explicit cap to Auto.
+      // After that migration, newly saved Custom values round-trip normally.
+      outputTokenLimit: migrateStoredDefaults
+        ? { mode: "auto" }
+        : rawModel.outputTokenLimit,
       inputTokenCap: rawModel.inputTokenCap as number | string | undefined,
       inputMode: rawModel.inputMode,
       profileOverride: rawModel.profileOverride,
@@ -777,10 +770,6 @@ function resolveLegacyModelSlot(
   const temperature = normalizeTemperature(
     getStringPref(`temperature${suffix}`) || `${DEFAULT_TEMPERATURE}`,
   );
-  const storedMaxTokens = getStringPref(`maxTokens${suffix}`);
-  const maxTokens = normalizeMaxTokens(
-    storedMaxTokens || `${DEFAULT_MAX_TOKENS}`,
-  );
   const inputTokenCap = normalizeOptionalInputTokenCap(
     getStringPref(`inputTokenCap${suffix}`),
   );
@@ -793,10 +782,7 @@ function resolveLegacyModelSlot(
     apiKey,
     model: modelName,
     temperature,
-    maxTokens,
-    ...(storedMaxTokens && maxTokens !== DEFAULT_MAX_TOKENS
-      ? { maxTokensExplicit: true }
-      : {}),
+    outputTokenLimit: { mode: "auto" },
     inputTokenCap,
   };
 }
@@ -852,6 +838,12 @@ export function buildModelProviderGroupsFromLegacySlots(
 }
 
 function migrateLegacyModelProviderGroups(): ModelProviderGroup[] {
+  const hadLegacyOutputTokenSetting = [
+    "maxTokensPrimary",
+    "maxTokensSecondary",
+    "maxTokensTertiary",
+    "maxTokensQuaternary",
+  ].some((key) => Boolean(getStringPref(key)));
   const legacySlots = (
     ["primary", "secondary", "tertiary", "quaternary"] as LegacyModelSlotKey[]
   )
@@ -859,6 +851,9 @@ function migrateLegacyModelProviderGroups(): ModelProviderGroup[] {
     .filter((slot): slot is LegacyModelSlot => Boolean(slot));
   const migration = buildModelProviderGroupsFromLegacySlots(legacySlots);
   storeModelProviderGroups(migration.groups);
+  if (hadLegacyOutputTokenSetting) {
+    setPref(OUTPUT_TOKEN_AUTO_MIGRATION_NOTICE_PREF_KEY, true);
+  }
 
   const legacyLastUsedProfile = getStringPref(
     LEGACY_LAST_MODEL_PROFILE_PREF_KEY,
@@ -885,6 +880,7 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
     const parsed = parseStoredModelProviderGroups(raw);
     if (getMigrationVersion() < MODEL_PROVIDER_GROUPS_MIGRATION_VERSION) {
       storeModelProviderGroups(parsed);
+      setPref(OUTPUT_TOKEN_AUTO_MIGRATION_NOTICE_PREF_KEY, true);
     }
     return parsed;
   }
@@ -896,6 +892,17 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
 
 export function getModelProviderGroups(): ModelProviderGroup[] {
   return ensureModelProviderGroups();
+}
+
+/** Consume the one-time notice emitted after resetting stored caps to Auto. */
+export function consumeOutputTokenAutoMigrationNotice(): boolean {
+  const pending =
+    getZoteroPrefs()?.get?.(
+      prefKey(OUTPUT_TOKEN_AUTO_MIGRATION_NOTICE_PREF_KEY),
+      true,
+    ) === true;
+  if (pending) setPref(OUTPUT_TOKEN_AUTO_MIGRATION_NOTICE_PREF_KEY, false);
+  return pending;
 }
 
 export function setModelProviderGroups(groups: ModelProviderGroup[]): void {

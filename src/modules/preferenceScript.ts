@@ -2,7 +2,6 @@ import { config } from "../../package.json";
 import { t } from "../utils/i18n";
 import { WEBCHAT_TARGETS } from "../webchat/types";
 import {
-  DEFAULT_MAX_TOKENS,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TEMPERATURE,
 } from "../utils/llmDefaults";
@@ -21,6 +20,7 @@ import {
 } from "../utils/modelInputMode";
 import {
   buildProviderCatalogIdentity,
+  consumeOutputTokenAutoMigrationNotice,
   createCodexDirectModelRow,
   createEmptyProviderGroup,
   createProviderModelEntry,
@@ -912,6 +912,34 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     );
   };
   await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Loading the provider groups runs preference migrations before the notice
+  // is consumed. Keep this informational and nonblocking.
+  getModelProviderGroups();
+  if (consumeOutputTokenAutoMigrationNotice()) {
+    try {
+      const notice = new (
+        Zotero as unknown as {
+          ProgressWindow: new () => {
+            changeHeadline: (text: string) => void;
+            addDescription: (text: string) => void;
+            show: () => void;
+            close: () => void;
+          };
+        }
+      ).ProgressWindow();
+      notice.changeHeadline(t("Output limits updated"));
+      notice.addDescription(
+        t(
+          "Output limits were reset to Auto in this update. You can set a custom per-response limit in Advanced settings.",
+        ),
+      );
+      notice.show();
+      setTimeout(() => notice.close(), 6000);
+    } catch (err) {
+      ztoolkit.log("LLM: failed to show output-limit migration notice", err);
+    }
+  }
 
   // ── Translate static XHTML text ────────────────────────────────
   // Tab buttons
@@ -1823,8 +1851,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
                 existing
                   ? {
                       temperature: existing.temperature,
-                      maxTokens: existing.maxTokens,
-                      maxTokensExplicit: existing.maxTokensExplicit,
+                      outputTokenLimit: existing.outputTokenLimit,
                       inputTokenCap: existing.inputTokenCap,
                       inputMode: existing.inputMode,
                     }
@@ -1930,6 +1957,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           });
           testBtn.style.display = "none";
           statusLine.style.display = "none";
+          rowWrap.appendChild(
+            el(
+              doc,
+              "span",
+              HELPER_STYLE,
+              t("Per-response output limit: Managed by runtime"),
+            ),
+          );
           const modelSelect = el(
             doc,
             "select",
@@ -2082,11 +2117,81 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           `${modelEntry.temperature ?? DEFAULT_TEMPERATURE}`,
           `${DEFAULT_TEMPERATURE}`,
         );
-        const maxTokField = makeCompactField(
-          t("Max tokens"),
-          `${modelEntry.maxTokens ?? DEFAULT_MAX_TOKENS}`,
-          `${DEFAULT_MAX_TOKENS}`,
+        const resolveDetectedProfile = () =>
+          getModelCapabilities({
+            model: modelEntry.model,
+            apiBase: group.apiBase,
+            protocol: resolveModelSelectedProtocol(
+              group,
+              selectedPresetId,
+              modelEntry,
+            ),
+            authMode: group.authMode,
+            scope: group.id,
+          });
+        const outputLimitField = el(
+          doc,
+          "div",
+          "display: flex; flex-direction: column; gap: 3px;",
         );
+        const outputLimitLabel = el(
+          doc,
+          "label",
+          "font-size: 10.5px; font-weight: 600; color: var(--fill-primary, inherit);",
+          t("Per-response output limit"),
+        );
+        const outputLimitControls = el(
+          doc,
+          "div",
+          "display: flex; gap: 4px; align-items: center;",
+        );
+        const outputLimitSelect = el(
+          doc,
+          "select",
+          INPUT_MODE_SELECT_SM_STYLE,
+        ) as HTMLSelectElement;
+        const outputLimitIsRuntimeManaged =
+          group.authMode === "codex_app_server";
+        for (const option of outputLimitIsRuntimeManaged
+          ? [{ value: "managed", label: "Managed by runtime" }]
+          : [
+              { value: "auto", label: "Auto" },
+              { value: "custom", label: "Custom" },
+            ]) {
+          const element = el(doc, "option") as HTMLOptionElement;
+          element.value = option.value;
+          element.textContent = t(option.label);
+          outputLimitSelect.appendChild(element);
+        }
+        const outputLimitInput = el(
+          doc,
+          "input",
+          INPUT_SM_STYLE,
+        ) as HTMLInputElement;
+        outputLimitInput.type = "number";
+        outputLimitInput.min = "1";
+        outputLimitInput.step = "1";
+        outputLimitInput.placeholder = "8192";
+        const detectedOutputMaximum =
+          resolveDetectedProfile().limits.outputTokens;
+        if (detectedOutputMaximum) {
+          outputLimitInput.max = `${detectedOutputMaximum}`;
+        }
+        outputLimitInput.value =
+          modelEntry.outputTokenLimit.mode === "custom"
+            ? `${modelEntry.outputTokenLimit.tokens}`
+            : "";
+        outputLimitSelect.value = outputLimitIsRuntimeManaged
+          ? "managed"
+          : modelEntry.outputTokenLimit.mode;
+        const syncOutputLimitField = () => {
+          const custom = outputLimitSelect.value === "custom";
+          outputLimitInput.style.display = custom ? "" : "none";
+          outputLimitInput.disabled = !custom;
+        };
+        syncOutputLimitField();
+        outputLimitControls.append(outputLimitSelect, outputLimitInput);
+        outputLimitField.append(outputLimitLabel, outputLimitControls);
         const inputCapField = makeCompactField(
           t("Input cap"),
           modelEntry.inputTokenCap !== undefined
@@ -2169,12 +2274,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           protocolFieldWrap.style.display = "none";
         }
 
-        advFields.append(tempField.wrap, maxTokField.wrap, inputCapField.wrap);
+        advFields.append(tempField.wrap, outputLimitField, inputCapField.wrap);
         if (inputModeFieldWrap) advFields.append(inputModeFieldWrap);
         advFields.append(protocolFieldWrap);
         const inputModeHelpText = inputModeFieldWrap
-          ? "Temperature: randomness (0–2)  ·  Edited Max tokens and set Input cap override detected/default limits  ·  Input mode: auto/text-only/vision"
-          : "Temperature: randomness (0–2)  ·  Edited Max tokens and set Input cap override detected/default limits";
+          ? "Temperature: randomness (0–2)  ·  Output limit applies to one response, including hidden reasoning on some APIs; it does not limit total Agent duration  ·  Input mode: auto/text-only/vision"
+          : "Temperature: randomness (0–2)  ·  Output limit applies to one response, including hidden reasoning on some APIs; it does not limit total Agent duration";
         advRow.append(
           advFields,
           el(
@@ -2190,19 +2295,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         // one place lists everything customizable for this model, and the
         // fields above (temperature, max tokens, input cap, input mode) are
         // not repeated here.
-        const resolveDetectedProfile = () =>
-          getModelCapabilities({
-            model: modelEntry.model,
-            apiBase: group.apiBase,
-            protocol: resolveModelSelectedProtocol(
-              group,
-              selectedPresetId,
-              modelEntry,
-            ),
-            authMode: group.authMode,
-            scope: group.id,
-          });
-
         const profileEditor = createModelProfileEditor({
           doc,
           t,
@@ -2255,10 +2347,19 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           profileEditor.refresh(resolveDetectedProfile());
         }
 
-        const commitAdvanced = (maxTokensEdited = false) => {
+        const commitAdvanced = () => {
           modelEntry.temperature = normalizeTemperature(tempField.input.value);
-          modelEntry.maxTokens = normalizeMaxTokens(maxTokField.input.value);
-          if (maxTokensEdited) modelEntry.maxTokensExplicit = true;
+          modelEntry.outputTokenLimit =
+            !outputLimitIsRuntimeManaged && outputLimitSelect.value === "custom"
+              ? {
+                  mode: "custom",
+                  tokens: Math.min(
+                    normalizeMaxTokens(outputLimitInput.value),
+                    resolveDetectedProfile().limits.outputTokens ||
+                      Number.MAX_SAFE_INTEGER,
+                  ),
+                }
+              : { mode: "auto" };
           modelEntry.inputTokenCap = normalizeOptionalInputTokenCap(
             inputCapField.input.value,
           );
@@ -2279,7 +2380,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             ? protocolFieldSelect.value
             : undefined;
           tempField.input.value = `${modelEntry.temperature}`;
-          maxTokField.input.value = `${modelEntry.maxTokens}`;
+          outputLimitSelect.value = outputLimitIsRuntimeManaged
+            ? "managed"
+            : modelEntry.outputTokenLimit.mode;
+          outputLimitInput.value =
+            modelEntry.outputTokenLimit.mode === "custom"
+              ? `${modelEntry.outputTokenLimit.tokens}`
+              : "";
+          syncOutputLimitField();
           inputCapField.input.value =
             modelEntry.inputTokenCap !== undefined
               ? `${modelEntry.inputTokenCap}`
@@ -2298,10 +2406,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           f.input.addEventListener("change", () => commitAdvanced());
           f.input.addEventListener("blur", () => commitAdvanced());
         }
-        maxTokField.input.addEventListener("change", () =>
-          commitAdvanced(true),
-        );
-        maxTokField.input.addEventListener("blur", () => commitAdvanced());
+        outputLimitSelect.addEventListener("change", () => commitAdvanced());
+        outputLimitInput.addEventListener("change", () => commitAdvanced());
+        outputLimitInput.addEventListener("blur", () => commitAdvanced());
         inputModeSelect?.addEventListener("change", () => commitAdvanced());
         protocolFieldSelect.addEventListener("change", () => commitAdvanced());
 
@@ -2309,8 +2416,13 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           const hasModel = Boolean(modelEntry.model.trim());
           advRow.style.opacity = hasModel ? "1" : "0.45";
           advRow.style.pointerEvents = hasModel ? "" : "none";
-          for (const f of [tempField, maxTokField, inputCapField])
+          for (const f of [tempField, inputCapField])
             f.input.disabled = !hasModel;
+          outputLimitSelect.disabled = !hasModel || outputLimitIsRuntimeManaged;
+          outputLimitInput.disabled =
+            !hasModel ||
+            outputLimitIsRuntimeManaged ||
+            outputLimitSelect.value !== "custom";
           if (inputModeSelect) inputModeSelect.disabled = !hasModel;
           protocolFieldSelect.disabled = !hasModel;
         };
