@@ -45,6 +45,12 @@ function diagnosticsMessage(
   return JSON.stringify(
     {
       activeTab: diagnostics.activeTab,
+      sidebarState: diagnostics.sidebarState,
+      sidebarLibraryName: diagnostics.sidebarLibraryName,
+      sidebarActionOrder: diagnostics.sidebarActionOrder,
+      sidebarPrimaryActionOrder: diagnostics.sidebarPrimaryActionOrder,
+      titleActionLabels: diagnostics.titleActionLabels,
+      alignment: diagnostics.alignment,
       conversationKey: diagnostics.conversationKey,
       activeItemId: diagnostics.activeItemId,
       rawContextItemId: diagnostics.rawContextItemId,
@@ -113,6 +119,73 @@ describe("workflow: standalone document chat", function () {
       if (fixture) await api.cleanupFixture(fixture);
     }
     await api.reset();
+  });
+
+  it("keeps the requested three-action top navigation and unified rail", async function () {
+    const fixture = await api.createPaperWithPdfFixture({
+      title: "Workflow Unified Standalone Sidebar",
+      pdfTitle: "Workflow Unified Standalone Sidebar PDF",
+    });
+    fixtures.push(fixture);
+
+    const expanded = await api.openStandaloneForItem(fixture.parentItemId);
+    assert.equal(
+      expanded.sidebarState,
+      "expanded",
+      diagnosticsMessage(expanded),
+    );
+    assert.isNotEmpty(
+      expanded.sidebarLibraryName || "",
+      diagnosticsMessage(expanded),
+    );
+    assert.deepEqual(
+      expanded.sidebarActionOrder,
+      ["new-chat", "search-history", "skills", "preferences"],
+      diagnosticsMessage(expanded),
+    );
+    assert.deepEqual(
+      expanded.sidebarPrimaryActionOrder,
+      ["new-chat", "search-history", "skills"],
+      diagnosticsMessage(expanded),
+    );
+    assert.deepEqual(
+      expanded.titleActionLabels,
+      ["Export", "Delete conversation"],
+      diagnosticsMessage(expanded),
+    );
+    assert.isDefined(expanded.alignment, diagnosticsMessage(expanded));
+    assert.isAtMost(
+      expanded.alignment?.toolbarCenterDeltaPx ?? Number.POSITIVE_INFINITY,
+      0.5,
+      diagnosticsMessage(expanded),
+    );
+    assert.isAtMost(
+      expanded.alignment?.titleCenterDeltaPx ?? Number.POSITIVE_INFINITY,
+      0.5,
+      diagnosticsMessage(expanded),
+    );
+    assert.isAtMost(
+      expanded.alignment?.toolbarTextCenterDeltaPx ?? Number.POSITIVE_INFINITY,
+      0.5,
+      diagnosticsMessage(expanded),
+    );
+    assert.isAtMost(
+      expanded.alignment?.titleTextCenterDeltaPx ?? Number.POSITIVE_INFINITY,
+      0.5,
+      diagnosticsMessage(expanded),
+    );
+
+    const collapsedSidebar = await api.toggleStandaloneSidebar();
+    assert.equal(
+      collapsedSidebar.sidebarState,
+      "collapsed",
+      diagnosticsMessage(collapsedSidebar),
+    );
+    assert.deepEqual(
+      collapsedSidebar.sidebarActionOrder,
+      expanded.sidebarActionOrder,
+      diagnosticsMessage(collapsedSidebar),
+    );
   });
 
   it("opens a top-level Zotero PDF attachment in Paper Chat and sends with attachment-owned context", async function () {

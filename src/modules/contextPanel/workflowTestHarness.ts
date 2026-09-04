@@ -2527,6 +2527,27 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   const titleEl = doc?.querySelector(
     ".llm-standalone-content-title-text",
   ) as HTMLElement | null;
+  const sidebar = doc?.querySelector(
+    ".llm-standalone-sidebar",
+  ) as HTMLElement | null;
+  const sidebarLibraryName = doc?.querySelector(
+    ".llm-standalone-library-name",
+  ) as HTMLElement | null;
+  const sidebarHeader = doc?.querySelector(
+    ".llm-standalone-sidebar-header",
+  ) as HTMLElement | null;
+  const tabRow = doc?.querySelector(
+    ".llm-standalone-tab-row",
+  ) as HTMLElement | null;
+  const newChatAction = doc?.querySelector(
+    '[data-sidebar-action="new-chat"]',
+  ) as HTMLElement | null;
+  const newChatLabel = newChatAction?.querySelector(
+    ".llm-standalone-nav-label",
+  ) as HTMLElement | null;
+  const contentTitleRow = doc?.querySelector(
+    ".llm-standalone-content-title",
+  ) as HTMLElement | null;
   const chatBox = contentArea?.querySelector(
     "#llm-chat-box",
   ) as HTMLElement | null;
@@ -2542,8 +2563,68 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
       : activeTab?.dataset.tab === "open"
         ? "open"
         : null;
+  const centerY = (element: HTMLElement | null): number | null => {
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    return rect.top + rect.height / 2;
+  };
+  const textCenterY = (element: HTMLElement | null): number | null => {
+    if (!element) return null;
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    const rect = range.getBoundingClientRect();
+    return rect.height > 0 ? rect.top + rect.height / 2 : centerY(element);
+  };
+  const toolbarCenters = [centerY(sidebarHeader), centerY(tabRow)];
+  const titleCenters = [centerY(newChatAction), centerY(contentTitleRow)];
+  const toolbarTextCenters = [
+    textCenterY(sidebarLibraryName),
+    textCenterY(activeTab),
+  ];
+  const titleTextCenters = [textCenterY(newChatLabel), textCenterY(titleEl)];
+  const centerDelta = (centers: Array<number | null>): number | undefined => {
+    if (centers.some((value) => value === null)) return undefined;
+    return Math.abs((centers[0] as number) - (centers[1] as number));
+  };
+  const toolbarCenterDeltaPx = centerDelta(toolbarCenters);
+  const titleCenterDeltaPx = centerDelta(titleCenters);
+  const toolbarTextCenterDeltaPx = centerDelta(toolbarTextCenters);
+  const titleTextCenterDeltaPx = centerDelta(titleTextCenters);
   return {
     activeTab: activeTabName,
+    sidebarState:
+      sidebar?.dataset.sidebarState === "collapsed"
+        ? "collapsed"
+        : sidebar?.dataset.sidebarState === "expanded"
+          ? "expanded"
+          : undefined,
+    sidebarLibraryName: sidebarLibraryName?.textContent?.trim() || undefined,
+    sidebarActionOrder: Array.from(
+      sidebar?.querySelectorAll("[data-sidebar-action]") || [],
+    ).map((node) => (node as HTMLElement).dataset.sidebarAction || ""),
+    sidebarPrimaryActionOrder: Array.from(
+      sidebar?.querySelectorAll(
+        ".llm-standalone-primary-nav [data-sidebar-action]",
+      ) || [],
+    ).map((node) => (node as HTMLElement).dataset.sidebarAction || ""),
+    titleActionLabels: Array.from(
+      doc?.querySelectorAll(".llm-standalone-content-title-actions button") ||
+        [],
+    ).map((node) =>
+      ((node as HTMLElement).getAttribute("aria-label") || "").trim(),
+    ),
+    alignment:
+      toolbarCenterDeltaPx === undefined ||
+      titleCenterDeltaPx === undefined ||
+      toolbarTextCenterDeltaPx === undefined ||
+      titleTextCenterDeltaPx === undefined
+        ? undefined
+        : {
+            toolbarCenterDeltaPx,
+            titleCenterDeltaPx,
+            toolbarTextCenterDeltaPx,
+            titleTextCenterDeltaPx,
+          },
     conversationKey: mountedItem ? getConversationKey(mountedItem) : undefined,
     activeItemId: parsePositiveInt(mountedItem?.id),
     rawContextItemId:
@@ -2660,6 +2741,18 @@ async function clickStandaloneTab(
   if (!button) throw new Error(`Standalone ${tab} tab was not rendered`);
   button.click();
   await ensureStandaloneWorkflowPanelReady();
+  return readStandaloneDiagnostics();
+}
+
+async function toggleStandaloneSidebar(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    ".llm-standalone-nav-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error("Standalone sidebar toggle was not rendered");
+  button.click();
+  await Zotero.Promise.delay(25);
   return readStandaloneDiagnostics();
 }
 
@@ -4385,6 +4478,7 @@ export function installWorkflowTestHarness(targetAddon: {
     openStandaloneForItem,
     openStandaloneForLibraryAfterRestart,
     clickStandaloneTab,
+    toggleStandaloneSidebar,
     clickStandaloneSystemToggle,
     clickStandaloneSystemTogglesRapidly,
     measureStandaloneRuntimeGeometry,

@@ -240,6 +240,17 @@ export type WorkflowTestTargetedQuoteRefreshResult = {
 
 export type WorkflowTestStandaloneDiagnostics = {
   activeTab?: "paper" | "open" | null;
+  sidebarState?: "expanded" | "collapsed";
+  sidebarLibraryName?: string;
+  sidebarActionOrder: string[];
+  sidebarPrimaryActionOrder: string[];
+  titleActionLabels: string[];
+  alignment?: {
+    toolbarCenterDeltaPx: number;
+    titleCenterDeltaPx: number;
+    toolbarTextCenterDeltaPx: number;
+    titleTextCenterDeltaPx: number;
+  };
   conversationKey?: number;
   activeItemId?: number;
   rawContextItemId?: number;
@@ -508,6 +519,7 @@ export type WorkflowTestApi = {
   clickStandaloneTab: (
     tab: "paper" | "open",
   ) => Promise<WorkflowTestStandaloneDiagnostics>;
+  toggleStandaloneSidebar: () => Promise<WorkflowTestStandaloneDiagnostics>;
   clickStandaloneSystemToggle: (
     system: RuntimeConversationSystem,
   ) => Promise<WorkflowTestStandaloneDiagnostics>;

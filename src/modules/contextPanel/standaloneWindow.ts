@@ -196,6 +196,11 @@ import {
 import { getConversationWriteGeneration } from "../../shared/conversationWriteFence";
 import { setStatus } from "./textUtils";
 import { getRegisteredConversationScope } from "../../shared/conversationRegistry";
+import {
+  createStandaloneSidebarView,
+  setStandaloneSidebarLibraryName,
+  setStandaloneSidebarState,
+} from "./standaloneSidebarView";
 
 type StandaloneSessionState = {
   pending: boolean;
@@ -912,21 +917,11 @@ export function openStandaloneChat(options?: {
       // -----------------------------------------------------------------------
       // Build the shell layout:
       //   topbar (full width)
-      //   lowerArea: sidebar (icon strip + panel) | content
+      //   lowerArea: unified expandable sidebar | content
       // -----------------------------------------------------------------------
 
       // Switch root from row to column
       root.style.flexDirection = "column";
-
-      // -- Sidebar toggle button (lives in icon strip) --
-      const iconSidebarToggle = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconSidebarToggle.className =
-        "llm-standalone-icon-btn llm-standalone-topbar-toggle";
-      iconSidebarToggle.type = "button";
-      iconSidebarToggle.title = t("Toggle sidebar");
 
       // -- Tab group (centered at top of content area) --
       const paperTab = doc.createElementNS(
@@ -975,87 +970,22 @@ export function openStandaloneChat(options?: {
       const lowerArea = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
       lowerArea.className = "llm-standalone-lower";
 
-      // -- Sidebar: icon strip (always visible) + panel (collapsible) --
-      const sidebar = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-      sidebar.className = "llm-standalone-sidebar";
-      sidebar.dataset.sidebarState = "expanded";
+      const sidebarView = createStandaloneSidebarView(doc, t);
+      const sidebar = sidebarView.root;
+      const sidebarPanel = sidebarView.panel;
+      const iconSidebarToggle = sidebarView.toggleButton;
+      const iconNewChat = sidebarView.newChatButton;
+      const iconSearch = sidebarView.searchButton;
+      const iconSkill = sidebarView.skillsButton;
+      const iconSettings = sidebarView.preferencesButton;
+      const webHistoryRefreshBtn = sidebarView.refreshButton;
+      const standaloneHistoryUndo = sidebarView.undo;
+      const standaloneHistoryUndoText = sidebarView.undoText;
+      const standaloneHistoryUndoBtn = sidebarView.undoButton;
+      const sidebarList = sidebarView.list;
+      const sidebarResizeHandle = sidebarView.resizeHandle;
 
-      // Icon strip — always visible vertical column with text-based icons
-      const iconStrip = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-      iconStrip.className = "llm-standalone-icon-strip";
-
-      const iconNewChat = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconNewChat.className =
-        "llm-standalone-icon-btn llm-standalone-icon-plus";
-      iconNewChat.type = "button";
-      iconNewChat.title = t("New chat");
-      iconNewChat.textContent = "+";
-
-      const iconSearch = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconSearch.className =
-        "llm-standalone-icon-btn llm-standalone-icon-search";
-      iconSearch.type = "button";
-      iconSearch.title = t("Search history");
-
-      const iconSkill = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconSkill.className = "llm-standalone-icon-btn llm-standalone-icon-skill";
-      iconSkill.type = "button";
-      iconSkill.title = t("Skills");
-
-      const iconStripSpacer = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      iconStripSpacer.style.flex = "1";
-
-      const iconSettings = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconSettings.className =
-        "llm-standalone-icon-btn llm-standalone-icon-settings";
-      iconSettings.type = "button";
-      iconSettings.title = t("Settings");
-
-      const iconExport = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconExport.className =
-        "llm-standalone-icon-btn llm-standalone-icon-export";
-      iconExport.type = "button";
-      iconExport.title = t("Export");
-
-      const iconClear = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      iconClear.className = "llm-standalone-icon-btn llm-standalone-icon-clear";
-      iconClear.type = "button";
-      iconClear.title = t("Delete conversation");
-      iconClear.setAttribute("aria-label", t("Delete conversation"));
-
-      iconStrip.append(
-        iconSidebarToggle,
-        iconNewChat,
-        iconSearch,
-        iconSkill,
-        iconStripSpacer,
-        iconSettings,
-        iconExport,
-        iconClear,
-      );
-
-      // Export popup — floating menu from sidebar export icon
+      // Export popup — floating menu from the content-title Export action
       const exportPopup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
       exportPopup.className = "llm-standalone-export-popup";
       exportPopup.style.display = "none";
@@ -1078,89 +1008,6 @@ export function openStandaloneChat(options?: {
 
       exportPopup.append(exportPopupCopyBtn, exportPopupNoteBtn);
 
-      // Panel — the expandable conversation list
-      const sidebarPanel = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      sidebarPanel.className = "llm-standalone-sidebar-panel";
-
-      const sidebarHeader = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      sidebarHeader.className = "llm-standalone-sidebar-header";
-
-      const sidebarTitle = doc.createElementNS(
-        HTML_NS,
-        "span",
-      ) as HTMLSpanElement;
-      sidebarTitle.className = "llm-standalone-sidebar-title";
-      sidebarTitle.textContent = t("History");
-
-      const sidebarHeaderActions = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      sidebarHeaderActions.className = "llm-standalone-sidebar-actions";
-
-      const webHistoryRefreshBtn = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      webHistoryRefreshBtn.className = "llm-standalone-sidebar-refresh";
-      webHistoryRefreshBtn.type = "button";
-      webHistoryRefreshBtn.textContent = "\u21BB";
-      webHistoryRefreshBtn.title = t("Refresh web history");
-      webHistoryRefreshBtn.setAttribute("aria-label", t("Refresh web history"));
-      webHistoryRefreshBtn.style.display = "none";
-
-      sidebarHeaderActions.append(webHistoryRefreshBtn);
-      sidebarHeader.append(sidebarTitle, sidebarHeaderActions);
-
-      const standaloneHistoryUndo = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      standaloneHistoryUndo.className =
-        "llm-history-undo llm-standalone-history-undo";
-      standaloneHistoryUndo.style.display = "none";
-
-      const standaloneHistoryUndoText = doc.createElementNS(
-        HTML_NS,
-        "span",
-      ) as HTMLSpanElement;
-      standaloneHistoryUndoText.className = "llm-history-undo-text";
-
-      const standaloneHistoryUndoBtn = doc.createElementNS(
-        HTML_NS,
-        "button",
-      ) as HTMLButtonElement;
-      standaloneHistoryUndoBtn.className = "llm-history-undo-btn";
-      standaloneHistoryUndoBtn.type = "button";
-      standaloneHistoryUndoBtn.textContent = t("Undo");
-      standaloneHistoryUndoBtn.title = t("Restore deleted conversation");
-      standaloneHistoryUndo.append(
-        standaloneHistoryUndoText,
-        standaloneHistoryUndoBtn,
-      );
-
-      const sidebarList = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-      sidebarList.className = "llm-standalone-sidebar-list";
-
-      const sidebarResizeHandle = doc.createElementNS(
-        HTML_NS,
-        "div",
-      ) as HTMLDivElement;
-      sidebarResizeHandle.className = "llm-standalone-sidebar-resizer";
-      sidebarResizeHandle.tabIndex = 0;
-      sidebarResizeHandle.title = t("Drag to resize history pane");
-      sidebarResizeHandle.setAttribute("role", "separator");
-      sidebarResizeHandle.setAttribute("aria-orientation", "vertical");
-      sidebarResizeHandle.setAttribute("aria-label", t("Resize history pane"));
-
-      sidebarPanel.append(sidebarHeader, standaloneHistoryUndo, sidebarList);
-      sidebar.append(iconStrip, sidebarPanel, sidebarResizeHandle);
       let standaloneSidebarEntriesByKey = new Map<number, SidebarConv>();
 
       // -- Content area --
@@ -1187,6 +1034,27 @@ export function openStandaloneChat(options?: {
         "div",
       ) as HTMLDivElement;
       contentTitleBarSpacer.className = "llm-standalone-content-title-actions";
+
+      const iconExport = doc.createElementNS(
+        HTML_NS,
+        "button",
+      ) as HTMLButtonElement;
+      iconExport.className =
+        "llm-standalone-title-action llm-standalone-icon-export";
+      iconExport.type = "button";
+      iconExport.title = t("Export");
+      iconExport.setAttribute("aria-label", t("Export"));
+
+      const iconClear = doc.createElementNS(
+        HTML_NS,
+        "button",
+      ) as HTMLButtonElement;
+      iconClear.className =
+        "llm-standalone-title-action llm-standalone-icon-clear";
+      iconClear.type = "button";
+      iconClear.title = t("Delete conversation");
+      iconClear.setAttribute("aria-label", t("Delete conversation"));
+      contentTitleBarSpacer.append(iconExport, iconClear);
       contentTitleBar.append(contentTitleText, contentTitleBarSpacer);
 
       const contentArea = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
@@ -1303,7 +1171,7 @@ export function openStandaloneChat(options?: {
       let userManualSidebarState: "expanded" | "collapsed" | null = null;
 
       const setSidebarState = (state: "expanded" | "collapsed") => {
-        sidebar.dataset.sidebarState = state;
+        setStandaloneSidebarState(sidebarView, state);
       };
 
       const toggleSidebar = () => {
@@ -1369,6 +1237,33 @@ export function openStandaloneChat(options?: {
           return Math.floor(paperLibraryID);
         }
         return libraryID;
+      };
+
+      const syncStandaloneLibraryName = () => {
+        const currentLibraryID = getCurrentLibraryScopeID();
+        let name = "";
+        try {
+          const libraries = (
+            Zotero as unknown as {
+              Libraries?: {
+                getName?: (targetLibraryID: number) => unknown;
+                get?: (
+                  targetLibraryID: number,
+                ) => { name?: unknown } | null | undefined;
+              };
+            }
+          ).Libraries;
+          const directName = libraries?.getName?.(currentLibraryID);
+          if (typeof directName === "string") name = directName.trim();
+          if (!name) {
+            const objectName = libraries?.get?.(currentLibraryID)?.name;
+            if (typeof objectName === "string") name = objectName.trim();
+          }
+        } catch {
+          // The personal-library fallback keeps the navigation usable while
+          // Zotero is still bringing its library registry online.
+        }
+        setStandaloneSidebarLibraryName(sidebarView, name || t("My Library"));
       };
 
       const getLibraryIDForPaperItem = (
@@ -1504,10 +1399,8 @@ export function openStandaloneChat(options?: {
 
         // Sidebar: populate with webchat history, or restore local history
         if (isWebChat) {
-          sidebarTitle.textContent = t("Web History");
           void renderWebChatSidebar();
         } else {
-          sidebarTitle.textContent = t("History");
           scheduleStandaloneSidebarRender();
         }
       };
@@ -1883,6 +1776,7 @@ export function openStandaloneChat(options?: {
 
           clearContent();
           updateContentTitle();
+          syncStandaloneLibraryName();
 
           buildUI(contentArea, mountedItem);
 
@@ -2009,15 +1903,13 @@ export function openStandaloneChat(options?: {
           sidebarList.appendChild(dayLabel);
 
           for (const conv of group.items) {
-            const btn = doc.createElementNS(
-              HTML_NS,
-              "button",
-            ) as HTMLButtonElement;
+            const btn = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
             btn.className = "llm-standalone-conv-item";
             if (conv.conversationKey === activeConversationKey) {
               btn.classList.add("active");
             }
-            btn.type = "button";
+            btn.setAttribute("role", "button");
+            btn.tabIndex = 0;
             btn.dataset.conversationKey = String(conv.conversationKey);
             if (conv.sessionVersion !== undefined) {
               btn.dataset.sessionVersion = String(conv.sessionVersion);
@@ -2030,19 +1922,19 @@ export function openStandaloneChat(options?: {
             titleSpan.textContent = conv.title || t("Untitled chat");
             const renameBtn = doc.createElementNS(
               HTML_NS,
-              "span",
-            ) as HTMLSpanElement;
+              "button",
+            ) as HTMLButtonElement;
             renameBtn.className = "llm-standalone-conv-rename";
-            renameBtn.setAttribute("role", "button");
+            renameBtn.type = "button";
             renameBtn.setAttribute("aria-label", t("Rename chat"));
             renameBtn.title = t("Rename chat");
             renameBtn.dataset.action = "rename";
             const deleteBtn = doc.createElementNS(
               HTML_NS,
-              "span",
-            ) as HTMLSpanElement;
+              "button",
+            ) as HTMLButtonElement;
             deleteBtn.className = "llm-standalone-conv-delete";
-            deleteBtn.setAttribute("role", "button");
+            deleteBtn.type = "button";
             deleteBtn.setAttribute("aria-label", t("Delete conversation"));
             deleteBtn.title = t("Delete conversation");
             deleteBtn.dataset.action = "delete";
@@ -2084,14 +1976,12 @@ export function openStandaloneChat(options?: {
               })
             ).map(toSidebarConversation);
             if (cancelled) return;
-            sidebarTitle.textContent = t("History");
             renderSidebarItems(conversations);
           } else {
             if (!currentBasePaperItem) {
               ztoolkit.log(
                 "LLM: standalone renderSidebar paper mode — currentBasePaperItem is null",
               );
-              sidebarTitle.textContent = t("History");
               clearSidebarList();
               return;
             }
@@ -2122,7 +2012,6 @@ export function openStandaloneChat(options?: {
               })
             ).map(toSidebarConversation);
             if (cancelled) return;
-            sidebarTitle.textContent = t("History");
             renderSidebarItems(conversations);
           }
         } catch (err) {
@@ -3493,6 +3382,18 @@ export function openStandaloneChat(options?: {
         }
       });
 
+      sidebarList.addEventListener("keydown", (e: Event) => {
+        const event = e as KeyboardEvent;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const target = event.target as HTMLElement;
+        const row = target.closest(
+          ".llm-standalone-conv-item",
+        ) as HTMLElement | null;
+        if (!row || target !== row) return;
+        event.preventDefault();
+        row.click();
+      });
+
       const resolveFreshStandaloneGlobalConversation = async (
         options: boolean | StandaloneCreateConversationOptions = false,
       ): Promise<number> => {
@@ -3717,7 +3618,7 @@ export function openStandaloneChat(options?: {
 
       iconSidebarToggle.addEventListener("click", () => toggleSidebar());
 
-      // Icon strip action buttons
+      // Standalone navigation and content-title actions
       iconSettings.addEventListener("click", () => {
         const btn = contentArea.querySelector(
           "#llm-settings",
@@ -3730,12 +3631,14 @@ export function openStandaloneChat(options?: {
           exportPopup.style.display = "none";
           return;
         }
-        // Position popup to the right of the icon strip, near the export icon
-        const stripRect = iconStrip.getBoundingClientRect();
         const iconRect = iconExport.getBoundingClientRect();
         exportPopup.style.position = "fixed";
-        exportPopup.style.left = `${Math.round(stripRect.right + 4)}px`;
-        exportPopup.style.top = `${Math.round(iconRect.top)}px`;
+        exportPopup.style.left = "auto";
+        exportPopup.style.right = `${Math.max(
+          8,
+          Math.round(newWin.innerWidth - iconRect.right),
+        )}px`;
+        exportPopup.style.top = `${Math.round(iconRect.bottom + 4)}px`;
         exportPopup.style.display = "flex";
       });
       exportPopupCopyBtn.addEventListener("click", () => {

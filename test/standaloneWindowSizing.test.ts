@@ -25,7 +25,7 @@ describe("standalone window sizing", function () {
         requestedWidth: 380,
         containerWidth: 700,
       }),
-      287,
+      335,
     );
     assert.equal(
       computeStandaloneSidebarPanelWidth({
@@ -42,7 +42,7 @@ describe("standalone window sizing", function () {
         requestedWidth: 420,
         containerWidth: 640,
       }),
-      { renderedWidth: 227, effectiveMaxWidth: 227 },
+      { renderedWidth: 275, effectiveMaxWidth: 275 },
     );
   });
 
@@ -136,9 +136,9 @@ describe("standalone window sizing", function () {
     windowListeners.get("resize")?.({} as Event);
     assert.equal(
       cssProperties.get("--llm-standalone-sidebar-panel-width"),
-      "227px",
+      "275px",
     );
-    assert.equal(attributes.get("aria-valuemax"), "227");
+    assert.equal(attributes.get("aria-valuemax"), "275");
     assert.deepEqual(committedWidths, [300, 288]);
 
     (container as unknown as { clientWidth: number }).clientWidth = 900;
@@ -165,7 +165,7 @@ describe("standalone window sizing", function () {
     windowListeners.get("resize")?.({} as Event);
     assert.equal(
       cssProperties.get("--llm-standalone-sidebar-panel-width"),
-      "387px",
+      "420px",
     );
     assert.deepEqual(committedWidths, [300, 288, 420]);
 
@@ -177,15 +177,15 @@ describe("standalone window sizing", function () {
     } as unknown as KeyboardEvent);
     assert.equal(
       cssProperties.get("--llm-standalone-sidebar-panel-width"),
-      "375px",
+      "408px",
     );
-    assert.deepEqual(committedWidths, [300, 288, 420, 375]);
+    assert.deepEqual(committedWidths, [300, 288, 420, 408]);
 
     (container as unknown as { clientWidth: number }).clientWidth = 900;
     windowListeners.get("resize")?.({} as Event);
     assert.equal(
       cssProperties.get("--llm-standalone-sidebar-panel-width"),
-      "375px",
+      "408px",
     );
 
     cleanup();
@@ -273,7 +273,7 @@ describe("standalone window sizing", function () {
     assert.equal(widthReads, 2);
     assert.equal(
       cssProperties.get("--llm-standalone-sidebar-panel-width"),
-      "227px",
+      "275px",
     );
 
     windowListeners.get("mouseup")?.({} as Event);
