@@ -87,6 +87,7 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
 ] as const;
 export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "update_plan",
+  "amend_plan",
   "task_update",
   "research_update",
   "approve_research_expansion",
@@ -94,6 +95,7 @@ export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "submit_document",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
+  "amend_plan",
   "approve_research_expansion",
   "approve_research_mutation",
   "library_update",

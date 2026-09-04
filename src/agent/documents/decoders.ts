@@ -441,6 +441,13 @@ export function decodePlanDocument(value: unknown): PlanDocument {
               origin.contractDigest,
               "origin.contractDigest",
             ),
+            scopeLineageDigest:
+              origin.scopeLineageDigest === undefined
+                ? undefined
+                : string(
+                    origin.scopeLineageDigest,
+                    "origin.scopeLineageDigest",
+                  ),
           }
         : origin.kind === "direct"
           ? {

@@ -47,6 +47,8 @@ export type ResearchContract = Readonly<{
   reviewMode?: "narrative" | "scoping" | "systematic";
   /** Adaptive reads the approved scope to the depth allowed by live capacity. */
   readingStrategy?: "adaptive" | "selected";
+  /** Whether execution may add papers proven to remain inside the source. */
+  scopeAmendmentPolicy: "fixed" | "within_source";
   scope: ResearchScopeSpec;
   /** Required once the plan is ready for approval. */
   scopeSnapshot?: ResearchScopeSnapshotRef;
@@ -62,6 +64,8 @@ export type ResearchScopeSnapshotRef = Readonly<{
   itemCount: number;
   createdAt: number;
   policyVersion: number;
+  parentSnapshotId?: string;
+  scopeLineageDigest?: string;
 }>;
 
 export type ResearchScopeSnapshotItem = Readonly<{
@@ -105,12 +109,17 @@ export type ResearchWorkStatus =
   | "cancelled";
 
 export type ResearchJob = Readonly<{
-  version: 1;
+  version: 1 | 2;
   researchJobId: string;
   executionId: string;
   parentTaskId: string;
   contractDigest: string;
+  /** The snapshot frozen into the initially approved Plan artifact. */
+  baseSnapshotId?: string;
+  /** The current immutable effective snapshot for this execution. */
   snapshotId: string;
+  /** Digest of the complete base-to-effective snapshot lineage. */
+  scopeLineageDigest?: string;
   policy: ResearchPolicySnapshot;
   status: ResearchJobStatus;
   activeStage: ResearchStage;
@@ -264,7 +273,7 @@ export type PaperFinding = Readonly<{
 }>;
 
 export type ThemeFinding = Readonly<{
-  version: 1;
+  version: 1 | 2;
   themeFindingId: string;
   researchJobId: string;
   executionId: string;
@@ -274,6 +283,9 @@ export type ThemeFinding = Readonly<{
   paperFindingIds: readonly string[];
   evidenceRefs: readonly string[];
   limitations: readonly string[];
+  scopeLineageDigest?: string;
+  status?: "valid" | "invalidated";
+  invalidatedAt?: number;
   createdAt: number;
 }>;
 
@@ -291,7 +303,7 @@ export type ResearchProgress = Readonly<{
 }>;
 
 export type ResearchMutationApprovalGrant = Readonly<{
-  version: 1;
+  version: 1 | 2;
   grantId: string;
   planId: string;
   planRevision: number;
@@ -299,6 +311,7 @@ export type ResearchMutationApprovalGrant = Readonly<{
   conversationKey: number;
   planDigest: string;
   researchResultDigest: string;
+  scopeLineageDigest?: string;
   targetSetDigest: string;
   actionContract: AgentActionContract;
   status: "approved" | "invalidated";

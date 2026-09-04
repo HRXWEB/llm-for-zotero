@@ -114,6 +114,7 @@ const EXECUTION_STATUSES = new Set<PlanExecutionStatus>([
   "blocked",
   "failed",
   "cancelled",
+  "superseded",
 ]);
 const EVIDENCE_KINDS = new Set<TaskEvidenceKind>([
   "mutation_receipt",
@@ -224,7 +225,11 @@ function decodeRequirements(
   });
 }
 
-function decodeStep(value: unknown, index: number, typed = false): PlanStep {
+export function decodePlanStep(
+  value: unknown,
+  index: number,
+  typed = false,
+): PlanStep {
   const input = requiredRecord(value, `steps[${index}]`);
   if (!STEP_EFFECTS.has(input.expectedEffect as PlanStepEffect)) {
     throw new Error(`steps[${index}].expectedEffect is invalid`);
@@ -366,7 +371,7 @@ export function decodePlanArtifact(value: unknown): PlanArtifact {
         ? requiredString(input.contractDigest, "plan artifact contractDigest")
         : optionalString(input.contractDigest),
     steps: input.steps.map((step, index) =>
-      decodeStep(step, index, input.version === 4),
+      decodePlanStep(step, index, input.version === 4),
     ),
     createdAt: requiredNumber(input.createdAt, "plan artifact createdAt"),
     updatedAt: requiredNumber(input.updatedAt, "plan artifact updatedAt"),
@@ -479,6 +484,10 @@ export function decodePlanExecutionLedger(value: unknown): PlanExecutionLedger {
         "grant.conversationGeneration",
       ),
       actionContractId: optionalString(grant.actionContractId),
+      authority:
+        grant.authority === "auto_policy" || grant.authority === "yolo"
+          ? grant.authority
+          : "user",
       approvedAt: requiredNumber(grant.approvedAt, "grant.approvedAt"),
     },
     status: input.status as PlanExecutionStatus,
@@ -490,6 +499,8 @@ export function decodePlanExecutionLedger(value: unknown): PlanExecutionLedger {
       input.completedAt === undefined
         ? undefined
         : requiredNumber(input.completedAt, "completedAt"),
+    predecessorExecutionId: optionalString(input.predecessorExecutionId),
+    supersededByExecutionId: optionalString(input.supersededByExecutionId),
   };
 }
 

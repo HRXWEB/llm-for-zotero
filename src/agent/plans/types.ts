@@ -170,6 +170,7 @@ export type TaskEvidencePayload =
       screenedItems: number;
       candidateItems: number;
       deepReadCompleted: number;
+      scopeLineageDigest?: string;
     }>
   | Readonly<{
       type: "document_integrity";
@@ -276,7 +277,8 @@ export type PlanExecutionStatus =
   | "completed_with_exceptions"
   | "blocked"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "superseded";
 
 export type ApprovedPlanGrant = Readonly<{
   version: 1;
@@ -286,6 +288,7 @@ export type ApprovedPlanGrant = Readonly<{
   conversationKey: number;
   conversationGeneration: number;
   actionContractId?: string;
+  authority: "user" | "auto_policy" | "yolo";
   approvedAt: number;
 }>;
 
@@ -307,6 +310,8 @@ export type PlanExecutionLedger = Readonly<{
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
+  predecessorExecutionId?: string;
+  supersededByExecutionId?: string;
 }>;
 
 export type TaskTransitionRequest = Readonly<{
@@ -357,6 +362,16 @@ export type PlanEvent =
   | {
       type: "plan_research_progress";
       progress: ResearchProgress;
+    }
+  | {
+      type: "plan_scope_amended";
+      amendmentId: string;
+      executionId: string;
+      mode: "safe" | "auto" | "yolo" | "native";
+      rationale: string;
+      previousItemCount: number;
+      newItemCount: number;
+      authority: "user" | "auto_policy" | "yolo";
     }
   | {
       type: "document_ready";

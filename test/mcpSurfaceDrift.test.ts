@@ -21,6 +21,7 @@ describe("MCP tool surface has not drifted from the registry", function () {
     // quietly satisfying itself.
     const modelVisible = [
       "annotate_pdf",
+      "amend_plan",
       "approve_research_expansion",
       "approve_research_mutation",
       "attachment_update",

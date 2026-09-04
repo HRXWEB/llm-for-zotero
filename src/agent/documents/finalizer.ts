@@ -543,11 +543,15 @@ export class PlanDocumentFinalizer {
       throw new Error("Research coverage is not terminal yet");
     }
     await assertPlanDocumentPredecessorsComplete(ledger, task.taskId);
-    const corpusSnapshot = artifact.contract.investigation?.scopeSnapshot
-      ? await listScopeSnapshotItems(
-          artifact.contract.investigation.scopeSnapshot.snapshotId,
-        )
+    const effectiveSnapshotId =
+      researchJob?.snapshotId ||
+      artifact.contract.investigation?.scopeSnapshot?.snapshotId;
+    const corpusSnapshot = effectiveSnapshotId
+      ? await listScopeSnapshotItems(effectiveSnapshotId)
       : [];
+    if (researchJob && corpusSnapshot.length !== researchJob.totalItems) {
+      throw new Error("The effective research scope snapshot is incomplete");
+    }
     const researchEvidence = researchJob
       ? await listResearchEvidence(researchJob.researchJobId)
       : [];
@@ -727,6 +731,7 @@ export class PlanDocumentFinalizer {
         assets: durableAssets,
         coverageStatus: researchJob?.coverageStatus,
         coverageItems,
+        scopeLineageDigest: researchJob?.scopeLineageDigest,
         validation,
       }),
     )}`;
@@ -745,6 +750,7 @@ export class PlanDocumentFinalizer {
         executionId: ledger.executionId,
         parentTaskId: task.taskId,
         contractDigest: artifact.contractDigest,
+        scopeLineageDigest: researchJob?.scopeLineageDigest,
       },
       conversationKey: ledger.conversationKey,
       title,

@@ -5080,7 +5080,7 @@ describe("agentTrace render", function () {
     const action: AgentPendingAction = {
       toolName: "approve_research_expansion",
       mode: "review",
-      title: "Research scope expanded",
+      title: "More scoped papers qualify for deep reading.",
       description: "Choose how the research should continue.",
       confirmLabel: "Continue research",
       cancelLabel: "Revise or cancel",

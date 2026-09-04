@@ -408,7 +408,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
       };
       const approvedAt = Date.now();
       const grant: ResearchMutationApprovalGrant = {
-        version: 1,
+        version: 2,
         grantId: `${contractId}:grant`,
         planId: artifact.planId,
         planRevision: artifact.revision,
@@ -416,6 +416,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
         conversationKey: artifact.conversationKey,
         planDigest: artifact.digest,
         researchResultDigest,
+        scopeLineageDigest: job.scopeLineageDigest,
         targetSetDigest,
         actionContract,
         status: "approved",

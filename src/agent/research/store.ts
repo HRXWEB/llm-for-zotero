@@ -21,6 +21,7 @@ import {
   decodeResearchMutationApprovalGrant,
   decodeResearchRecallProbe,
 } from "./decoders";
+import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 
 export const PLAN_SCOPE_SNAPSHOTS_TABLE = "llm_for_zotero_plan_scope_snapshots";
 export const PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE =
@@ -216,8 +217,71 @@ export async function saveScopeSnapshot(params: {
   conversationKey: number;
   ref: ResearchScopeSnapshotRef;
   items: readonly ResearchScopeSnapshotItem[];
+  alreadyInTransaction?: boolean;
 }): Promise<void> {
-  await Zotero.DB.executeTransaction(async () => {
+  if (
+    params.items.length !== params.ref.itemCount ||
+    params.items.some((item) => item.snapshotId !== params.ref.snapshotId)
+  ) {
+    throw new Error(
+      "Scope snapshot items do not match their snapshot reference",
+    );
+  }
+  const write = async () => {
+    if (params.ref.parentSnapshotId) {
+      const existing = await loadScopeSnapshotRef(params.ref.snapshotId);
+      if (existing) {
+        const existingItems = await listScopeSnapshotItems(
+          params.ref.snapshotId,
+        );
+        const sameReference =
+          existing.digest === params.ref.digest &&
+          existing.itemCount === params.ref.itemCount &&
+          existing.policyVersion === params.ref.policyVersion &&
+          existing.parentSnapshotId === params.ref.parentSnapshotId &&
+          existing.scopeLineageDigest === params.ref.scopeLineageDigest;
+        if (
+          sameReference &&
+          canonicalJson(existingItems) === canonicalJson(params.items)
+        ) {
+          return;
+        }
+        throw new Error(
+          `Effective scope snapshot ${params.ref.snapshotId} is immutable`,
+        );
+      }
+      await Zotero.DB.queryAsync(
+        `INSERT INTO ${PLAN_SCOPE_SNAPSHOTS_TABLE}
+         (snapshot_id, plan_id, revision, conversation_key, digest, item_count,
+          created_at, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          params.ref.snapshotId,
+          params.planId,
+          params.revision,
+          params.conversationKey,
+          params.ref.digest,
+          params.ref.itemCount,
+          params.ref.createdAt,
+          JSON.stringify(params.ref),
+        ],
+      );
+      for (const item of params.items) {
+        await Zotero.DB.queryAsync(
+          `INSERT INTO ${PLAN_SCOPE_SNAPSHOT_ITEMS_TABLE}
+           (snapshot_id, library_id, item_key, ordinal, payload_json)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            item.snapshotId,
+            item.libraryID,
+            item.itemKey,
+            item.ordinal,
+            JSON.stringify(item),
+          ],
+        );
+      }
+      return;
+    }
     await Zotero.DB.queryAsync(
       `INSERT OR REPLACE INTO ${PLAN_SCOPE_SNAPSHOTS_TABLE}
        (snapshot_id, plan_id, revision, conversation_key, digest, item_count,
@@ -252,7 +316,9 @@ export async function saveScopeSnapshot(params: {
         ],
       );
     }
-  });
+  };
+  if (params.alreadyInTransaction) await write();
+  else await Zotero.DB.executeTransaction(write);
 }
 
 export async function listScopeSnapshotItems(
@@ -269,25 +335,45 @@ export async function listScopeSnapshotItems(
     .filter((item): item is ResearchScopeSnapshotItem => Boolean(item));
 }
 
+export async function loadScopeSnapshotRef(
+  snapshotId: string,
+): Promise<ResearchScopeSnapshotRef | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${PLAN_SCOPE_SNAPSHOTS_TABLE}
+     WHERE snapshot_id = ? LIMIT 1`,
+    [snapshotId],
+  )) as JsonRow[] | undefined;
+  if (typeof rows?.[0]?.payloadJson !== "string") return null;
+  const value = JSON.parse(rows[0].payloadJson) as ResearchScopeSnapshotRef;
+  return value?.snapshotId === snapshotId ? value : null;
+}
+
 export async function saveResearchJob(
   job: ResearchJob,
   conversationKey: number,
 ): Promise<void> {
-  decodeResearchJob(job);
+  const decoded = decodeResearchJob(job);
+  const stored: ResearchJob = {
+    ...decoded,
+    version: 2,
+    baseSnapshotId: decoded.baseSnapshotId || decoded.snapshotId,
+    scopeLineageDigest:
+      decoded.scopeLineageDigest || `legacy:${decoded.snapshotId}`,
+  };
   await Zotero.DB.queryAsync(
     `INSERT OR REPLACE INTO ${RESEARCH_JOBS_TABLE}
      (research_job_id, execution_id, parent_task_id, conversation_key, status,
       payload_json, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      job.researchJobId,
-      job.executionId,
-      job.parentTaskId,
+      stored.researchJobId,
+      stored.executionId,
+      stored.parentTaskId,
       conversationKey,
-      job.status,
-      JSON.stringify(job),
-      job.createdAt,
-      job.updatedAt,
+      stored.status,
+      JSON.stringify(stored),
+      stored.createdAt,
+      stored.updatedAt,
     ],
   );
 }
@@ -354,6 +440,29 @@ export async function saveResearchCorpusItem(
   decodeResearchCorpusItem(item);
   await Zotero.DB.queryAsync(
     `INSERT OR REPLACE INTO ${RESEARCH_CORPUS_ITEMS_TABLE}
+     (research_job_id, execution_id, parent_task_id, library_id, item_key,
+      ordinal, screening_status, payload_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      item.researchJobId,
+      item.executionId,
+      item.parentTaskId,
+      item.libraryID,
+      item.itemKey,
+      item.ordinal,
+      item.screeningStatus,
+      JSON.stringify(item),
+      item.updatedAt,
+    ],
+  );
+}
+
+export async function appendResearchCorpusItem(
+  item: ResearchCorpusItem,
+): Promise<void> {
+  decodeResearchCorpusItem(item);
+  await Zotero.DB.queryAsync(
+    `INSERT OR IGNORE INTO ${RESEARCH_CORPUS_ITEMS_TABLE}
      (research_job_id, execution_id, parent_task_id, library_id, item_key,
       ordinal, screening_status, payload_json, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -637,6 +746,7 @@ export async function saveThemeFinding(finding: ThemeFinding): Promise<void> {
 
 export async function listThemeFindings(
   researchJobId: string,
+  scopeLineageDigest?: string,
 ): Promise<ThemeFinding[]> {
   const rows = (await Zotero.DB.queryAsync(
     `SELECT payload_json AS payloadJson FROM ${RESEARCH_THEME_FINDINGS_TABLE}
@@ -645,7 +755,31 @@ export async function listThemeFindings(
   )) as JsonRow[] | undefined;
   return (rows || [])
     .map((row) => parse(row, decodeThemeFinding))
-    .filter((finding): finding is ThemeFinding => Boolean(finding));
+    .filter((finding): finding is ThemeFinding =>
+      Boolean(
+        finding &&
+        finding.status !== "invalidated" &&
+        (!scopeLineageDigest ||
+          !finding.scopeLineageDigest ||
+          finding.scopeLineageDigest === scopeLineageDigest),
+      ),
+    );
+}
+
+export async function invalidateThemeFindings(
+  researchJobId: string,
+  now = Date.now(),
+): Promise<void> {
+  const findings = await listThemeFindings(researchJobId);
+  for (const finding of findings) {
+    const invalidated: ThemeFinding = {
+      ...finding,
+      version: 2,
+      status: "invalidated",
+      invalidatedAt: now,
+    };
+    await saveThemeFinding(invalidated);
+  }
 }
 
 export async function saveResearchMutationApprovalGrant(
@@ -684,6 +818,19 @@ export async function loadLatestResearchMutationApprovalGrant(
     throw new Error("Research mutation approval belongs to another execution");
   }
   return value;
+}
+
+export async function invalidateLatestResearchMutationApprovalGrant(
+  executionId: string,
+  now = Date.now(),
+): Promise<void> {
+  const grant = await loadLatestResearchMutationApprovalGrant(executionId);
+  if (!grant || grant.status !== "approved") return;
+  await saveResearchMutationApprovalGrant({
+    ...grant,
+    status: "invalidated",
+    invalidatedAt: now,
+  });
 }
 
 export async function clearResearchConversationRowsInTransaction(

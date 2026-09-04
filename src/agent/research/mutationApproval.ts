@@ -20,10 +20,14 @@ export async function researchMutationDigest(value: unknown): Promise<string> {
 export async function computeResearchResultDigest(params: {
   job: ResearchJob;
   findings: readonly PaperFinding[];
+  includeScopeLineage?: boolean;
 }): Promise<string> {
   return researchMutationDigest({
     researchJobId: params.job.researchJobId,
     coverageStatus: params.job.coverageStatus,
+    ...(params.includeScopeLineage !== false
+      ? { scopeLineageDigest: params.job.scopeLineageDigest }
+      : {}),
     findings: params.findings.map((finding) => ({
       findingId: finding.findingId,
       libraryID: finding.libraryID,
@@ -79,10 +83,21 @@ async function validateResearchMutationGrantInternal(params: {
       "The research result behind the mutation approval is not terminal",
     );
   }
+  if (
+    grant.version === 2 &&
+    grant.scopeLineageDigest !== job.scopeLineageDigest
+  ) {
+    throw new Error(
+      "The research scope lineage changed after mutation approval",
+    );
+  }
   const findings = await listPaperFindings(job.researchJobId);
   if (
-    (await computeResearchResultDigest({ job, findings })) !==
-    grant.researchResultDigest
+    (await computeResearchResultDigest({
+      job,
+      findings,
+      includeScopeLineage: grant.version === 2,
+    })) !== grant.researchResultDigest
   ) {
     throw new Error("Research findings changed after mutation approval");
   }

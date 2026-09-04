@@ -91,6 +91,7 @@ type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
 const INTERNAL_PLAN_TOOL_NAMES = new Set([
   "update_plan",
+  "amend_plan",
   "task_update",
   "request_user_input",
   "submit_plan_document",
@@ -4250,6 +4251,32 @@ function appendSharedAgentTraceEvent(
   entry: AgentRunEventRecord,
 ): boolean {
   switch (entry.payload.type) {
+    case "plan_scope_amended":
+      ctx.items.push({
+        type: "action",
+        row: {
+          kind: "plan",
+          icon: "↳",
+          text:
+            `Scope amended${entry.payload.authority === "user" ? "" : " automatically"} (${entry.payload.previousItemCount} to ` +
+            `${entry.payload.newItemCount}; ${entry.payload.authority}): ` +
+            entry.payload.rationale,
+        },
+        details: [
+          {
+            label: "Mode",
+            value: entry.payload.mode,
+            kind: "text",
+          },
+          {
+            label: "Amendment",
+            value: entry.payload.amendmentId,
+            kind: "text",
+          },
+        ],
+        detailKey: `plan-amendment:${entry.payload.amendmentId}`,
+      });
+      return true;
     case "confirmation_required":
       ctx.pendingActions.set(entry.payload.requestId, entry.payload.action);
       ctx.items.push({
@@ -4702,7 +4729,10 @@ function renderPlanContainer(params: {
         return "Failed";
       case "cancelled":
         return "Cancelled";
+      case "superseded":
+        return "Superseded";
     }
+    return status;
   };
 
   const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
@@ -5087,7 +5117,7 @@ function renderPlanContainer(params: {
       const approvalHint = params.doc.createElement("p");
       approvalHint.className = "llm-plan-approval-hint";
       approvalHint.textContent =
-        "Approve to start these steps. Anything outside this plan will still require a new decision.";
+        "Approve to start these steps. During execution, Safe reviews eligible scope amendments, Auto handles in-goal amendments, and YOLO may also approve successor revisions. Hard safety boundaries remain enforced.";
       root.appendChild(approvalHint);
       const actions = params.doc.createElement("div");
       actions.className = "llm-plan-actions llm-plan-review-actions";

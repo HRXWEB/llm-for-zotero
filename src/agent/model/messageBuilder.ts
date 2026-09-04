@@ -267,7 +267,7 @@ function buildFullUserMessage(
           "APPROVED PLAN EXECUTION:",
           `Plan identity: ${ledger.planId} revision ${ledger.revision}; execution ${ledger.executionId}.`,
           `Approved digest: ${ledger.planDigest}.`,
-          "The host has already frozen and fingerprinted the exact scope. Do not re-enumerate or re-verify it with library_search; research_update inventory_scope is the authoritative scope check and supplies the durable corpus.",
+          "The host has already frozen and fingerprinted the approved base scope. The active research job owns its effective immutable snapshot. Do not re-enumerate it with library_search; research_update inventory_scope is authoritative. If a paper newly qualifies inside an expandable approved source, use amend_plan research_scope with its exact Zotero identity. Use amend_plan contract_revision for a changed question, source boundary, deliverable, operation, or parameters.",
           "Execute required tasks in order. Provider task status is only a request; the host accepts completion only from verified evidence.",
           ...ledger.tasks.map(
             (task, index) =>

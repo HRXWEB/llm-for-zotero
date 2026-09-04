@@ -5,7 +5,13 @@ import type {
 } from "../../types";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { loadPlanArtifact } from "../../plans/store";
+import { loadPlanExecutionLedger } from "../../plans/store";
 import { planExecutionCoordinator } from "../../plans/coordinator";
+import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
+import {
+  planAmendmentService,
+  type PlanAmendmentService,
+} from "../../plans/amendments";
 import { shouldCheckpointResearchExpansion } from "../../research/policy";
 import {
   loadResearchJobForExecution,
@@ -45,7 +51,7 @@ function pendingAction(
 ): AgentPendingAction {
   return {
     toolName: "approve_research_expansion",
-    title: "Research scope expanded",
+    title: "More scoped papers qualify for deep reading.",
     description:
       `${input.reason}\n\nContinue deep reading up to ` +
       `${input.proposedDeepReadCeiling} candidate papers?`,
@@ -98,15 +104,14 @@ function progress(
   };
 }
 
-export function createApproveResearchExpansionTool(): AgentToolDefinition<
-  ApproveResearchExpansionInput,
-  unknown
-> {
+export function createApproveResearchExpansionTool(
+  amendments: PlanAmendmentService = planAmendmentService,
+): AgentToolDefinition<ApproveResearchExpansionInput, unknown> {
   return {
     spec: {
       name: "approve_research_expansion",
       description:
-        "Request the required user checkpoint when screening finds materially more deep-read candidates than the approved estimate. This changes only the research ceiling, never the Zotero library.",
+        "Resolve a material increase in deep-read candidates. Safe asks the user; Auto and YOLO record a durable amendment and continue. This changes only reading depth, never the Zotero library.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -131,7 +136,9 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
       readOnlyInvocationPlan({
         reason: "This confirmation changes only the active plan workflow.",
       }),
-    shouldRequireConfirmation: () => true,
+    shouldRequireConfirmation: (_input, context) =>
+      context.request.planContext?.provider === "original" &&
+      getOriginalAgentPermissionMode() === "safe",
     createPendingAction: pendingAction,
     applyConfirmation: (input, data) => {
       const record = validateObject<Record<string, unknown>>(data) ? data : {};
@@ -150,16 +157,22 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
       if (!plan || plan.phase !== "executing") {
         throw new Error("Research expansion requires approved plan execution");
       }
-      const [job, artifact] = await Promise.all([
+      const [job, artifact, ledger] = await Promise.all([
         loadResearchJobForExecution(plan.executionId),
         loadPlanArtifact(plan.planId, plan.revision),
+        loadPlanExecutionLedger(plan.executionId),
       ]);
       const investigation = artifact?.contract?.investigation;
       if (
         !job ||
         !artifact ||
         artifact.digest !== plan.approvedDigest ||
-        !investigation
+        !investigation ||
+        !ledger ||
+        ledger.planDigest !== artifact.digest ||
+        artifact.status !== "approved" ||
+        ledger.executionId !== plan.executionId ||
+        ["failed", "cancelled", "superseded"].includes(ledger.status)
       ) {
         throw new Error("The approved research contract is unavailable");
       }
@@ -239,7 +252,66 @@ export function createApproveResearchExpansionTool(): AgentToolDefinition<
         deepReadPlanned: input.proposedDeepReadCeiling,
         updatedAt: now,
       };
-      await saveResearchJob(next, artifact.conversationKey);
+      const originalMode = getOriginalAgentPermissionMode();
+      const mode = plan.provider === "original" ? originalMode : "native";
+      const authorityDecision = amendments.decideAuthority({
+        provider: plan.provider,
+        originalMode,
+        goalImpact: "deep_read",
+        hardBlocked: false,
+      });
+      if (authorityDecision.kind === "block") {
+        throw new Error(authorityDecision.reason);
+      }
+      const authority =
+        authorityDecision.kind === "execute"
+          ? authorityDecision.authority
+          : "user";
+      const previousScopeDigest =
+        job.scopeLineageDigest ||
+        investigation.scopeSnapshot?.digest ||
+        job.snapshotId;
+      const targetSetDigest = await amendments.digest({
+        researchJobId: job.researchJobId,
+        proposedDeepReadCeiling: input.proposedDeepReadCeiling,
+      });
+      const proposal = await amendments.buildProposal({
+        kind: "research_ceiling",
+        goalImpact: "deep_read",
+        planId: artifact.planId,
+        planRevision: artifact.revision,
+        planDigest: artifact.digest,
+        executionId: ledger.executionId,
+        executionDigest: await amendments.executionIdentityDigest(ledger),
+        conversationKey: artifact.conversationKey,
+        previousScopeDigest,
+        resultingScopeDigest: previousScopeDigest,
+        targetSetDigest,
+        proposalPayloadDigest: targetSetDigest,
+        proposedDeepReadCeiling: input.proposedDeepReadCeiling,
+        rationale: input.reason,
+        now,
+      });
+      let grant = await amendments.authorize(proposal, authority, now);
+      try {
+        await Zotero.DB.executeTransaction(async () => {
+          await saveResearchJob(next, artifact.conversationKey);
+          grant = await amendments.markApplied(grant, now);
+        });
+      } catch (error) {
+        await amendments.markFailed(grant, error, now);
+        throw error;
+      }
+      await context.publishPlanEvent?.({
+        type: "plan_scope_amended",
+        amendmentId: proposal.amendmentId,
+        executionId: plan.executionId,
+        mode,
+        rationale: input.reason,
+        previousItemCount: job.deepReadPlanned,
+        newItemCount: next.deepReadPlanned,
+        authority: grant.authority,
+      });
       await context.publishPlanEvent?.({
         type: "plan_research_progress",
         progress: progress(next),

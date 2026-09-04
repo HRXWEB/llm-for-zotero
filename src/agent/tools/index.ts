@@ -67,6 +67,8 @@ import {
 import { createResearchUpdateTool } from "./plan/researchUpdate";
 import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
 import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
+import { PlanAmendmentService } from "../plans/amendments";
+import { createAmendPlanTool } from "./plan/amendPlan";
 
 type BuiltInAgentToolDeps = {
   zoteroGateway: ZoteroGateway;
@@ -519,8 +521,10 @@ function createLibraryDeleteTool(tools: {
 export function createBuiltInToolRegistry(
   deps: BuiltInAgentToolDeps,
 ): AgentToolRegistry {
+  const planAmendments = new PlanAmendmentService(deps.zoteroGateway);
   const registry = new AgentToolRegistry(
     new ActionContractService(deps.zoteroGateway),
+    planAmendments,
   );
   const queryLibrary = createQueryLibraryTool(deps.zoteroGateway);
   const readLibrary = createReadLibraryTool(deps.zoteroGateway);
@@ -682,7 +686,8 @@ export function createBuiltInToolRegistry(
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
   registry.register(createSubmitPlanDocumentTool(deps.zoteroGateway));
   registry.register(createResearchUpdateTool(deps.zoteroGateway));
-  registry.register(createApproveResearchExpansionTool());
+  registry.register(createApproveResearchExpansionTool(planAmendments));
+  registry.register(createAmendPlanTool(deps.zoteroGateway, planAmendments));
   registry.register(createApproveResearchMutationTool());
 
   const legacyTools: AgentToolDefinition<any, any>[] = [

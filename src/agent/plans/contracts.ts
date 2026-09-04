@@ -656,12 +656,24 @@ function decodeResearchContract(
       : estimatedDeepReadPapers > 0
         ? "selected"
         : "adaptive";
+  const defaultScopeAmendmentPolicy =
+    decodeScope(input.scope).kind === "items" ? "fixed" : "within_source";
+  if (
+    input.scopeAmendmentPolicy !== undefined &&
+    input.scopeAmendmentPolicy !== "fixed" &&
+    input.scopeAmendmentPolicy !== "within_source"
+  ) {
+    throw new Error("investigation.scopeAmendmentPolicy is invalid");
+  }
   return {
     question: text(input.question, "investigation.question"),
     subquestions: decodeSubquestions(input.subquestions),
     criteria,
     reviewMode,
     readingStrategy,
+    scopeAmendmentPolicy:
+      (input.scopeAmendmentPolicy as ResearchContract["scopeAmendmentPolicy"]) ||
+      defaultScopeAmendmentPolicy,
     scope: decodeScope(input.scope),
     scopeSnapshot,
     queryVariants: Array.isArray(input.queryVariants)

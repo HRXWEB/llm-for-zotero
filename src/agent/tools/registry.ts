@@ -41,6 +41,8 @@ import { validateConfirmationResolution } from "./confirmationValidation";
 import { prepareActionExecution } from "../contracts/actionOperationEvidence";
 import { defaultInvocationPlan } from "../authorization/invocationPlan";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
+import type { PlanAmendmentService } from "../plans/amendments";
+import type { PlanAmendmentGrant } from "../plans/planAmendmentTypes";
 
 type PreparedInvocationState = {
   input: unknown;
@@ -329,7 +331,10 @@ function assertPortableModelToolSchema(spec: ToolSpec): void {
 export class AgentToolRegistry {
   private readonly tools = new Map<string, AgentToolDefinition<any, any>>();
 
-  constructor(private readonly actionContracts?: ActionContractService) {}
+  constructor(
+    private readonly actionContracts?: ActionContractService,
+    private readonly planAmendments?: PlanAmendmentService,
+  ) {}
 
   async createActionContract(
     request: AgentRuntimeRequest,
@@ -554,6 +559,7 @@ export class AgentToolRegistry {
     const callerKind = options.inheritedApproval
       ? "action"
       : options.callerKind || "model";
+    const writeMode = getOriginalAgentPermissionMode();
     const enforceActionContract =
       callerKind === "model" || Boolean(context.journalActionScope);
     const hasExternalEffect =
@@ -610,9 +616,61 @@ export class AgentToolRegistry {
         `Write blocked: ${call.name} has no configured Action Contract verifier.`,
       );
     }
-    let planScopeFailure: ScopeValidationFailure | null = null;
+    const journalUnavailable =
+      invocationPlan.impact !== "read_only" && !isAgentChangeJournalAvailable();
+    let amendablePlanScopeFailure: ScopeValidationFailure | null = null;
+    let activePlanScopeFailure: ScopeValidationFailure | null = null;
     let initialScopeValidated = false;
     let approvedPlanScopeProposalDigest: string | undefined;
+    let activePlanAmendmentGrant: PlanAmendmentGrant | undefined;
+    const decidePlanScopeAmendment = (
+      failure: ScopeValidationFailure,
+      assessedPlan = invocationPlan,
+    ) =>
+      this.planAmendments?.decideActionScopeAmendment({
+        planContext: context.request.planContext,
+        originalMode: writeMode,
+        failure,
+        actionImpact: assessedPlan.impact,
+        riskSignals: assessedPlan.riskSignals,
+        hasHardConstraints: Boolean(
+          normalizeStoredActionConstraints(
+            context.request.actionContract?.hardConstraints,
+          ).length,
+        ),
+      }) || {
+        kind: "block" as const,
+        reason: "Plan amendment authority is unavailable.",
+      };
+    const authorizePlanScopeAmendment = async (
+      failure: ScopeValidationFailure,
+      actionProposal: ActionProposal,
+      authority: "user" | "auto_policy" | "yolo",
+    ) => {
+      const plan = context.request.planContext;
+      if (!this.planAmendments || !plan || plan.phase !== "executing") {
+        throw new Error("Plan amendment authority is unavailable");
+      }
+      const grant = await this.planAmendments.authorizeActionScopeAmendment({
+        plan,
+        conversationKey: context.request.conversationKey,
+        failure,
+        actionProposal,
+        authority,
+      });
+      activePlanAmendmentGrant = grant;
+      activePlanScopeFailure = failure;
+      approvedPlanScopeProposalDigest = actionProposal.payloadDigest;
+      return grant;
+    };
+    const failActivePlanScopeAmendment = async (reason: unknown) => {
+      if (activePlanAmendmentGrant && this.planAmendments) {
+        activePlanAmendmentGrant = await this.planAmendments.markFailed(
+          activePlanAmendmentGrant,
+          reason,
+        );
+      }
+    };
     if (
       preparedAction &&
       context.request.actionContract &&
@@ -630,17 +688,30 @@ export class AgentToolRegistry {
         },
       );
       if (scopeFailure) {
-        const canRequestOneOffPlanApproval =
-          context.request.planContext?.phase === "executing" &&
-          !normalizeStoredActionConstraints(
-            context.request.actionContract.hardConstraints,
-          ).length &&
-          !/did not produce a typed action proposal/i.test(
-            scopeFailure.message,
-          );
-        if (canRequestOneOffPlanApproval) {
-          planScopeFailure = scopeFailure;
-        } else
+        const decision = decidePlanScopeAmendment(scopeFailure);
+        if (decision.kind !== "block") {
+          amendablePlanScopeFailure = scopeFailure;
+          if (decision.kind === "execute") {
+            if (journalUnavailable) {
+              return createSyntheticErrorResult(
+                call,
+                `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
+              );
+            }
+            try {
+              await authorizePlanScopeAmendment(
+                scopeFailure,
+                proposal,
+                decision.authority,
+              );
+            } catch (error) {
+              return createSyntheticErrorResult(
+                call,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          }
+        } else {
           return {
             kind: "result",
             execution: {
@@ -656,7 +727,10 @@ export class AgentToolRegistry {
                   scopeFailure,
                 ),
                 content: {
+                  code: scopeFailure.code,
                   error: scopeFailure.message,
+                  requiresPlanRevision:
+                    context.request.planContext?.phase === "executing",
                   retryable: true,
                   expectedCount: scopeFailure.expectedCount,
                   proposedCount: scopeFailure.proposedCount,
@@ -666,7 +740,14 @@ export class AgentToolRegistry {
               },
             },
           };
+        }
       }
+    }
+    if (journalUnavailable) {
+      return createSyntheticErrorResult(
+        call,
+        `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
+      );
     }
 
     const finalizeReceipts = (
@@ -688,6 +769,14 @@ export class AgentToolRegistry {
               prepared,
               params,
               context.request.actionProgress,
+              activePlanScopeFailure?.amendableObligation
+                ? {
+                    obligationId:
+                      activePlanScopeFailure.amendableObligation.obligationId,
+                    addedTargetIds:
+                      activePlanScopeFailure.amendableObligation.addedTargetIds,
+                  }
+                : undefined,
             )
           : createFallbackToolReceipts({
               toolName: call.name,
@@ -748,6 +837,12 @@ export class AgentToolRegistry {
         },
       });
       if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
+        if (activePlanAmendmentGrant && this.planAmendments) {
+          activePlanAmendmentGrant = await this.planAmendments.markFailed(
+            activePlanAmendmentGrant,
+            "Conversation lifecycle changed before execution.",
+          );
+        }
         return lifecycleError();
       }
       try {
@@ -789,6 +884,9 @@ export class AgentToolRegistry {
       let executionScopeValidated = false;
       let executionScopeFailure: ScopeValidationFailure | null = null;
       if (hasExternalEffect && !isAgentChangeJournalAvailable()) {
+        await failActivePlanScopeAmendment(
+          "The durable change journal became unavailable before execution.",
+        );
         return {
           tool,
           input: resolvedInput,
@@ -812,6 +910,9 @@ export class AgentToolRegistry {
         (!executionPrepared?.hasExplicitAdapter ||
           !executionPrepared.proposals.length)
       ) {
+        await failActivePlanScopeAmendment(
+          "The typed action adapter became unavailable before execution.",
+        );
         return {
           tool,
           input: resolvedInput,
@@ -830,6 +931,9 @@ export class AgentToolRegistry {
         context.request.planContext?.phase === "planning" &&
         hasExternalEffect
       ) {
+        await failActivePlanScopeAmendment(
+          "The Plan returned to planning before execution.",
+        );
         return {
           tool,
           input: resolvedInput,
@@ -852,6 +956,9 @@ export class AgentToolRegistry {
         hasExternalEffect &&
         !context.request.actionContract
       ) {
+        await failActivePlanScopeAmendment(
+          "The frozen action contract became unavailable before execution.",
+        );
         return {
           tool,
           input: resolvedInput,
@@ -887,10 +994,20 @@ export class AgentToolRegistry {
             progress: context.request.actionProgress,
           },
         );
-        if (
+        const matchesAmendmentGrant =
           executionScopeFailure &&
-          approvedPlanScopeProposalDigest !== executionProposal.payloadDigest
-        ) {
+          activePlanAmendmentGrant &&
+          this.planAmendments
+            ? await this.planAmendments.actionScopeGrantMatches({
+                grant: activePlanAmendmentGrant,
+                failure: executionScopeFailure,
+                actionProposal: executionProposal,
+              })
+            : false;
+        if (executionScopeFailure && !matchesAmendmentGrant) {
+          await failActivePlanScopeAmendment(
+            "The action targets or payload changed after amendment authorization.",
+          );
           return {
             tool,
             input: resolvedInput,
@@ -904,6 +1021,7 @@ export class AgentToolRegistry {
                 executionScopeFailure,
               ),
               content: {
+                code: executionScopeFailure.code,
                 error: executionScopeFailure.message,
                 retryable: true,
                 expectedCount: executionScopeFailure.expectedCount,
@@ -944,6 +1062,7 @@ export class AgentToolRegistry {
               })
             : ({ kind: "execute", authority: "auto_policy" } as const);
       if (executionAuthorization.kind === "block") {
+        await failActivePlanScopeAmendment(executionAuthorization.reason);
         return {
           tool,
           input: resolvedInput,
@@ -969,6 +1088,9 @@ export class AgentToolRegistry {
       if (callerKind === "model" && hasExternalEffect && context.runId) {
         const progress = context.request.actionProgress;
         if (!progress || !context.checkpointActionProgress) {
+          await failActivePlanScopeAmendment(
+            "Action authorization could not be persisted before execution.",
+          );
           return {
             tool,
             input: resolvedInput,
@@ -993,15 +1115,21 @@ export class AgentToolRegistry {
           proposalDigest: executionProposal.payloadDigest,
           toolName: call.name,
           authority:
-            context.request.planContext?.phase === "executing" &&
-            !planScopeFailure
-              ? "plan_approval"
-              : executionAuthorization.kind === "confirm"
-                ? "safe_confirmation"
-                : executionAuthorization.kind === "execute" &&
-                    executionAuthorization.authority === "yolo"
-                  ? "yolo"
-                  : "auto_policy",
+            activePlanAmendmentGrant?.authority === "user"
+              ? "safe_confirmation"
+              : activePlanAmendmentGrant?.authority === "yolo"
+                ? "yolo"
+                : activePlanAmendmentGrant?.authority === "auto_policy"
+                  ? "auto_policy"
+                  : context.request.planContext?.phase === "executing" &&
+                      !amendablePlanScopeFailure
+                    ? "plan_approval"
+                    : executionAuthorization.kind === "confirm"
+                      ? "safe_confirmation"
+                      : executionAuthorization.kind === "execute" &&
+                          executionAuthorization.authority === "yolo"
+                        ? "yolo"
+                        : "auto_policy",
           status: "staged",
           createdAt: Date.now(),
         };
@@ -1010,6 +1138,12 @@ export class AgentToolRegistry {
           await context.checkpointActionProgress();
         } catch (error) {
           grants.splice(grants.indexOf(stagedGrant), 1);
+          if (activePlanAmendmentGrant && this.planAmendments) {
+            activePlanAmendmentGrant = await this.planAmendments.markFailed(
+              activePlanAmendmentGrant,
+              error,
+            );
+          }
           return {
             tool,
             input: resolvedInput,
@@ -1032,6 +1166,12 @@ export class AgentToolRegistry {
       }
       const execute = async () => {
         if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
+          if (activePlanAmendmentGrant && this.planAmendments) {
+            activePlanAmendmentGrant = await this.planAmendments.markFailed(
+              activePlanAmendmentGrant,
+              "Conversation lifecycle changed before execution.",
+            );
+          }
           return lifecycleError();
         }
         try {
@@ -1044,12 +1184,24 @@ export class AgentToolRegistry {
           );
           if (stagedGrant) stagedGrant.status = "executed";
           if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
+            if (activePlanAmendmentGrant && this.planAmendments) {
+              activePlanAmendmentGrant = await this.planAmendments.markFailed(
+                activePlanAmendmentGrant,
+                "Conversation lifecycle changed during execution.",
+              );
+            }
             return lifecycleError();
           }
           if (
             tool.spec.executionClass === "external_effect" &&
             executionOutput.effect === undefined
           ) {
+            if (activePlanAmendmentGrant && this.planAmendments) {
+              activePlanAmendmentGrant = await this.planAmendments.markFailed(
+                activePlanAmendmentGrant,
+                "Tool completed without an explicit write effect.",
+              );
+            }
             return {
               tool,
               input: resolvedInput,
@@ -1066,6 +1218,31 @@ export class AgentToolRegistry {
                 },
               },
             };
+          }
+          if (activePlanAmendmentGrant && this.planAmendments) {
+            activePlanAmendmentGrant = await this.planAmendments.markApplied(
+              activePlanAmendmentGrant,
+            );
+            const details = activePlanScopeFailure?.amendableObligation;
+            if (details) {
+              await context.publishPlanEvent?.({
+                type: "plan_scope_amended",
+                amendmentId: activePlanAmendmentGrant.proposal.amendmentId,
+                executionId: activePlanAmendmentGrant.proposal.executionId,
+                mode:
+                  context.request.planContext?.provider !== "original"
+                    ? "native"
+                    : activePlanAmendmentGrant.authority === "yolo"
+                      ? "yolo"
+                      : activePlanAmendmentGrant.authority === "user"
+                        ? "safe"
+                        : "auto",
+                rationale: activePlanAmendmentGrant.proposal.rationale,
+                previousItemCount: details.previousTargetIds.length,
+                newItemCount: details.currentTargetIds.length,
+                authority: activePlanAmendmentGrant.authority,
+              });
+            }
           }
           return {
             tool,
@@ -1098,6 +1275,12 @@ export class AgentToolRegistry {
           };
         } catch (error) {
           if (stagedGrant) stagedGrant.status = "failed";
+          if (activePlanAmendmentGrant && this.planAmendments) {
+            activePlanAmendmentGrant = await this.planAmendments.markFailed(
+              activePlanAmendmentGrant,
+              error,
+            );
+          }
           if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
             return lifecycleError();
           }
@@ -1294,15 +1477,12 @@ export class AgentToolRegistry {
           },
         );
         if (confirmedScopeFailure) {
-          const canRequestOneOffPlanApproval =
-            context.request.planContext?.phase === "executing" &&
-            !normalizeStoredActionConstraints(
-              context.request.actionContract.hardConstraints,
-            ).length &&
-            !/did not produce a typed action proposal/i.test(
-              confirmedScopeFailure.message,
-            );
-          if (!canRequestOneOffPlanApproval) {
+          if (
+            decidePlanScopeAmendment(
+              confirmedScopeFailure,
+              confirmedInvocation.plan,
+            ).kind === "block"
+          ) {
             return {
               tool,
               input: resolvedInput,
@@ -1316,7 +1496,10 @@ export class AgentToolRegistry {
                   confirmedScopeFailure,
                 ),
                 content: {
+                  code: confirmedScopeFailure.code,
                   error: confirmedScopeFailure.message,
+                  requiresPlanRevision:
+                    context.request.planContext?.phase === "executing",
                   retryable: true,
                   expectedCount: confirmedScopeFailure.expectedCount,
                   proposedCount: confirmedScopeFailure.proposedCount,
@@ -1421,8 +1604,35 @@ export class AgentToolRegistry {
         };
       }
       if (confirmedScopeFailure) {
-        approvedPlanScopeProposalDigest =
-          confirmedInvocation.proposal.payloadDigest;
+        try {
+          await authorizePlanScopeAmendment(
+            confirmedScopeFailure,
+            confirmedInvocation.proposal,
+            "user",
+          );
+        } catch (error) {
+          return {
+            tool,
+            input: resolvedInput,
+            result: {
+              callId: call.id,
+              name: call.name,
+              ok: false,
+              actionReceipts: finalizeReceipts(
+                {
+                  ok: false,
+                  reason:
+                    error instanceof Error ? error.message : String(error),
+                },
+                confirmedInvocation.preparedAction,
+                resolvedInput,
+              ),
+              content: {
+                error: error instanceof Error ? error.message : String(error),
+              },
+            },
+          };
+        }
       }
       return runWithInput(resolvedInput, executionContext, confirmedInvocation);
     };
@@ -1434,15 +1644,6 @@ export class AgentToolRegistry {
             context,
           )) ?? tool.spec.requiresConfirmation)
         : false;
-    const writeMode = getOriginalAgentPermissionMode();
-    const journalUnavailable =
-      invocationPlan.impact !== "read_only" && !isAgentChangeJournalAvailable();
-    if (journalUnavailable) {
-      return createSyntheticErrorResult(
-        call,
-        `${call.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
-      );
-    }
     const authorization =
       callerKind === "model" &&
       context.request.planContext?.phase === "executing" &&
@@ -1467,7 +1668,7 @@ export class AgentToolRegistry {
                 request: context.request,
                 prepared: preparedAction,
                 scopeValidated: initialScopeValidated,
-                scopeFailure: planScopeFailure,
+                scopeFailure: amendablePlanScopeFailure,
               }),
             })
           : { kind: "execute" as const, authority: "auto_policy" as const };
@@ -1481,7 +1682,10 @@ export class AgentToolRegistry {
       tool.createPendingAction
         ? true
         : callerKind === "model"
-          ? Boolean(planScopeFailure) ||
+          ? Boolean(
+              amendablePlanScopeFailure &&
+              approvedPlanScopeProposalDigest !== proposal.payloadDigest,
+            ) ||
             planRequiresConfirmation ||
             (tool.spec.interaction === "user_input" && toolWantsConfirmation)
           : callerKind === "mcp"
@@ -1489,10 +1693,10 @@ export class AgentToolRegistry {
             : toolWantsConfirmation;
     if (shouldRequireConfirmation) {
       const requestId = createRequestId();
-      const pendingAction = planScopeFailure
+      const pendingAction = amendablePlanScopeFailure
         ? createProposalConfirmationAction({
             ...proposal,
-            summary: `${proposal.summary}\n\nThis operation is outside the approved plan scope: ${planScopeFailure.message}`,
+            summary: `${proposal.summary}\n\nNew targets now qualify inside the approved source: ${amendablePlanScopeFailure.message}`,
           })
         : tool.createPendingAction
           ? await tool.createPendingAction(validation.value, context)

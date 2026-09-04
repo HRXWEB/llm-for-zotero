@@ -178,6 +178,7 @@ export type DocumentArtifactV2 = DocumentArtifactFields &
           executionId: string;
           parentTaskId: string;
           contractDigest: string;
+          scopeLineageDigest?: string;
         }>
       | Readonly<{
           kind: "direct";
@@ -201,6 +202,7 @@ export function getPlannedDocumentOrigin(document: DocumentArtifact):
       executionId: string;
       parentTaskId: string;
       contractDigest: string;
+      scopeLineageDigest?: string;
     }>
   | undefined {
   return document.version === 1
@@ -210,6 +212,7 @@ export function getPlannedDocumentOrigin(document: DocumentArtifact):
         executionId: document.executionId,
         parentTaskId: document.parentTaskId,
         contractDigest: document.contractDigest,
+        scopeLineageDigest: undefined,
       }
     : document.origin.kind === "planned"
       ? document.origin

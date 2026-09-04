@@ -7177,6 +7177,11 @@ function createCodexNativeActivityTraceController(
   };
 
   const appendPlanEvent = (event: AgentEvent): void => {
+    if (event.type === "plan_scope_amended") {
+      events.push(createEvent(event));
+      sync();
+      return;
+    }
     if (event.type === "plan_research_progress") {
       const priorIndex = events.findIndex(
         (entry) =>

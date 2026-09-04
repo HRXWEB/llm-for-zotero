@@ -10,6 +10,12 @@ import {
   decodePlanExecutionLedger,
   decodeTaskEvidence,
 } from "./decoders";
+import {
+  decodePlanAmendmentGrant,
+  decodePlanAmendmentProposal,
+  type PlanAmendmentGrant,
+  type PlanAmendmentProposal,
+} from "./planAmendmentTypes";
 
 export const PLAN_ARTIFACTS_TABLE = "llm_for_zotero_plan_artifacts";
 export const PLAN_EXECUTIONS_TABLE = "llm_for_zotero_plan_executions";
@@ -17,6 +23,9 @@ export const PLAN_EXECUTION_TASKS_TABLE = "llm_for_zotero_plan_execution_tasks";
 export const PLAN_TASK_TRANSITIONS_TABLE =
   "llm_for_zotero_plan_task_transitions";
 export const PLAN_TASK_EVIDENCE_TABLE = "llm_for_zotero_plan_task_evidence";
+export const PLAN_AMENDMENTS_TABLE = "llm_for_zotero_plan_amendments";
+export const PLAN_AMENDMENT_PROPOSALS_TABLE =
+  "llm_for_zotero_plan_amendment_proposals";
 
 type JsonRow = { payloadJson?: unknown };
 
@@ -113,6 +122,40 @@ export async function initAgentPlanStore(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS llm_for_zotero_plan_evidence_task_idx
        ON ${PLAN_TASK_EVIDENCE_TABLE} (execution_id, task_id, created_at)`,
     );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${PLAN_AMENDMENTS_TABLE} (
+        grant_id TEXT PRIMARY KEY,
+        proposal_digest TEXT NOT NULL UNIQUE,
+        plan_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        execution_id TEXT NOT NULL,
+        conversation_key INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        authority TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        authorized_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_for_zotero_plan_amendments_execution_idx
+       ON ${PLAN_AMENDMENTS_TABLE} (execution_id, authorized_at ASC)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${PLAN_AMENDMENT_PROPOSALS_TABLE} (
+        proposal_digest TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        execution_id TEXT NOT NULL,
+        conversation_key INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
     const interruptedAt = Date.now();
     const rows = (await Zotero.DB.queryAsync(
       `SELECT payload_json AS payloadJson FROM ${PLAN_EXECUTIONS_TABLE}
@@ -143,6 +186,138 @@ export async function initAgentPlanStore(): Promise<void> {
       );
     }
   });
+}
+
+export async function savePlanAmendmentProposal(
+  proposal: PlanAmendmentProposal,
+  status:
+    | "awaiting_approval"
+    | "authorized"
+    | "applied"
+    | "failed"
+    | "superseded",
+  now = Date.now(),
+): Promise<void> {
+  decodePlanAmendmentProposal(proposal);
+  await Zotero.DB.queryAsync(
+    `INSERT OR IGNORE INTO ${PLAN_AMENDMENT_PROPOSALS_TABLE}
+      (proposal_digest, plan_id, revision, execution_id, conversation_key,
+       kind, status, payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      proposal.proposalDigest,
+      proposal.planId,
+      proposal.planRevision,
+      proposal.executionId,
+      proposal.conversationKey,
+      proposal.kind,
+      status,
+      JSON.stringify(proposal),
+      proposal.createdAt,
+      now,
+    ],
+  );
+}
+
+export async function updatePlanAmendmentProposalStatus(
+  proposalDigest: string,
+  status:
+    | "awaiting_approval"
+    | "authorized"
+    | "applied"
+    | "failed"
+    | "superseded",
+  now = Date.now(),
+): Promise<void> {
+  await Zotero.DB.queryAsync(
+    `UPDATE ${PLAN_AMENDMENT_PROPOSALS_TABLE}
+     SET status = ?, updated_at = ? WHERE proposal_digest = ?`,
+    [status, now, proposalDigest],
+  );
+}
+
+export async function loadOpenContractRevisionProposal(
+  planId: string,
+): Promise<PlanAmendmentProposal | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson
+     FROM ${PLAN_AMENDMENT_PROPOSALS_TABLE}
+     WHERE plan_id = ? AND kind = 'contract_revision'
+       AND status IN ('awaiting_approval', 'authorized', 'failed')
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [planId],
+  )) as JsonRow[] | undefined;
+  if (typeof rows?.[0]?.payloadJson !== "string") return null;
+  return decodePlanAmendmentProposal(JSON.parse(rows[0].payloadJson));
+}
+
+export async function savePlanAmendmentGrant(
+  grant: PlanAmendmentGrant,
+): Promise<void> {
+  decodePlanAmendmentGrant(grant);
+  await Zotero.DB.queryAsync(
+    `INSERT OR IGNORE INTO ${PLAN_AMENDMENTS_TABLE}
+      (grant_id, proposal_digest, plan_id, revision, execution_id,
+       conversation_key, kind, authority, status, payload_json, authorized_at,
+       updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      grant.grantId,
+      grant.proposal.proposalDigest,
+      grant.proposal.planId,
+      grant.proposal.planRevision,
+      grant.proposal.executionId,
+      grant.proposal.conversationKey,
+      grant.proposal.kind,
+      grant.authority,
+      grant.status,
+      JSON.stringify(grant),
+      grant.authorizedAt,
+      grant.appliedAt || grant.failedAt || grant.authorizedAt,
+    ],
+  );
+}
+
+export async function updatePlanAmendmentGrant(
+  grant: PlanAmendmentGrant,
+): Promise<void> {
+  decodePlanAmendmentGrant(grant);
+  await Zotero.DB.queryAsync(
+    `UPDATE ${PLAN_AMENDMENTS_TABLE}
+     SET status = ?, payload_json = ?, updated_at = ?
+     WHERE grant_id = ? AND proposal_digest = ?`,
+    [
+      grant.status,
+      JSON.stringify(grant),
+      grant.appliedAt || grant.failedAt || grant.authorizedAt,
+      grant.grantId,
+      grant.proposal.proposalDigest,
+    ],
+  );
+}
+
+export async function loadPlanAmendmentGrantByProposalDigest(
+  proposalDigest: string,
+): Promise<PlanAmendmentGrant | null> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${PLAN_AMENDMENTS_TABLE}
+     WHERE proposal_digest = ? LIMIT 1`,
+    [proposalDigest],
+  )) as JsonRow[] | undefined;
+  return parsePayload(rows?.[0], decodePlanAmendmentGrant);
+}
+
+export async function listPlanAmendmentGrants(
+  executionId: string,
+): Promise<PlanAmendmentGrant[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${PLAN_AMENDMENTS_TABLE}
+     WHERE execution_id = ? ORDER BY authorized_at ASC`,
+    [executionId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parsePayload(row, decodePlanAmendmentGrant))
+    .filter((grant): grant is PlanAmendmentGrant => Boolean(grant));
 }
 
 export async function savePlanArtifact(artifact: PlanArtifact): Promise<void> {
@@ -400,6 +575,14 @@ export async function clearPlanConversationRowsInTransaction(
       );
     }
   }
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${PLAN_AMENDMENT_PROPOSALS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${PLAN_AMENDMENTS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
   await Zotero.DB.queryAsync(
     `DELETE FROM ${PLAN_EXECUTIONS_TABLE} WHERE conversation_key = ?`,
     [conversationKey],

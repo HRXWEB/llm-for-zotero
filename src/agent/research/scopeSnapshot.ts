@@ -287,3 +287,164 @@ export async function materializeResearchScopeSnapshot(params: {
   });
   return { ref, items };
 }
+
+export async function buildResearchScopeSuccessorSnapshot(params: {
+  gateway: ZoteroGateway;
+  planId: string;
+  revision: number;
+  priorRef: ResearchScopeSnapshotRef;
+  priorItems: readonly ResearchScopeSnapshotItem[];
+  scope: ResearchScopeSpec;
+  addedTargets: readonly Readonly<{ libraryID: number; itemKey: string }>[];
+  priorLineageDigest: string;
+  now?: number;
+}): Promise<{
+  ref: ResearchScopeSnapshotRef;
+  items: ResearchScopeSnapshotItem[];
+  addedItems: ResearchScopeSnapshotItem[];
+}> {
+  if (!params.addedTargets.length) {
+    throw new Error("A research-scope amendment requires at least one target");
+  }
+  const duplicateInput = params.addedTargets.find(
+    (target, index) =>
+      params.addedTargets.findIndex(
+        (candidate) =>
+          candidate.libraryID === target.libraryID &&
+          candidate.itemKey === target.itemKey,
+      ) !== index,
+  );
+  if (duplicateInput) {
+    throw new Error(
+      `Research-scope amendment repeats target ${duplicateInput.libraryID}:${duplicateInput.itemKey}`,
+    );
+  }
+  if (
+    params.addedTargets.some(
+      (target) => target.libraryID !== params.scope.libraryID,
+    )
+  ) {
+    throw new Error(
+      "Research-scope amendment crosses the approved Zotero library",
+    );
+  }
+  const priorKeys = new Set(
+    params.priorItems.map((item) => `${item.libraryID}:${item.itemKey}`),
+  );
+  const duplicateExisting = params.addedTargets.find((target) =>
+    priorKeys.has(`${target.libraryID}:${target.itemKey}`),
+  );
+  if (duplicateExisting) {
+    throw new Error(
+      `Research target ${duplicateExisting.libraryID}:${duplicateExisting.itemKey} is already in the effective snapshot`,
+    );
+  }
+  const currentSourceIds = new Set(
+    await resolveResearchScopeItemIds(params.gateway, params.scope),
+  );
+  const resolved = params.addedTargets.map((target) => ({
+    ...target,
+    item: itemByLibraryAndKey(target.libraryID, target.itemKey),
+  }));
+  const invalid = resolved.find(
+    ({ item }) => !item || !currentSourceIds.has(item.id),
+  );
+  if (invalid) {
+    throw new Error(
+      `Research target ${invalid.libraryID}:${invalid.itemKey} is missing, nonbibliographic, or outside the approved source`,
+    );
+  }
+  const targets = params.gateway.getBibliographicItemTargetsByItemIds(
+    resolved.map(({ item }) => item!.id),
+  );
+  const targetById = new Map(targets.map((target) => [target.itemId, target]));
+  if (targetById.size !== resolved.length) {
+    throw new Error(
+      "Every research-scope amendment target must be a bibliographic Zotero item",
+    );
+  }
+  const createdAt = params.now ?? Date.now();
+  const provisionalAdded: Omit<ResearchScopeSnapshotItem, "snapshotId">[] = [];
+  for (const { item, libraryID, itemKey } of resolved) {
+    const target = targetById.get(item!.id)!;
+    provisionalAdded.push({
+      libraryID,
+      itemKey,
+      localItemId: item!.id,
+      title: target.title,
+      firstCreator: target.firstCreator,
+      year: target.year,
+      ...(await getResearchItemFingerprints(params.gateway, item!.id)),
+      ordinal: params.priorItems.length + provisionalAdded.length,
+    });
+  }
+  const digestPayload = [
+    ...params.priorItems.map(
+      ({
+        libraryID,
+        itemKey,
+        title,
+        firstCreator,
+        year,
+        metadataFingerprint,
+        attachmentFingerprint,
+      }) => ({
+        libraryID,
+        itemKey,
+        title,
+        firstCreator,
+        year,
+        metadataFingerprint,
+        attachmentFingerprint,
+      }),
+    ),
+    ...provisionalAdded.map(
+      ({
+        libraryID,
+        itemKey,
+        title,
+        firstCreator,
+        year,
+        metadataFingerprint,
+        attachmentFingerprint,
+      }) => ({
+        libraryID,
+        itemKey,
+        title,
+        firstCreator,
+        year,
+        metadataFingerprint,
+        attachmentFingerprint,
+      }),
+    ),
+  ];
+  const digest = `sha256:${await sha256Text(canonicalJson(digestPayload))}`;
+  const snapshotId = `${params.planId}:r${params.revision}:scope:${digest.slice(-16)}`;
+  const items = [
+    ...params.priorItems.map((item) => ({ ...item, snapshotId })),
+    ...provisionalAdded.map((item) => ({ ...item, snapshotId })),
+  ];
+  const addedItems = items.slice(params.priorItems.length);
+  const scopeLineageDigest = `sha256:${await sha256Text(
+    canonicalJson({
+      priorLineageDigest: params.priorLineageDigest,
+      parentSnapshotId: params.priorRef.snapshotId,
+      snapshotId,
+      digest,
+      addedTargets: params.addedTargets,
+    }),
+  )}`;
+  return {
+    ref: {
+      snapshotId,
+      digest,
+      itemCount: items.length,
+      createdAt,
+      policyVersion: RESEARCH_POLICY_VERSION,
+      parentSnapshotId: params.priorRef.snapshotId,
+      scopeLineageDigest,
+    },
+    items,
+    addedItems,
+  };
+}

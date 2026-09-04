@@ -7,6 +7,7 @@ import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import {
   listTaskEvidence,
   loadPlanArtifact,
+  loadOpenContractRevisionProposal,
   loadPlanExecutionLedger,
   savePlanArtifact,
   savePlanExecutionLedger,
@@ -146,6 +147,14 @@ function taskStatusAfterTransition(
   return ledger.status === "pending" ? "pending" : "running";
 }
 
+function assertExecutionMutable(ledger: PlanExecutionLedger): void {
+  if (ledger.status === "superseded") {
+    throw new Error(
+      `Plan execution ${ledger.executionId} was superseded by ${ledger.supersededByExecutionId || "a successor"}`,
+    );
+  }
+}
+
 const ALLOWED_TRANSITIONS: Record<ExecutionTaskStatus, ExecutionTaskStatus[]> =
   {
     pending: ["in_progress", "cancelled", "skipped"],
@@ -254,6 +263,9 @@ export function assertTaskCompletionEvidence(
                 return (
                   entry.kind === "research_coverage" &&
                   entry.payload?.type === "research_coverage" &&
+                  (!requirement.targetBoundary?.scopeDigest ||
+                    entry.payload.scopeLineageDigest ===
+                      requirement.targetBoundary.scopeDigest) &&
                   (entry.payload.coverageStatus === "complete" ||
                     entry.payload.coverageStatus ===
                       "complete_with_limitations")
@@ -660,6 +672,7 @@ export class PlanExecutionCoordinator {
     alreadyInTransaction?: boolean;
   }): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
     const artifact = await loadPlanArtifact(ledger.planId, ledger.revision);
     if (
       !artifact ||
@@ -718,6 +731,7 @@ export class PlanExecutionCoordinator {
     now?: number;
   }): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
     if (ledger.tasks.some((task) => task.taskId === params.taskId))
       return ledger;
     const parent = ledger.tasks.find(
@@ -995,6 +1009,59 @@ export class PlanExecutionCoordinator {
       }
     }
     await savePlanArtifact(artifact);
+    if (params.ready && params.revision > 1) {
+      const priorAmendment = await loadOpenContractRevisionProposal(
+        params.planId,
+      );
+      if (priorAmendment && params.revision > priorAmendment.planRevision + 1) {
+        const predecessor = await loadPlanExecutionLedger(
+          priorAmendment.executionId,
+        );
+        if (
+          !predecessor ||
+          predecessor.planDigest !== priorAmendment.planDigest ||
+          predecessor.planId !== params.planId
+        ) {
+          throw new Error(
+            "The revised amendment no longer matches its predecessor execution",
+          );
+        }
+        const { PlanAmendmentService } = await import("./amendments");
+        const service = new PlanAmendmentService();
+        const successor = await service.buildProposal({
+          kind: "contract_revision",
+          goalImpact: "contract_revision",
+          planId: priorAmendment.planId,
+          planRevision: priorAmendment.planRevision,
+          planDigest: priorAmendment.planDigest,
+          executionId: priorAmendment.executionId,
+          executionDigest: priorAmendment.executionDigest,
+          conversationKey: priorAmendment.conversationKey,
+          previousScopeDigest: priorAmendment.previousScopeDigest,
+          resultingScopeDigest: artifact.contractDigest || artifact.digest,
+          targetSetDigest: await service.digest(
+            artifact.contract?.investigation?.scope ||
+              artifact.contract?.deliverable,
+          ),
+          proposalPayloadDigest: await service.digest({
+            contract: artifact.contract,
+            steps: artifact.steps,
+          }),
+          replacementContract: artifact.contract,
+          replacementSteps: artifact.steps,
+          replacementActionContract: actionContract,
+          rationale:
+            params.explanation ||
+            "The reviewed successor Plan was revised before approval.",
+          now,
+        });
+        await service.supersedeProposal(
+          priorAmendment.proposalDigest,
+          successor,
+          now,
+        );
+      }
+    }
     return artifact;
   }
 
@@ -1004,6 +1071,7 @@ export class PlanExecutionCoordinator {
     conversationGeneration: number;
     actionContract?: AgentActionContract;
     providerContinuationId?: string;
+    authority?: ApprovedPlanGrant["authority"];
     now?: number;
   }): Promise<PlanExecutionLedger> {
     const artifact = await loadPlanArtifact(params.planId, params.revision);
@@ -1031,6 +1099,60 @@ export class PlanExecutionCoordinator {
       );
     }
     const now = params.now ?? Date.now();
+    let amendmentService:
+      | import("./amendments").PlanAmendmentService
+      | undefined;
+    let amendmentGrant:
+      | import("./planAmendmentTypes").PlanAmendmentGrant
+      | undefined;
+    let predecessor: PlanExecutionLedger | null = null;
+    if (artifact.revision > 1) {
+      const amendment = await loadOpenContractRevisionProposal(artifact.planId);
+      if (amendment) {
+        const { PlanAmendmentService } = await import("./amendments");
+        amendmentService = new PlanAmendmentService();
+        predecessor = await loadPlanExecutionLedger(amendment.executionId);
+        if (
+          !predecessor ||
+          predecessor.planId !== artifact.planId ||
+          predecessor.revision !== amendment.planRevision ||
+          predecessor.planDigest !== amendment.planDigest ||
+          ["failed", "cancelled", "superseded"].includes(predecessor.status) ||
+          predecessor.conversationKey !== artifact.conversationKey
+        ) {
+          throw new Error(
+            "The contract revision no longer matches its predecessor execution",
+          );
+        }
+        const proposalPayloadDigest = await amendmentService.digest({
+          contract: artifact.contract,
+          steps: artifact.steps,
+        });
+        if (
+          amendment.kind !== "contract_revision" ||
+          amendment.goalImpact !== "contract_revision" ||
+          amendment.proposalPayloadDigest !== proposalPayloadDigest ||
+          amendment.resultingScopeDigest !== artifact.contractDigest
+        ) {
+          throw new Error(
+            "The reviewed Plan revision changed after its amendment proposal was recorded",
+          );
+        }
+        if (
+          amendment.executionDigest !==
+          (await amendmentService.executionIdentityDigest(predecessor))
+        ) {
+          throw new Error(
+            "The predecessor execution identity changed after the amendment was proposed",
+          );
+        }
+        amendmentGrant = await amendmentService.authorize(
+          amendment,
+          params.authority || "user",
+          now,
+        );
+      }
+    }
     const grant: ApprovedPlanGrant = {
       version: 1,
       planId: artifact.planId,
@@ -1039,6 +1161,7 @@ export class PlanExecutionCoordinator {
       conversationKey: artifact.conversationKey,
       conversationGeneration: params.conversationGeneration,
       actionContractId: artifact.actionContractId,
+      authority: params.authority || "user",
       approvedAt: now,
     };
     const executionId = makeId(
@@ -1094,99 +1217,196 @@ export class PlanExecutionCoordinator {
       createdAt: now,
       updatedAt: now,
     };
-    await Zotero.DB.executeTransaction(async () => {
-      await savePlanArtifact(approved);
-      await savePlanExecutionLedger(ledger, undefined, {
-        alreadyInTransaction: true,
-      });
-      const investigation = artifact.contract?.investigation;
-      const snapshotId = investigation?.scopeSnapshot?.snapshotId;
-      if (investigation && snapshotId) {
-        const parentTask = tasks.find((task) =>
-          task.completionRequirements?.some(
-            (requirement) => requirement.kind === "research_coverage",
-          ),
-        );
-        if (!parentTask) {
-          throw new Error(
-            "A research plan requires a visible task that owns research coverage",
+    let approvedLedger = ledger;
+    try {
+      await Zotero.DB.executeTransaction(async () => {
+        await savePlanArtifact(approved);
+        await savePlanExecutionLedger(ledger, undefined, {
+          alreadyInTransaction: true,
+        });
+        const investigation = artifact.contract?.investigation;
+        const snapshotId = investigation?.scopeSnapshot?.snapshotId;
+        if (investigation && snapshotId) {
+          const parentTask = tasks.find((task) =>
+            task.completionRequirements?.some(
+              (requirement) => requirement.kind === "research_coverage",
+            ),
+          );
+          if (!parentTask) {
+            throw new Error(
+              "A research plan requires a visible task that owns research coverage",
+            );
+          }
+          const snapshotItems = await listScopeSnapshotItems(snapshotId);
+          if (snapshotItems.length !== investigation.scopeSnapshot?.itemCount) {
+            throw new Error(
+              "The approved research scope snapshot is incomplete",
+            );
+          }
+          const researchJobId = `${executionId}:research`;
+          const policy =
+            artifact.contract?.researchPolicy ||
+            resolveResearchPolicy("plan_research");
+          await saveResearchJob(
+            {
+              version: 2,
+              researchJobId,
+              executionId,
+              parentTaskId: parentTask.taskId,
+              contractDigest: artifact.contractDigest || artifact.digest,
+              baseSnapshotId: snapshotId,
+              snapshotId,
+              scopeLineageDigest: investigation.scopeSnapshot!.digest,
+              policy,
+              status: "pending",
+              activeStage: "inventory",
+              totalItems: snapshotItems.length,
+              screenedItems: 0,
+              candidateItems: 0,
+              deepReadCompleted: 0,
+              deepReadPlanned: resolvePlannedReadingPapers(
+                investigation,
+                snapshotItems.length,
+              ),
+              createdAt: now,
+              updatedAt: now,
+            },
+            artifact.conversationKey,
+          );
+          for (const snapshotItem of snapshotItems) {
+            await saveResearchCorpusItem({
+              version: 1,
+              researchJobId,
+              executionId,
+              parentTaskId: parentTask.taskId,
+              libraryID: snapshotItem.libraryID,
+              itemKey: snapshotItem.itemKey,
+              localItemId: snapshotItem.localItemId,
+              ordinal: snapshotItem.ordinal,
+              screeningStatus: "pending",
+              criterionResults: {},
+              inventoryRecorded: false,
+              hasAbstract: false,
+              attachmentItemKeys: [],
+              duplicateAttachmentKeys: [],
+              readable: Boolean(snapshotItem.attachmentFingerprint),
+              indexed: false,
+              sourceFingerprint:
+                snapshotItem.attachmentFingerprint ||
+                snapshotItem.metadataFingerprint,
+              updatedAt: now,
+            });
+            await saveResearchWorkItem({
+              version: 1,
+              workItemId: `${researchJobId}:work:inventory:${snapshotItem.libraryID}:${snapshotItem.itemKey}`,
+              researchJobId,
+              executionId,
+              parentTaskId: parentTask.taskId,
+              libraryID: snapshotItem.libraryID,
+              itemKey: snapshotItem.itemKey,
+              stage: "inventory",
+              subquestionIds: [],
+              status: "pending",
+              attemptCount: 0,
+              evidenceRefs: [],
+              createdAt: now,
+              updatedAt: now,
+            });
+          }
+        }
+        if (
+          amendmentService &&
+          amendmentGrant &&
+          predecessor &&
+          predecessor.status !== "superseded"
+        ) {
+          await amendmentService.migrateSuccessorExecutionState({
+            predecessorExecutionId: predecessor.executionId,
+            successorExecutionId: ledger.executionId,
+            now,
+            alreadyInTransaction: true,
+          });
+          approvedLedger = (
+            await this.supersedeExecution({
+              executionId: predecessor.executionId,
+              successorExecutionId: ledger.executionId,
+              now,
+              alreadyInTransaction: true,
+            })
+          ).successor;
+          amendmentGrant = await amendmentService.markApplied(
+            amendmentGrant,
+            now,
           );
         }
-        const snapshotItems = await listScopeSnapshotItems(snapshotId);
-        if (snapshotItems.length !== investigation.scopeSnapshot?.itemCount) {
-          throw new Error("The approved research scope snapshot is incomplete");
-        }
-        const researchJobId = `${executionId}:research`;
-        const policy =
-          artifact.contract?.researchPolicy ||
-          resolveResearchPolicy("plan_research");
-        await saveResearchJob(
-          {
-            version: 1,
-            researchJobId,
-            executionId,
-            parentTaskId: parentTask.taskId,
-            contractDigest: artifact.contractDigest || artifact.digest,
-            snapshotId,
-            policy,
-            status: "pending",
-            activeStage: "inventory",
-            totalItems: snapshotItems.length,
-            screenedItems: 0,
-            candidateItems: 0,
-            deepReadCompleted: 0,
-            deepReadPlanned: resolvePlannedReadingPapers(
-              investigation,
-              snapshotItems.length,
-            ),
-            createdAt: now,
-            updatedAt: now,
-          },
-          artifact.conversationKey,
-        );
-        for (const snapshotItem of snapshotItems) {
-          await saveResearchCorpusItem({
-            version: 1,
-            researchJobId,
-            executionId,
-            parentTaskId: parentTask.taskId,
-            libraryID: snapshotItem.libraryID,
-            itemKey: snapshotItem.itemKey,
-            localItemId: snapshotItem.localItemId,
-            ordinal: snapshotItem.ordinal,
-            screeningStatus: "pending",
-            criterionResults: {},
-            inventoryRecorded: false,
-            hasAbstract: false,
-            attachmentItemKeys: [],
-            duplicateAttachmentKeys: [],
-            readable: Boolean(snapshotItem.attachmentFingerprint),
-            indexed: false,
-            sourceFingerprint:
-              snapshotItem.attachmentFingerprint ||
-              snapshotItem.metadataFingerprint,
-            updatedAt: now,
-          });
-          await saveResearchWorkItem({
-            version: 1,
-            workItemId: `${researchJobId}:work:inventory:${snapshotItem.libraryID}:${snapshotItem.itemKey}`,
-            researchJobId,
-            executionId,
-            parentTaskId: parentTask.taskId,
-            libraryID: snapshotItem.libraryID,
-            itemKey: snapshotItem.itemKey,
-            stage: "inventory",
-            subquestionIds: [],
-            status: "pending",
-            attemptCount: 0,
-            evidenceRefs: [],
-            createdAt: now,
-            updatedAt: now,
-          });
-        }
+      });
+    } catch (error) {
+      if (amendmentService && amendmentGrant) {
+        await amendmentService.markFailed(amendmentGrant, error, now);
       }
-    });
-    return ledger;
+      throw error;
+    }
+    return approvedLedger;
+  }
+
+  async supersedeExecution(params: {
+    executionId: string;
+    successorExecutionId: string;
+    now?: number;
+    alreadyInTransaction?: boolean;
+  }): Promise<{
+    superseded: PlanExecutionLedger;
+    successor: PlanExecutionLedger;
+  }> {
+    if (params.executionId === params.successorExecutionId) {
+      throw new Error("An execution cannot supersede itself");
+    }
+    const [current, successor] = await Promise.all([
+      this.requireLedger(params.executionId),
+      this.requireLedger(params.successorExecutionId),
+    ]);
+    if (
+      current.planId !== successor.planId ||
+      successor.revision <= current.revision
+    ) {
+      throw new Error("A successor execution must use a later Plan revision");
+    }
+    const now = params.now ?? Date.now();
+    const superseded: PlanExecutionLedger = {
+      ...current,
+      status: "superseded",
+      activeTaskId: undefined,
+      supersededByExecutionId: successor.executionId,
+      updatedAt: now,
+      completedAt: now,
+    };
+    const linkedSuccessor: PlanExecutionLedger = {
+      ...successor,
+      predecessorExecutionId: current.executionId,
+      updatedAt: now,
+    };
+    const priorArtifact = await loadPlanArtifact(
+      current.planId,
+      current.revision,
+    );
+    const write = async () => {
+      await savePlanExecutionLedger(superseded, undefined, {
+        alreadyInTransaction: true,
+      });
+      await savePlanExecutionLedger(linkedSuccessor, undefined, {
+        alreadyInTransaction: true,
+      });
+      if (priorArtifact) {
+        await savePlanArtifact({
+          ...priorArtifact,
+          status: "superseded",
+          updatedAt: now,
+        });
+      }
+    };
+    if (params.alreadyInTransaction) await write();
+    else await Zotero.DB.executeTransaction(write);
+    return { superseded, successor: linkedSuccessor };
   }
 
   async startNextTask(
@@ -1194,6 +1414,7 @@ export class PlanExecutionCoordinator {
     now = Date.now(),
   ): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(executionId);
+    assertExecutionMutable(ledger);
     if (ledger.tasks.some((task) => task.status === "in_progress"))
       return ledger;
     const next = ledger.tasks.find(
@@ -1211,6 +1432,75 @@ export class PlanExecutionCoordinator {
     );
   }
 
+  async reopenForScopeAmendment(params: {
+    executionId: string;
+    scopeLineageDigest: string;
+    now?: number;
+    alreadyInTransaction?: boolean;
+  }): Promise<PlanExecutionLedger> {
+    const ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
+    const now = params.now ?? Date.now();
+    const earliestAffected = ledger.tasks.findIndex((task) =>
+      task.completionRequirements?.some((requirement) =>
+        ["verified_read", "research_coverage"].includes(requirement.kind),
+      ),
+    );
+    if (earliestAffected < 0) {
+      throw new Error(
+        "The execution has no host-owned research task to reopen",
+      );
+    }
+    const suffix = params.scopeLineageDigest
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .slice(-16);
+    const tasks: ExecutionTask[] = ledger.tasks.map((task, index) => {
+      if (index < earliestAffected) return task;
+      const preservesVerifiedEffect =
+        task.expectedEffect === "mutation" && task.status === "completed";
+      if (preservesVerifiedEffect) return task;
+      const completionRequirements = task.completionRequirements?.map(
+        (requirement) => ({
+          ...requirement,
+          requirementId: `${requirement.requirementId}:scope:${suffix}`,
+          targetBoundary:
+            requirement.kind === "research_coverage"
+              ? {
+                  ...(requirement.targetBoundary || {}),
+                  scopeDigest: params.scopeLineageDigest,
+                }
+              : requirement.targetBoundary,
+        }),
+      );
+      return {
+        ...task,
+        status: index === earliestAffected ? "in_progress" : "pending",
+        attemptCount:
+          index === earliestAffected
+            ? task.attemptCount + 1
+            : task.attemptCount,
+        evidenceIds: [],
+        failureReasons: [],
+        completionRequirements,
+        startedAt: index === earliestAffected ? now : undefined,
+        completedAt: undefined,
+        updatedAt: now,
+      };
+    });
+    const updated: PlanExecutionLedger = {
+      ...ledger,
+      status: "running",
+      activeTaskId: tasks[earliestAffected].taskId,
+      tasks,
+      completedAt: undefined,
+      updatedAt: now,
+    };
+    await savePlanExecutionLedger(updated, undefined, {
+      alreadyInTransaction: params.alreadyInTransaction,
+    });
+    return updated;
+  }
+
   /**
    * Advance consecutive tasks whose complete contracts are already satisfied
    * by host-issued evidence. Research tools call this at durable boundaries so
@@ -1223,6 +1513,7 @@ export class PlanExecutionCoordinator {
   }): Promise<PlanExecutionLedger> {
     const allowed = new Set(params.requirementKinds);
     let ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
     let now = params.now ?? Date.now();
 
     while (true) {
@@ -1265,6 +1556,7 @@ export class PlanExecutionCoordinator {
     now?: number;
   }): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
     const task = ledger.tasks.find((entry) => entry.taskId === params.taskId);
     if (!task) throw new Error("Execution task not found");
     const now = params.now ?? Date.now();
@@ -1310,6 +1602,7 @@ export class PlanExecutionCoordinator {
 
   async attachEvidence(evidence: TaskEvidence): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(evidence.executionId);
+    assertExecutionMutable(ledger);
     const task = ledger.tasks.find((entry) => entry.taskId === evidence.taskId);
     if (!task) throw new Error("Execution task not found");
     await saveTaskEvidence(evidence);
@@ -1332,6 +1625,7 @@ export class PlanExecutionCoordinator {
     options: { alreadyInTransaction?: boolean } = {},
   ): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(request.executionId);
+    assertExecutionMutable(ledger);
     const task = ledger.tasks.find((entry) => entry.taskId === request.taskId);
     if (!task) throw new Error("Execution task not found");
     assertTaskTransitionRequest({ ledger, task, request });
@@ -1408,6 +1702,7 @@ export class PlanExecutionCoordinator {
   }): Promise<PlanExecutionLedger> {
     const now = params.now ?? Date.now();
     const ledger = await this.requireLedger(params.request.executionId);
+    assertExecutionMutable(ledger);
     const task = ledger.tasks.find(
       (entry) => entry.taskId === params.request.taskId,
     );
@@ -1507,6 +1802,7 @@ export class PlanExecutionCoordinator {
 
   async assertCanFinalize(executionId: string): Promise<PlanExecutionLedger> {
     const ledger = await this.requireLedger(executionId);
+    assertExecutionMutable(ledger);
     const unresolved = ledger.tasks.filter(
       (task) =>
         task.status !== "completed" &&

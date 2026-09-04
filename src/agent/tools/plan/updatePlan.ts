@@ -19,7 +19,7 @@ import { resolvePlanDocumentCitationPreference } from "../../documents/citationP
 import { materializeResearchScopeSnapshot } from "../../research/scopeSnapshot";
 import { fail, ok, validateObject } from "../shared";
 
-type UpdatePlanInput = {
+export type UpdatePlanInput = {
   explanation?: string;
   ready: boolean;
   contract?: unknown;
@@ -69,7 +69,7 @@ export function extractExplicitResearchScopeCount(
   return undefined;
 }
 
-function validateUpdatePlanInput(
+export function validateUpdatePlanInput(
   args: unknown,
 ): AgentToolInputValidation<UpdatePlanInput> {
   if (!validateObject<Record<string, unknown>>(args)) {
@@ -149,7 +149,7 @@ function validateUpdatePlanInput(
   });
 }
 
-async function resolvePlanContract(params: {
+export async function resolvePlanContract(params: {
   raw: unknown;
   steps: UpdatePlanInput["steps"];
   actionContract?: NonNullable<
@@ -326,6 +326,12 @@ export function createUpdatePlanTool(
                     enum: ["adaptive", "selected"],
                     description:
                       "adaptive reads every paper in the frozen scope to the depth allowed by measured model capacity; selected is only for a user-requested bounded subset or a formal screening workflow.",
+                  },
+                  scopeAmendmentPolicy: {
+                    type: "string",
+                    enum: ["fixed", "within_source"],
+                    description:
+                      "fixed preserves an exact selected subset; within_source allows the host to add newly eligible papers from the same approved source.",
                   },
                   scope: {
                     type: "object",

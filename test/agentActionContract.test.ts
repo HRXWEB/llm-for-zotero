@@ -956,6 +956,86 @@ describe("Action Contract V2", function () {
       (await service.validateScope(contract, prepared))?.message || "",
       "changed after planning",
     );
+    assert.equal(
+      (await service.validateScope(contract, prepared))?.code,
+      "stale_scope",
+    );
+  });
+
+  it("returns a structured amendment candidate for an addition inside the same source", async function () {
+    const { service, directMembers } = createHarness();
+    const contract = await service.createContract(
+      requestWithIntents([tagIntent()]),
+    );
+    directMembers.set(11, [1, 2, 3, 4]);
+    const prepared = await service.prepare(mutationTool(), {
+      operation: {
+        type: "apply_tags",
+        itemIds: [1, 2, 3, 4],
+        tags: ["topic:drift"],
+      },
+    });
+
+    const failure = await service.validateScope(contract, prepared);
+    assert.equal(failure?.code, "added_target");
+    assert.deepEqual(failure?.amendableObligation?.addedTargetIds, [4]);
+    assert.deepEqual(
+      failure?.amendableObligation?.currentTargetIds,
+      [1, 2, 3, 4],
+    );
+    assert.equal(failure?.amendableObligation?.boundaryKind, "collection");
+  });
+
+  it("distinguishes a different operation, incomplete batch, and fixed selection", async function () {
+    const { service } = createHarness();
+    const contract = await service.createContract(
+      requestWithIntents([tagIntent()]),
+    );
+    const different = await service.prepare(mutationTool(), {
+      operation: {
+        type: "remove_tags",
+        itemIds: [1, 2, 3],
+        tags: ["topic:drift"],
+      },
+    });
+    assert.equal(
+      (await service.validateScope(contract, different))?.code,
+      "different_operation",
+    );
+
+    const partial = await service.prepare(mutationTool(), {
+      operation: {
+        type: "apply_tags",
+        itemIds: [1, 2],
+        tags: ["topic:drift"],
+      },
+    });
+    assert.equal(
+      (await service.validateScope(contract, partial))?.code,
+      "incomplete_batch",
+    );
+
+    const selectionContract = {
+      ...contract,
+      obligations: contract.obligations.map((obligation) => ({
+        ...obligation,
+        scope: undefined,
+        targetBoundary: obligation.targetBoundary
+          ? { ...obligation.targetBoundary, kind: "selection" as const }
+          : undefined,
+      })),
+    };
+    const widened = await service.prepare(mutationTool(), {
+      operation: {
+        type: "apply_tags",
+        itemIds: [1, 2, 3, 4],
+        tags: ["topic:drift"],
+      },
+    });
+    assert.equal(
+      (await service.validateScope(selectionContract, widened))?.code,
+      "fixed_selection",
+    );
   });
 
   it("closes an add-tag obligation only after native state verifies every target", async function () {

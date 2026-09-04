@@ -875,7 +875,7 @@ export function createResearchUpdateTool(
         )
       ) {
         throw new Error(
-          "Research is waiting for the expansion checkpoint; obtain approval, revise the plan, or finalize a partial result",
+          "Research is waiting for the deep-read checkpoint; call approve_research_expansion so the selected mode can decide, or finalize a user-authorized partial result",
         );
       }
       const executionLedger = await loadPlanExecutionLedger(plan.executionId);
@@ -1179,7 +1179,10 @@ export function createResearchUpdateTool(
         };
       }
       if (input.operation === "list_themes") {
-        const themes = await listThemeFindings(job.researchJobId);
+        const themes = await listThemeFindings(
+          job.researchJobId,
+          job.scopeLineageDigest,
+        );
         return {
           themes: themes.map((theme) => ({
             themeFindingId: theme.themeFindingId,
@@ -2127,7 +2130,7 @@ export function createResearchUpdateTool(
               string(raw.themeId, `themes[${index}].themeId`),
             );
             const finding: ThemeFinding = {
-              version: 1,
+              version: 2,
               themeFindingId: `${job.researchJobId}:theme:${themeId}`,
               researchJobId: job.researchJobId,
               executionId: job.executionId,
@@ -2140,6 +2143,8 @@ export function createResearchUpdateTool(
                 raw.limitations || [],
                 `themes[${index}].limitations`,
               ),
+              scopeLineageDigest: job.scopeLineageDigest,
+              status: "valid",
               createdAt: Date.now(),
             };
             await saveThemeFinding(finding);
@@ -2212,7 +2217,10 @@ export function createResearchUpdateTool(
           researchJobId: job.researchJobId,
         });
         const findings = await listPaperFindings(job.researchJobId);
-        const themes = await listThemeFindings(job.researchJobId);
+        const themes = await listThemeFindings(
+          job.researchJobId,
+          job.scopeLineageDigest,
+        );
         const allEvidence = await listResearchEvidence(job.researchJobId);
         if (input.outcome === "partial") {
           const grant = next.exceptionGrant;
@@ -2403,6 +2411,7 @@ export function createResearchUpdateTool(
             screenedItems: next.screenedItems,
             candidateItems: next.candidateItems,
             deepReadCompleted: next.deepReadCompleted,
+            scopeLineageDigest: next.scopeLineageDigest,
           },
           reference: job.researchJobId,
           summary: `Coverage ${coverageStatus}: screened ${next.screenedItems}/${next.totalItems}; deep-read ${next.deepReadCompleted}/${next.candidateItems}`,

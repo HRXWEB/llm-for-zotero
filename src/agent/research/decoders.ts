@@ -86,7 +86,9 @@ export function decodeScopeSnapshotItem(
 
 export function decodeResearchJob(value: unknown): ResearchJob {
   const input = object(value, "research job");
-  if (input.version !== 1) throw new Error("Unsupported research job version");
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error("Unsupported research job version");
+  }
   const policy = decodeResearchPolicySnapshot(input.policy);
   const statuses = new Set([
     "pending",
@@ -128,12 +130,20 @@ export function decodeResearchJob(value: unknown): ResearchJob {
     throw new Error("Invalid research exception grant");
   }
   return {
-    version: 1,
+    version: input.version,
     researchJobId: string(input.researchJobId, "researchJobId"),
     executionId: string(input.executionId, "executionId"),
     parentTaskId: string(input.parentTaskId, "parentTaskId"),
     contractDigest: string(input.contractDigest, "contractDigest"),
+    baseSnapshotId:
+      input.version === 2
+        ? string(input.baseSnapshotId, "baseSnapshotId")
+        : string(input.snapshotId, "snapshotId"),
     snapshotId: string(input.snapshotId, "snapshotId"),
+    scopeLineageDigest:
+      input.version === 2
+        ? string(input.scopeLineageDigest, "scopeLineageDigest")
+        : `legacy:${string(input.snapshotId, "snapshotId")}`,
     policy,
     status: input.status as ResearchJob["status"],
     activeStage: input.activeStage as ResearchJob["activeStage"],
@@ -499,9 +509,21 @@ export function decodePaperFinding(value: unknown): PaperFinding {
 
 export function decodeThemeFinding(value: unknown): ThemeFinding {
   const input = object(value, "theme finding");
-  if (input.version !== 1) throw new Error("Unsupported theme finding version");
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error("Unsupported theme finding version");
+  }
+  if (
+    input.status !== undefined &&
+    input.status !== "valid" &&
+    input.status !== "invalidated"
+  ) {
+    throw new Error("Invalid theme finding status");
+  }
+  if (input.version === 2 && input.status === undefined) {
+    throw new Error("Theme finding v2 requires lifecycle status");
+  }
   return {
-    version: 1,
+    version: input.version,
     themeFindingId: string(input.themeFindingId, "themeFindingId"),
     researchJobId: string(input.researchJobId, "researchJobId"),
     executionId: string(input.executionId, "executionId"),
@@ -511,6 +533,18 @@ export function decodeThemeFinding(value: unknown): ThemeFinding {
     paperFindingIds: strings(input.paperFindingIds, "paperFindingIds"),
     evidenceRefs: strings(input.evidenceRefs, "evidenceRefs"),
     limitations: strings(input.limitations, "limitations"),
+    scopeLineageDigest:
+      input.version === 2
+        ? string(input.scopeLineageDigest, "scopeLineageDigest")
+        : undefined,
+    status:
+      input.version === 2
+        ? (input.status as ThemeFinding["status"])
+        : undefined,
+    invalidatedAt:
+      input.invalidatedAt === undefined
+        ? undefined
+        : number(input.invalidatedAt, "invalidatedAt"),
     createdAt: number(input.createdAt, "createdAt"),
   };
 }
@@ -519,14 +553,14 @@ export function decodeResearchMutationApprovalGrant(
   value: unknown,
 ): ResearchMutationApprovalGrant {
   const input = object(value, "research mutation approval grant");
-  if (input.version !== 1) {
+  if (input.version !== 1 && input.version !== 2) {
     throw new Error("Unsupported research mutation approval grant version");
   }
   if (input.status !== "approved" && input.status !== "invalidated") {
     throw new Error("Invalid research mutation approval grant status");
   }
   return {
-    version: 1,
+    version: input.version,
     grantId: string(input.grantId, "grantId"),
     planId: string(input.planId, "planId"),
     planRevision: number(input.planRevision, "planRevision"),
@@ -537,6 +571,10 @@ export function decodeResearchMutationApprovalGrant(
       input.researchResultDigest,
       "researchResultDigest",
     ),
+    scopeLineageDigest:
+      input.version === 2
+        ? string(input.scopeLineageDigest, "scopeLineageDigest")
+        : undefined,
     targetSetDigest: string(input.targetSetDigest, "targetSetDigest"),
     actionContract: decodeActionContract(input.actionContract),
     status: input.status,
