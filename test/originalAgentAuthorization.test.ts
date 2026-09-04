@@ -82,6 +82,15 @@ const fileWrite = (riskSignals: AgentInvocationPlan["riskSignals"] = []) =>
     reason: "The host will replace the named file and retain its pre-image.",
   });
 
+const noteWrite = () =>
+  stateChangeInvocationPlan({
+    domains: ["zotero_library"],
+    effects: ["create"],
+    targets: ["note:new"],
+    reversibility: "full",
+    reason: "The host will create the requested Zotero note.",
+  });
+
 const shellRead = () =>
   readOnlyInvocationPlan({
     mechanism: "shell",
@@ -319,6 +328,114 @@ describe("Original Agent unified authorization", function () {
       }).kind,
       "block",
     );
+  });
+
+  it("recognizes clear Auto actions across supported query languages", function () {
+    const cases = [
+      {
+        name: "Simplified Chinese Zotero note",
+        action: proposal("write_note", {}, noteWrite()),
+        userText: "请在 Zotero 中创建一条笔记。",
+      },
+      {
+        name: "Traditional Chinese file",
+        action: proposal("file_io", {}, fileWrite()),
+        userText: "請把結果寫入檔案。",
+      },
+      {
+        name: "Japanese file",
+        action: proposal("file_io", {}, fileWrite()),
+        userText: "この結果をファイルに保存してください。",
+      },
+      {
+        name: "Spanish file",
+        action: proposal("file_io", {}, fileWrite()),
+        userText: "Guarda el resultado en un archivo.",
+      },
+    ];
+
+    for (const testCase of cases) {
+      assert.deepInclude(
+        decide(testCase.action, { userText: testCase.userText }),
+        { kind: "execute", authority: "auto_policy" },
+        testCase.name,
+      );
+    }
+  });
+
+  it("blocks multilingual explicit prohibitions before any mode can execute", function () {
+    const cases = [
+      {
+        name: "Simplified Chinese command prohibition",
+        action: proposal("run_command", {}, shellRead()),
+        userText: "不要运行命令。",
+      },
+      {
+        name: "Traditional Chinese Zotero prohibition",
+        action: proposal("write_note", {}, noteWrite()),
+        userText: "請勿修改 Zotero 資料庫。",
+      },
+      {
+        name: "Japanese command prohibition",
+        action: proposal("run_command", {}, shellRead()),
+        userText: "コマンドを実行しないでください。",
+      },
+      {
+        name: "Spanish command prohibition",
+        action: proposal("run_command", {}, shellRead()),
+        userText: "No ejecutes comandos.",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const constraints = parseActionConstraints(testCase.userText);
+      assert.isNotEmpty(constraints, `${testCase.name} should be parsed`);
+      for (const mode of ["safe", "auto", "yolo"] as const) {
+        assert.equal(
+          decide(testCase.action, {
+            mode,
+            userText: testCase.userText,
+            constraints,
+          }).kind,
+          "block",
+          `${testCase.name} in ${mode}`,
+        );
+      }
+    }
+  });
+
+  it("keeps relative target exclusions scoped in supported query languages", function () {
+    const cases = [
+      "Create a Zotero note. Do not run commands or modify other items.",
+      "请创建一条 Zotero 笔记。不要运行命令，也不要修改其他条目。",
+      "Zoteroノートを作成してください。コマンドを実行せず、他の項目を変更しないでください。",
+      "Crea una nota en Zotero. No ejecutes comandos ni modifiques otros elementos.",
+    ];
+
+    for (const userText of cases) {
+      const constraints = parseActionConstraints(userText);
+      assert.deepEqual(
+        constraints.map((entry) => entry.kind),
+        ["deny_mechanisms"],
+        userText,
+      );
+      assert.equal(
+        decide(proposal("write_note", {}, noteWrite()), {
+          userText,
+          constraints,
+        }).kind,
+        "execute",
+        userText,
+      );
+      assert.equal(
+        decide(proposal("run_command", {}, shellRead()), {
+          userText,
+          constraints,
+        }).kind,
+        "block",
+        userText,
+      );
+    }
   });
 
   it("normalizes legacy execute effects into mechanism constraints", function () {

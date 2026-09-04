@@ -275,8 +275,18 @@ export function reconcileNoteDestinationActionIntents(
 }
 
 function requestedCoverage(text: string): AgentActionIntent["coverage"] {
-  if (/\b(?:all|every|each)\b/i.test(text)) return "all";
-  if (/\b(?:this|current|one|single)\b/i.test(text)) return "one";
+  if (
+    /\b(?:all|every|each|todos?|todas?|cada)\b|(?:全部|所有|每一|すべて|全て|各)/i.test(
+      text,
+    )
+  )
+    return "all";
+  if (
+    /\b(?:this|current|one|single|este|esta|actual|uno|una)\b|(?:这个|這個|当前|當前|一个|一個|この|現在|1つ)/i.test(
+      text,
+    )
+  )
+    return "one";
   return "some";
 }
 
@@ -316,18 +326,25 @@ function requestedFilePath(text: string): string | undefined {
 
 function mutationRequestIsExplicit(text: string): boolean {
   if (
-    /\b(?:do not|don't|dont|never|without (?:changing|modifying|writing)|only a question|hypothetical|for advice)\b/i.test(
+    /\b(?:do not|don't|dont|never|without (?:changing|modifying|writing)|only a question|hypothetical|for advice)\b|(?:不要|不准|不可|不能|禁止|请勿|請勿|切勿)|(?:しないで|しない|するな|禁止)|^\s*(?:no|nunca|sin)\b/i.test(
       text,
     )
   ) {
     return false;
   }
-  if (/^\s*(?:what|which|why|how|should|would|could|if)\b/i.test(text)) {
+  if (
+    /^\s*(?:what|which|why|how|should|would|could|if|qu[eé]|cu[aá]l|por\s+qu[eé]|c[oó]mo|deber[ií]a|podr[ií]a|si)\b|^\s*(?:什么|什麼|哪个|哪個|为什么|為什麼|如何|怎么|怎麼|是否|能否|なに|何|どれ|なぜ|どう|どの)/i.test(
+      text,
+    )
+  ) {
     return false;
   }
-  return /^\s*(?:please\s+)?(?:add|apply|assign|remove|replace|set|tag|update|edit|change|correct|create|write|save|append|import|trash|restore|delete|rename|relink|move|file|merge|relate|unrelate|annotate|undo|revert|run|execute|export)\b/i.test(
-    text,
-  );
+  return [
+    /^\s*(?:please\s+)?(?:add|apply|assign|remove|replace|set|tag|update|edit|change|correct|create|write|save|append|import|trash|restore|delete|rename|relink|move|file|merge|relate|unrelate|annotate|undo|revert|run|execute|export)\b/i,
+    /^\s*(?:请|請)?\s*(?:添加|新增|应用|應用|分配|移除|替换|替換|设置|設定|加标签|加標籤|更新|编辑|編輯|更改|修正|创建|創建|建立|写入|寫入|保存|儲存|追加|导入|匯入|放入回收站|恢复|還原|删除|刪除|重命名|重新命名|重新链接|重新連結|移动|移動|归档|歸檔|合并|合併|关联|關聯|取消关联|取消關聯|标注|標註|撤销|復原|运行|運行|执行|執行|导出|匯出)/i,
+    /(?:追加|適用|割り当て|除去|置換|設定|タグ付け|更新|編集|変更|修正|作成|書き込|保存|追記|インポート|ゴミ箱|復元|削除|名前変更|再リンク|移動|整理|統合|関連付け|注釈|元に戻|実行|エクスポート)(?:して|してください|せよ)/i,
+    /^\s*(?:por\s+favor\s+)?(?:agrega|a[nñ]ade|aplica|asigna|quita|reemplaza|establece|etiqueta|actualiza|edita|cambia|corrige|crea|escribe|guarda|anexa|importa|elimina|renombra|mueve|archiva|combina|relaciona|anota|deshaz|revierte|ejecuta|exporta)\b/i,
+  ].some((pattern) => pattern.test(text));
 }
 
 /** High-confidence fallback used only when the classifier call fails. */
@@ -372,7 +389,7 @@ export function inferActionIntentsFromRequest(
       .map((match) => match[1].trim())
       .filter(Boolean);
     if (
-      /\b(?:add|apply|assign|tag)\b[\s\S]{0,60}\btags?\b|^\s*(?:please\s+)?tag\b/i.test(
+      /\b(?:add|apply|assign|tag)\b[\s\S]{0,60}\btags?\b|^\s*(?:please\s+)?tag\b|(?:添加|新增|应用|應用|加上|加)[^。！？\n]{0,40}(?:标签|標籤)|(?:タグ)[^。！？\n]{0,30}(?:追加|付け)|(?:agrega|a[nñ]ade|aplica|asigna)[^.!?\n]{0,40}\betiquetas?\b/i.test(
         text,
       )
     ) {
@@ -437,7 +454,11 @@ export function inferActionIntentsFromRequest(
     ) {
       add("update_metadata");
     }
-    if (/\b(?:create|write|save)\b[\s\S]{0,50}\bnotes?\b/i.test(text)) {
+    if (
+      /\b(?:create|write|save)\b[\s\S]{0,50}\bnotes?\b|(?:创建|創建|建立|写入|寫入|保存|儲存)[^。！？\n]{0,40}(?:zotero\s*)?(?:笔记|筆記)|(?:zotero\s*)?ノート[^。！？\n]{0,30}(?:作成|書き込|保存)|(?:crea|escribe|guarda)[^.!?\n]{0,40}\b(?:una?\s+)?notas?\b/i.test(
+        text,
+      )
+    ) {
       add("note_create", { noteMode: "create" }, { targetKind: "items" });
     } else if (/\bappend\b[\s\S]{0,50}\bnotes?\b/i.test(text)) {
       add("note_append", { noteMode: "append" }, { targetKind: "items" });
@@ -491,7 +512,7 @@ export function inferActionIntentsFromRequest(
     if (/^\s*(?:please\s+)?revert\b/i.test(text))
       add("revert", undefined, { targetKind: "items", scope: undefined });
     if (
-      /\b(?:write|save|export)\b[\s\S]{0,80}\b(?:file|markdown|csv|json|vault)\b/i.test(
+      /\b(?:write|save|export)\b[\s\S]{0,80}\b(?:file|markdown|csv|json|vault)\b|(?:写入|寫入|保存|儲存|导出|匯出)[^。！？\n]{0,60}(?:文件|檔案|markdown|csv|json)|(?:ファイル|markdown|csv|json)[^。！？\n]{0,40}(?:書き込|保存|エクスポート)|(?:escribe|guarda|exporta)[^.!?\n]{0,60}\b(?:archivo|markdown|csv|json)\b/i.test(
         text,
       )
     ) {
@@ -502,7 +523,7 @@ export function inferActionIntentsFromRequest(
       });
     }
     if (
-      /^\s*(?:please\s+)?(?:run|execute)\b[\s\S]{0,40}\b(?:command|shell)\b/i.test(
+      /^\s*(?:please\s+)?(?:run|execute)\b[\s\S]{0,40}\b(?:command|shell)\b|(?:运行|運行|执行|執行)[^。！？\n]{0,30}(?:命令|指令|shell)|(?:コマンド|シェル)[^。！？\n]{0,24}(?:実行)|(?:ejecuta|ejecutar)[^.!?\n]{0,30}\b(?:comando|shell)\b/i.test(
         text,
       )
     ) {

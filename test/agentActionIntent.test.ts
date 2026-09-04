@@ -119,4 +119,22 @@ describe("Agent action intent", function () {
       "/tmp/acv2-vault/ACV2 Mixed.md",
     );
   });
+
+  it("keeps note intent available when multilingual classification degrades", function () {
+    const prompts = [
+      "请创建一条 Zotero 笔记。",
+      "Zoteroノートを作成してください。",
+      "Crea una nota de Zotero.",
+    ];
+
+    for (const userText of prompts) {
+      assert.deepEqual(
+        inferActionIntentsFromRequest(request({ userText })).map(
+          (intent) => intent.operation,
+        ),
+        ["note_create"],
+        userText,
+      );
+    }
+  });
 });

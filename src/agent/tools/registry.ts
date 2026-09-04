@@ -49,6 +49,20 @@ type PreparedInvocationState = {
   proposal: ActionProposal;
 };
 
+function scopeMatchedExplicitActionIntent(params: {
+  request: AgentRuntimeRequest;
+  prepared: PreparedActionExecution | undefined;
+  scopeValidated: boolean;
+  scopeFailure: ScopeValidationFailure | null;
+}): boolean {
+  return Boolean(
+    params.scopeValidated &&
+    !params.scopeFailure &&
+    params.prepared?.proposals.length &&
+    params.request.actionContract?.obligations.length,
+  );
+}
+
 function isCompleteInvocationPlan(
   value: unknown,
 ): value is AgentInvocationPlan {
@@ -597,12 +611,14 @@ export class AgentToolRegistry {
       );
     }
     let planScopeFailure: ScopeValidationFailure | null = null;
+    let initialScopeValidated = false;
     let approvedPlanScopeProposalDigest: string | undefined;
     if (
       preparedAction &&
       context.request.actionContract &&
       this.actionContracts
     ) {
+      initialScopeValidated = true;
       const scopeFailure = await this.actionContracts!.validateScope(
         context.request.actionContract,
         preparedAction,
@@ -770,6 +786,8 @@ export class AgentToolRegistry {
       const hasExternalEffect =
         tool.spec.executionClass === "external_effect" &&
         executionInvocationPlan.impact !== "read_only";
+      let executionScopeValidated = false;
+      let executionScopeFailure: ScopeValidationFailure | null = null;
       if (hasExternalEffect && !isAgentChangeJournalAvailable()) {
         return {
           tool,
@@ -856,7 +874,8 @@ export class AgentToolRegistry {
         context.request.actionContract &&
         this.actionContracts
       ) {
-        const scopeFailure = await this.actionContracts.validateScope(
+        executionScopeValidated = true;
+        executionScopeFailure = await this.actionContracts.validateScope(
           context.request.actionContract,
           executionPrepared,
           {
@@ -869,7 +888,7 @@ export class AgentToolRegistry {
           },
         );
         if (
-          scopeFailure &&
+          executionScopeFailure &&
           approvedPlanScopeProposalDigest !== executionProposal.payloadDigest
         ) {
           return {
@@ -882,15 +901,15 @@ export class AgentToolRegistry {
               actionReceipts: this.actionContracts.rejectionReceipts(
                 context.request.actionContract,
                 executionPrepared,
-                scopeFailure,
+                executionScopeFailure,
               ),
               content: {
-                error: scopeFailure.message,
+                error: executionScopeFailure.message,
                 retryable: true,
-                expectedCount: scopeFailure.expectedCount,
-                proposedCount: scopeFailure.proposedCount,
-                rejectedTargets: scopeFailure.rejectedTargets,
-                missingTargets: scopeFailure.missingTargets,
+                expectedCount: executionScopeFailure.expectedCount,
+                proposedCount: executionScopeFailure.proposedCount,
+                rejectedTargets: executionScopeFailure.rejectedTargets,
+                missingTargets: executionScopeFailure.missingTargets,
               },
             },
           };
@@ -916,6 +935,12 @@ export class AgentToolRegistry {
                   ),
                   ...parseActionConstraints(context.request.userText || ""),
                 ],
+                hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
+                  request: context.request,
+                  prepared: executionPrepared,
+                  scopeValidated: executionScopeValidated,
+                  scopeFailure: executionScopeFailure,
+                }),
               })
             : ({ kind: "execute", authority: "auto_policy" } as const);
       if (executionAuthorization.kind === "block") {
@@ -1250,11 +1275,13 @@ export class AgentToolRegistry {
         };
       }
       let confirmedScopeFailure: ScopeValidationFailure | null = null;
+      let confirmedScopeValidated = false;
       if (
         confirmedInvocation.preparedAction &&
         context.request.actionContract &&
         this.actionContracts
       ) {
+        confirmedScopeValidated = true;
         confirmedScopeFailure = await this.actionContracts.validateScope(
           context.request.actionContract,
           confirmedInvocation.preparedAction,
@@ -1321,6 +1348,12 @@ export class AgentToolRegistry {
                   ),
                   ...parseActionConstraints(context.request.userText || ""),
                 ],
+                hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
+                  request: context.request,
+                  prepared: confirmedInvocation.preparedAction,
+                  scopeValidated: confirmedScopeValidated,
+                  scopeFailure: confirmedScopeFailure,
+                }),
               })
             : ({ kind: "execute", authority: "auto_policy" } as const);
       if (confirmedAuthorization.kind === "block") {
@@ -1430,6 +1463,12 @@ export class AgentToolRegistry {
                 ),
                 ...parseActionConstraints(context.request.userText || ""),
               ],
+              hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
+                request: context.request,
+                prepared: preparedAction,
+                scopeValidated: initialScopeValidated,
+                scopeFailure: planScopeFailure,
+              }),
             })
           : { kind: "execute" as const, authority: "auto_policy" as const };
     if (authorization.kind === "block") {

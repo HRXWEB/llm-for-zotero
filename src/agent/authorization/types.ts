@@ -77,6 +77,8 @@ export type OriginalAuthorizationContext = {
   mode: OriginalAgentPermissionMode;
   userText: string;
   constraints?: readonly ActionConstraint[];
+  /** The exact typed proposal passed the current turn's Action Contract. */
+  hasMatchingActionIntent?: boolean;
   /** Legacy caller compatibility; new persisted contracts use constraints. */
   hasExplicitNoWrite?: boolean;
 };
