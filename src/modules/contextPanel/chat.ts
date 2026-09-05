@@ -1,5 +1,8 @@
 import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
-import { disposePlanProgress } from "./agentTrace/planProgressView";
+import {
+  disposePlanProgress,
+  renderPlanProgress,
+} from "./agentTrace/planProgressView";
 import { renderMarkdownForNote } from "../../utils/markdown";
 import { HTML_NS } from "../../utils/domHelpers";
 import {
@@ -240,6 +243,7 @@ import {
   activeContextPanelStateSync,
   getCancelledRequestId,
   getPendingRequestId,
+  getLivePlanExecution,
   getAbortController,
   getConversationWriteGeneration,
   isConversationWriteGenerationCurrent,
@@ -350,7 +354,6 @@ import { getWorkflowTestFinalRequestInterceptor } from "./workflowTestHooks";
 import { resolveSelectedTextAnchors } from "./selectedTextAnchors";
 import { canEditUserPromptTurn } from "./editability";
 import {
-  isFloatingPlanExecutionStatus,
   renderAgentTrace,
   disposeAgentTrace,
   renderPendingActionCard,
@@ -2544,6 +2547,54 @@ export async function ensureConversationLoaded(
   restoreConversationComposeContext(item);
 }
 
+const pendingTraceRefreshes = new Map<
+  number,
+  {
+    runIds: Set<string>;
+    done: Promise<void>;
+  }
+>();
+
+function refreshLoadedTraceMessages(
+  runId: string,
+  body: Element,
+  item: Zotero.Item,
+  isFrozen: () => boolean,
+): Promise<void> {
+  const key = getConversationKey(item);
+  const pending = pendingTraceRefreshes.get(key);
+  if (pending) {
+    pending.runIds.add(runId);
+    return pending.done;
+  }
+  const runIds = new Set([runId]);
+  let resolve!: () => void;
+  const done = new Promise<void>((finish) => {
+    resolve = finish;
+  });
+  pendingTraceRefreshes.set(key, { runIds, done });
+  createQueuedRefresh(() => {
+    pendingTraceRefreshes.delete(key);
+    try {
+      if (isFrozen()) return;
+      const messages = new Set(
+        (chatHistory.get(key) || []).filter(
+          (message) =>
+            message.role === "assistant" &&
+            runIds.has(message.agentRunId || ""),
+        ),
+      );
+      if (messages.size)
+        refreshConversationPanels(body, item, {
+          chatOptions: { rerenderAssistantMessages: messages },
+        });
+    } finally {
+      resolve();
+    }
+  })();
+  return done;
+}
+
 async function ensureAgentRunTraceLoaded(
   runId: string | undefined,
   body?: Element,
@@ -2590,7 +2641,7 @@ async function ensureAgentRunTraceLoaded(
     } finally {
       agentRunTraceLoadingTasks.delete(normalizedRunId);
       if (body && item && !isFrozen()) {
-        refreshConversationPanels(body, item);
+        await refreshLoadedTraceMessages(normalizedRunId, body, item, isFrozen);
       }
     }
   })();
@@ -2863,49 +2914,54 @@ function syncInlineActionCardAttr(body: Element): void {
   }
 }
 
-function syncFloatingPlanProgress(chatBox: HTMLElement): void {
+function latestAssistantMessage(conversationKey: number): Message | undefined {
+  const history = chatHistory.get(conversationKey) || [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index].role === "assistant") return history[index];
+  }
+  return undefined;
+}
+
+/** Progress belongs to the live request, never to a historical assistant trace. */
+function syncFloatingPlanProgress(
+  chatBox: HTMLElement,
+  conversationKey: number,
+): void {
+  const binding = getLivePlanExecution(conversationKey);
+  const latestMessage = binding && latestAssistantMessage(conversationKey);
+  const message =
+    latestMessage?.agentRunId === binding?.runId && latestMessage?.streaming
+      ? latestMessage
+      : undefined;
   const cards = Array.from(
     chatBox.querySelectorAll(".llm-plan-container-execution"),
   ).filter(Boolean) as HTMLElement[];
-  if (!cards.length) return;
-  const owners = new Map<string, HTMLElement>();
+  const current =
+    binding && message
+      ? cards.find(
+          (card) =>
+            card.dataset.llmPlanExecutionId === binding.ledger.executionId &&
+            card.dataset.llmPlanRequestId === `${binding.requestId}` &&
+            card.dataset.llmPlanRunId === binding.runId,
+        )
+      : undefined;
   for (const card of cards) {
-    const executionId = card.dataset.llmPlanExecutionId;
-    if (!executionId) continue;
-    const owner = owners.get(executionId);
-    if (
-      !owner ||
-      Number(card.dataset.llmPlanRenderSequence || "0") >
-        Number(owner.dataset.llmPlanRenderSequence || "0")
-    )
-      owners.set(executionId, card);
+    if (card !== current) disposePlanProgress(card);
   }
-  const latest = cards.reduce((current, candidate) => {
-    const currentSequence = Number(
-      current.dataset.llmPlanRenderSequence || "0",
-    );
-    const candidateSequence = Number(
-      candidate.dataset.llmPlanRenderSequence || "0",
-    );
-    return candidateSequence > currentSequence ? candidate : current;
-  });
-  for (const card of cards) {
-    if (
-      (card.dataset.llmPlanExecutionId &&
-        owners.get(card.dataset.llmPlanExecutionId) !== card) ||
-      (card !== latest && card.classList.contains("llm-plan-progress-floating"))
-    ) {
-      disposePlanProgress(card);
-      card.remove();
-    }
-  }
-  if (!isFloatingPlanExecutionStatus(latest.dataset.llmPlanExecutionStatus)) {
-    latest.classList.remove("llm-plan-progress-floating");
-    return;
-  }
-  if (!latest.classList.contains("llm-plan-progress-floating"))
-    latest.classList.add("llm-plan-progress-floating");
-  if (latest.parentElement !== chatBox) chatBox.appendChild(latest);
+  if (!binding || !message) return;
+  const progress = renderPlanProgress(
+    chatBox.ownerDocument,
+    binding.ledger,
+    getCachedAgentRunEvents(binding.runId),
+    current,
+  );
+  if (progress.dataset.llmPlanRequestId !== `${binding.requestId}`)
+    progress.dataset.llmPlanRequestId = `${binding.requestId}`;
+  if (progress.dataset.llmPlanRunId !== binding.runId)
+    progress.dataset.llmPlanRunId = binding.runId;
+  if (!progress.classList.contains("llm-plan-progress-floating"))
+    progress.classList.add("llm-plan-progress-floating");
+  if (progress.parentElement !== chatBox) chatBox.appendChild(progress);
 }
 
 function findNativeMcpActionCard(
@@ -3365,7 +3421,11 @@ function syncRequestUIForConversation(
     conversationKey,
     primaryBody,
     primaryItem,
-    (body) => activeContextPanelStateSync.get(body)?.(),
+    (body) => {
+      const box = body.querySelector<HTMLElement>("#llm-chat-box");
+      if (box) syncFloatingPlanProgress(box, conversationKey);
+      activeContextPanelStateSync.get(body)?.();
+    },
   );
 }
 
@@ -12356,6 +12416,8 @@ type MountedAssistantView = {
   quoteCitations?: Message["quoteCitations"];
   quoteOverride?: Message["quoteDisplayOverride"];
   answer?: HTMLElement;
+  streaming?: boolean;
+  documentId?: string;
 };
 const mountedAssistantViews = new WeakMap<
   HTMLElement,
@@ -12376,10 +12438,9 @@ function updateMountedAssistantViews(
     if (
       !view ||
       view.wrapper.parentElement !== box ||
-      !message.streaming ||
+      Boolean(message.streaming) !== Boolean(view.streaming) ||
       message.compactMarker ||
-      message.documentId ||
-      message.planDocumentId ||
+      (message.documentId || message.planDocumentId) !== view.documentId ||
       message.agentRunId !== view.runId ||
       message.generatedImages?.length
     )
@@ -12398,6 +12459,8 @@ function updateMountedAssistantViews(
       userMessage: view.user,
       events,
       previous: view.trace,
+      allowPlanRecovery:
+        message === latestAssistantMessage(getConversationKey(item)),
       onInterleavedText: () => {
         interleaved = true;
       },
@@ -12416,17 +12479,22 @@ function updateMountedAssistantViews(
         view.answer.className = "llm-assistant-answer";
         view.bubble.appendChild(view.answer);
       }
-      renderStreamingMarkdownInto(
-        view.answer,
-        buildAssistantDisplayMarkdownForRender(message),
-        box.ownerDocument,
-        () =>
-          stabilizeFollowBottomAfterAsyncChatContent(
-            body,
-            getConversationKey(item),
-            box,
-          ),
-      );
+      const source = buildAssistantDisplayMarkdownForRender(message);
+      if (message.streaming) {
+        renderStreamingMarkdownInto(
+          view.answer,
+          source,
+          box.ownerDocument,
+          () =>
+            stabilizeFollowBottomAfterAsyncChatContent(
+              body,
+              getConversationKey(item),
+              box,
+            ),
+        );
+      } else {
+        renderRenderedMarkdownInto(view.answer, source, box.ownerDocument);
+      }
       view.text = message.text;
       view.quoteCitations = message.quoteCitations;
       view.quoteOverride = message.quoteDisplayOverride;
@@ -12435,12 +12503,7 @@ function updateMountedAssistantViews(
     }
     if (view.answer) view.answer.hidden = interleaved;
   }
-  if (
-    Array.from(messages).some((message) =>
-      views.get(message)?.trace.querySelector(".llm-plan-container-execution"),
-    )
-  )
-    syncFloatingPlanProgress(box);
+  syncFloatingPlanProgress(box, getConversationKey(item));
   scheduleFollowBottomStabilization(body, getConversationKey(item), box);
   return true;
 }
@@ -13511,6 +13574,7 @@ export function refreshChat(
               panelItem: item,
               message: msg,
               userMessage: previousUserMessage,
+              allowPlanRecovery: index === latestAssistantIndex,
               events: traceEvents,
               onTraceMissing:
                 agentRunId && !hasCachedTrace
@@ -13686,7 +13750,7 @@ export function refreshChat(
       if (agentTraceEl) {
         bubbleHeaderNodes.push(agentTraceEl);
       }
-      if (agentTraceEl && msg.streaming) {
+      if (agentTraceEl) {
         let views = mountedAssistantViews.get(chatBox);
         if (!views) {
           views = new Map();
@@ -13700,6 +13764,10 @@ export function refreshChat(
           runId: msg.agentRunId,
           text: msg.text,
           answer: answerHost,
+          streaming: msg.streaming,
+          documentId: msg.documentId || msg.planDocumentId,
+          quoteCitations: msg.quoteCitations,
+          quoteOverride: msg.quoteDisplayOverride,
         });
       }
 
@@ -14104,7 +14172,7 @@ export function refreshChat(
     }
   }
 
-  syncFloatingPlanProgress(chatBox);
+  syncFloatingPlanProgress(chatBox, conversationKey);
   syncUserContextAlignmentWidths(body);
   syncConversationTurnNavigator(body, history, {
     conversationKey,

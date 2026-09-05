@@ -1,11 +1,6 @@
 import type { AgentRunEventRecord } from "../../../agent/types";
 import type { PlanExecutionLedger } from "../../../agent/plans/types";
-import { loadPlanExecutionLedger } from "../../../agent/plans/store";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
-import {
-  stageApprovedPlanExecution,
-  PLAN_APPROVED_EVENT,
-} from "../planModeState";
 
 const PLAN_STATUS_SYMBOLS: Record<string, string> = {
   pending: "",
@@ -22,13 +17,7 @@ const PLAN_STATUS_SYMBOLS: Record<string, string> = {
 export function isFloatingPlanExecutionStatus(
   status: string | undefined,
 ): boolean {
-  return [
-    "pending",
-    "running",
-    "waiting_for_user",
-    "interrupted",
-    "blocked",
-  ].includes(status || "");
+  return status === "pending" || status === "running";
 }
 
 type ProgressView = {
@@ -84,6 +73,7 @@ function patchPresentation(target: HTMLElement, source: HTMLElement): void {
 
 export function disposePlanProgress(root: HTMLElement): void {
   views.get(root)?.dispose();
+  root.remove();
 }
 
 export function renderPlanProgress(
@@ -97,6 +87,7 @@ export function renderPlanProgress(
     existing.update(ledger, events);
     return previous;
   }
+  if (previous) disposePlanProgress(previous);
   const root = doc.createElement("section");
   root.className = "llm-plan-container llm-plan-container-execution";
   root.setAttribute("aria-label", "Task progress");
@@ -121,19 +112,21 @@ export function renderPlanProgress(
   popover.setAttribute("aria-label", "Task progress details");
   const presentation = doc.createElement("div");
   presentation.style.display = "contents";
-  const actions = doc.createElement("div");
-  actions.className = "llm-plan-actions";
-  const resume = doc.createElement("button");
-  resume.className = "llm-plan-action llm-plan-approve";
-  resume.textContent = "Resume execution";
-  actions.appendChild(resume);
-  popover.append(presentation, actions);
+  popover.append(presentation);
   const live = doc.createElement("div");
   live.className = "llm-plan-live-region";
   live.setAttribute("aria-live", "polite");
   root.append(trigger, popover, live);
   let current = ledger;
-  let currentEvents = events;
+  let lastLedger: PlanExecutionLedger | undefined;
+  let seenEventCount = 0;
+  let lastEvent: AgentRunEventRecord | undefined;
+  let research:
+    | Extract<
+        AgentRunEventRecord["payload"],
+        { type: "plan_research_progress" }
+      >
+    | undefined;
   let pinned = false;
   let disposed = false;
   let summary = "";
@@ -163,42 +156,31 @@ export function renderPlanProgress(
     popover.style.width = `${width}px`;
     popover.style.maxHeight = `${Math.max(96, Math.min(360, height * 0.5, anchor.top - 24))}px`;
   };
-  trigger.addEventListener("click", (event) => {
+  const listeners: Array<() => void> = [];
+  const listen = (node: HTMLElement, type: string, handler: EventListener) => {
+    node.addEventListener(type, handler);
+    listeners.push(() => node.removeEventListener(type, handler));
+  };
+  listen(trigger, "click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     pinned = !pinned;
     syncOpen();
     if (pinned) position();
   });
-  root.addEventListener("mouseenter", () => {
+  listen(root, "mouseenter", () => {
     position();
     root.classList.add("llm-plan-progress-hover");
   });
-  root.addEventListener("mouseleave", () =>
+  listen(root, "mouseleave", () =>
     root.classList.remove("llm-plan-progress-hover"),
   );
-  root.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+  listen(root, "keydown", (event) => {
+    if ((event as KeyboardEvent).key === "Escape") {
       pinned = false;
       syncOpen();
       trigger.focus({ preventScroll: true });
     }
-  });
-  resume.addEventListener("click", () => {
-    stageApprovedPlanExecution(current);
-    const EventCtor = doc.defaultView?.CustomEvent;
-    if (EventCtor)
-      root.dispatchEvent(
-        new EventCtor(PLAN_APPROVED_EVENT, {
-          bubbles: true,
-          detail: {
-            planId: current.planId,
-            revision: current.revision,
-            executionId: current.executionId,
-            recovery: true,
-          },
-        }),
-      );
   });
   const executionStatusLabel = (
     status: PlanExecutionLedger["status"],
@@ -343,7 +325,24 @@ export function renderPlanProgress(
   const update = (next: PlanExecutionLedger, trace: AgentRunEventRecord[]) => {
     if (disposed || next.updatedAt < current.updatedAt) return;
     current = next;
-    currentEvents = trace;
+    const previousResearch = research;
+    const from =
+      seenEventCount && trace[seenEventCount - 1] === lastEvent
+        ? seenEventCount
+        : 0;
+    if (from === 0) research = undefined;
+    for (let index = from; index < trace.length; index++) {
+      const event = trace[index].payload;
+      if (
+        event.type === "plan_research_progress" &&
+        event.progress.executionId === next.executionId
+      )
+        research = event;
+    }
+    seenEventCount = trace.length;
+    lastEvent = trace[trace.length - 1];
+    if (next === lastLedger && research === previousResearch) return;
+    lastLedger = next;
     root.dataset.llmPlanId = next.planId;
     root.dataset.llmPlanRevision = `${next.revision}`;
     root.dataset.llmPlanExecutionId = next.executionId;
@@ -402,13 +401,6 @@ export function renderPlanProgress(
     track.appendChild(fill);
     progress.appendChild(track);
     content.append(header, progress, renderExecutionTasks(next));
-    const research = [...trace]
-      .reverse()
-      .find(
-        (entry) =>
-          entry.payload.type === "plan_research_progress" &&
-          entry.payload.progress.executionId === next.executionId,
-      )?.payload;
     if (research?.type === "plan_research_progress") {
       const text = doc.createElement("div");
       text.className = "llm-plan-research-progress";
@@ -421,8 +413,6 @@ export function renderPlanProgress(
       for (const child of Array.from(content.childNodes)) {
         if (child) presentation.appendChild(child);
       }
-    actions.hidden = next.status !== "interrupted";
-    actions.style.display = actions.hidden ? "none" : "";
     const announcement =
       next.tasks.find((task) => task.status === "in_progress")?.activeForm ||
       status.textContent ||
@@ -443,6 +433,7 @@ export function renderPlanProgress(
     update,
     dispose: () => {
       disposed = true;
+      for (const remove of listeners) remove();
       observer?.disconnect();
       doc.defaultView?.removeEventListener("resize", resize);
       views.delete(root);
@@ -450,19 +441,5 @@ export function renderPlanProgress(
   };
   views.set(root, view);
   update(ledger, events);
-  // Hydrate once per mounted execution, never once per streamed chunk.
-  void loadPlanExecutionLedger(ledger.executionId)
-    .then((stored) => {
-      if (
-        !disposed &&
-        root.isConnected &&
-        stored &&
-        stored.updatedAt > current.updatedAt
-      )
-        update(stored, currentEvents);
-    })
-    .catch((error) =>
-      ztoolkit.log("LLM: Failed to hydrate execution progress:", error),
-    );
   return root;
 }

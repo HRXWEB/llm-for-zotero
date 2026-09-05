@@ -2,11 +2,6 @@ import {
   renderStreamingMarkdownInto,
   disposeStreamingMarkdown,
 } from "../streamingMarkdown";
-import {
-  renderPlanProgress,
-  isFloatingPlanExecutionStatus,
-} from "./planProgressView";
-export { isFloatingPlanExecutionStatus } from "./planProgressView";
 import { getAgentRuntime } from "../../../agent";
 import type {
   AgentPendingChoiceValue,
@@ -65,7 +60,10 @@ import type {
   PlanExecutionLedger,
 } from "../../../agent/types";
 import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import { loadPlanArtifact } from "../../../agent/plans/store";
+import {
+  loadPlanArtifact,
+  loadPlanExecutionLedger,
+} from "../../../agent/plans/store";
 import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import {
   PLAN_APPROVED_EVENT,
@@ -167,6 +165,7 @@ type RenderAgentTraceParams = {
   userMessage?: Message | null;
   events: AgentRunEventRecord[];
   previous?: HTMLElement;
+  allowPlanRecovery?: boolean;
   onTraceMissing?: () => void;
   onInterleavedText?: () => void;
 };
@@ -4739,7 +4738,12 @@ function createPlanningDriveIcon(doc: Document): HTMLSpanElement {
   return loader;
 }
 
-let planContainerRenderSequence = 0;
+const cardDisposers = new WeakMap<HTMLElement, () => void>();
+function disposePlanCard(node: HTMLElement): void {
+  cardDisposers.get(node)?.();
+  cardDisposers.delete(node);
+  node.remove();
+}
 
 function dispatchPlanEvent(
   root: HTMLElement,
@@ -4786,7 +4790,6 @@ function getPlanActionContract(
 }
 
 function renderPlanContainer(params: {
-  previous?: HTMLElement;
   doc: Document;
   events: AgentRunEventRecord[];
   projection:
@@ -4794,18 +4797,50 @@ function renderPlanContainer(params: {
     | { artifact?: undefined; ledger: PlanExecutionLedger };
 }): HTMLElement {
   if (params.projection.ledger) {
-    const progress = renderPlanProgress(
-      params.doc,
-      params.projection.ledger,
-      params.events,
-      params.previous,
-    );
-    progress.dataset.llmPlanRenderSequence = `${++planContainerRenderSequence}`;
-    return progress;
+    const ledger = params.projection.ledger;
+    const root = params.doc.createElement("section");
+    root.className = "llm-plan-recovery-card";
+    const text = params.doc.createElement("p");
+    text.textContent = "Plan execution was interrupted.";
+    const resume = params.doc.createElement("button");
+    resume.className = "llm-plan-action llm-plan-approve";
+    resume.textContent = "Resume execution";
+    let disposed = false;
+    const onResume = async () => {
+      resume.disabled = true;
+      try {
+        const current = await loadPlanExecutionLedger(ledger.executionId);
+        if (disposed || !root.isConnected) return;
+        if (!current || current.status !== "interrupted") {
+          text.textContent = "This execution is no longer available to resume.";
+          resume.remove();
+          return;
+        }
+        stageApprovedPlanExecution(current);
+        dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
+          planId: current.planId,
+          revision: current.revision,
+          executionId: current.executionId,
+          recovery: true,
+        });
+      } catch (error) {
+        if (!disposed)
+          text.textContent =
+            error instanceof Error ? error.message : String(error);
+      } finally {
+        if (!disposed) resume.disabled = false;
+      }
+    };
+    resume.addEventListener("click", onResume);
+    cardDisposers.set(root, () => {
+      disposed = true;
+      resume.removeEventListener("click", onResume);
+    });
+    root.append(text, resume);
+    return root;
   }
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container";
-  root.dataset.llmPlanRenderSequence = `${++planContainerRenderSequence}`;
   const actionContract = getPlanActionContract(params.events);
 
   const artifactStatusLabel = (status: PlanArtifact["status"]): string => {
@@ -4840,7 +4875,25 @@ function renderPlanContainer(params: {
     return markdown;
   };
 
+  let disposed = false;
+  let lastArtifact = params.projection.artifact;
+  let paintedSignature = "";
+  cardDisposers.set(root, () => {
+    disposed = true;
+  });
   const paint = (projection: { artifact: PlanArtifact }) => {
+    if (disposed || projection.artifact.updatedAt < lastArtifact.updatedAt)
+      return;
+    const signature = JSON.stringify([
+      projection.artifact.planId,
+      projection.artifact.revision,
+      projection.artifact.digest,
+      projection.artifact.status,
+      projection.artifact.updatedAt,
+    ]);
+    if (signature === paintedSignature) return;
+    paintedSignature = signature;
+    lastArtifact = projection.artifact;
     root.replaceChildren();
     const artifact = projection.artifact;
     const planId = artifact.planId;
@@ -5035,10 +5088,12 @@ function renderPlanContainer(params: {
   paint(params.projection);
   const artifact = params.projection.artifact;
   if (artifact) {
-    void loadPlanArtifact(artifact.planId, artifact.revision).then((stored) => {
-      if (!root.isConnected && !root.parentElement) return;
-      if (stored) paint({ artifact: stored });
-    });
+    void loadPlanArtifact(artifact.planId, artifact.revision)
+      .then((stored) => {
+        if (disposed || !root.isConnected) return;
+        if (stored) paint({ artifact: stored });
+      })
+      .catch((error) => ztoolkit.log("LLM: Failed to hydrate plan:", error));
   }
   return root;
 }
@@ -5222,6 +5277,10 @@ function renderPlanDocumentCard(params: {
   root.className = "llm-plan-container llm-plan-document-card";
   root.dataset.llmPlanDocumentId = params.documentId;
   root.textContent = "Loading document…";
+  let disposed = false;
+  cardDisposers.set(root, () => {
+    disposed = true;
+  });
 
   const paint = (document: PlanDocument) => {
     root.replaceChildren();
@@ -5237,6 +5296,7 @@ function renderPlanDocumentCard(params: {
     const actionStatus = params.doc.createElement("span");
     actionStatus.className = "llm-plan-document-action-status";
     const setActionStatus = (text: string, error = false) => {
+      if (disposed || !root.isConnected) return;
       actionStatus.textContent = text;
       actionStatus.dataset.error = error ? "true" : "false";
     };
@@ -5330,6 +5390,7 @@ function renderPlanDocumentCard(params: {
     loadPlanDocumentOutbox(params.documentId),
   ])
     .then(([document, outbox]) => {
+      if (disposed || !root.isConnected) return;
       if (!document) {
         root.textContent = "Document is unavailable";
       } else if (outbox?.status !== "delivered") {
@@ -5342,7 +5403,9 @@ function renderPlanDocumentCard(params: {
       }
     })
     .catch((error) => {
-      root.textContent = error instanceof Error ? error.message : String(error);
+      if (!disposed && root.isConnected)
+        root.textContent =
+          error instanceof Error ? error.message : String(error);
     });
   return root;
 }
@@ -5352,6 +5415,16 @@ type TraceView = {
   list: HTMLElement;
   items: Map<string, TraceItemView>;
   plan?: { signature: string; node: HTMLElement };
+  document?: {
+    id: string;
+    formattingVersion: number;
+    panelItem?: Zotero.Item;
+    user?: Message | null;
+    message: Message;
+    node: HTMLElement;
+    caption: HTMLElement;
+  };
+  allowPlanRecovery?: boolean;
   eventCount?: number;
   lastEvent?: AgentRunEventRecord;
   quoteCitations?: Message["quoteCitations"];
@@ -5364,6 +5437,8 @@ export function disposeAgentTrace(root: HTMLElement): void {
   const view = traceViews.get(root);
   if (!view) return;
   for (const item of view.items.values()) disposeStreamingMarkdown(item.node);
+  if (view.plan) disposePlanCard(view.plan.node);
+  if (view.document) disposePlanCard(view.document.node);
   traceViews.delete(root);
 }
 
@@ -5389,6 +5464,7 @@ export function renderAgentTrace({
   onTraceMissing,
   onInterleavedText,
   previous,
+  allowPlanRecovery = false,
 }: RenderAgentTraceParams): HTMLElement | null {
   const runId = message.agentRunId?.trim() || "pending";
   if (
@@ -5426,6 +5502,7 @@ export function renderAgentTrace({
   view.quoteCitations = message.quoteCitations;
   view.quoteOverride = message.quoteDisplayOverride;
   const textOnly =
+    view.allowPlanRecovery === allowPlanRecovery &&
     !formattingChanged &&
     added &&
     added.every(
@@ -5433,6 +5510,7 @@ export function renderAgentTrace({
         entry.payload.type === "reasoning" ||
         entry.payload.type === "message_delta",
     );
+  view.allowPlanRecovery = allowPlanRecovery;
   view.eventCount = events.length;
   view.lastEvent = events[events.length - 1];
 
@@ -5477,6 +5555,14 @@ export function renderAgentTrace({
     wrap.classList.add("llm-agent-activity-question-card");
     wrap.dataset.llmAssistantTurnReplacement = "true";
     onInterleavedText?.();
+    if (view.plan) {
+      disposePlanCard(view.plan.node);
+      view.plan = undefined;
+    }
+    if (view.document) {
+      disposePlanCard(view.document.node);
+      view.document = undefined;
+    }
     wrap.replaceChildren(renderPendingActionCard(doc, pending));
     view.items.clear();
     return wrap;
@@ -5727,11 +5813,20 @@ export function renderAgentTrace({
       disposeStreamingMarkdown(old.node);
   }
   view.items = nextViews;
-  if (textOnly) return wrap;
+  if (textOnly) {
+    if (view.document || (view.plan && getPlanProjection(events)?.artifact))
+      onInterleavedText?.();
+    return wrap;
+  }
 
   if (retained) {
     for (const child of Array.from(wrap.children)) {
-      if (child !== list.parentElement && child !== view.plan?.node)
+      if (
+        child !== list.parentElement &&
+        child !== view.plan?.node &&
+        child !== view.document?.node &&
+        child !== view.document?.caption
+      )
         child?.remove();
     }
   }
@@ -5757,28 +5852,37 @@ export function renderAgentTrace({
   }
 
   const planProjection = getPlanProjection(events);
-  if (planProjection) {
+  const visiblePlanProjection =
+    planProjection?.artifact ||
+    (allowPlanRecovery && planProjection?.ledger?.status === "interrupted")
+      ? planProjection
+      : null;
+  if (!visiblePlanProjection && view.plan) {
+    disposePlanCard(view.plan.node);
+    view.plan = undefined;
+  }
+  if (visiblePlanProjection) {
     // The structured plan is the planning turn's visible answer. Keep the
     // provider's often-duplicated prose in durable history without rendering a
     // second copy below the card. Execution turns still render their final
-    // answer normally beside the task-progress projection.
-    if (planProjection.artifact) onInterleavedText?.();
-    const research = [...events]
-      .reverse()
-      .find((entry) => entry.payload.type === "plan_research_progress");
-    const planSignature = JSON.stringify([planProjection, research?.payload]);
-    const planContainer =
-      view.plan?.signature === planSignature
-        ? view.plan.node
-        : renderPlanContainer({
-            doc,
-            events,
-            projection: planProjection,
-            previous: view.plan?.node,
-          });
-    view.plan = { signature: planSignature, node: planContainer };
+    // answer normally; the live request owns execution progress separately.
+    if (visiblePlanProjection.artifact) onInterleavedText?.();
+    const planSignature = JSON.stringify(visiblePlanProjection);
+    if (view.plan?.signature !== planSignature) {
+      if (view.plan) disposePlanCard(view.plan.node);
+      view.plan = {
+        signature: planSignature,
+        node: renderPlanContainer({
+          doc,
+          events,
+          projection: visiblePlanProjection,
+        }),
+      };
+    }
+    const planContainer = view.plan.node;
     const planId =
-      planProjection.artifact?.planId || planProjection.ledger!.planId;
+      visiblePlanProjection.artifact?.planId ||
+      visiblePlanProjection.ledger!.planId;
     for (const node of Array.from(
       doc.querySelectorAll<HTMLElement>(".llm-plan-container"),
     )) {
@@ -5799,13 +5903,7 @@ export function renderAgentTrace({
           });
       }
     }
-    if (
-      !planContainer.parentElement ||
-      (planProjection.ledger &&
-        !isFloatingPlanExecutionStatus(planProjection.ledger.status) &&
-        planContainer.parentElement !== wrap)
-    )
-      wrap.appendChild(planContainer);
+    if (!planContainer.parentElement) wrap.appendChild(planContainer);
   }
 
   const planDocumentId =
@@ -5819,25 +5917,52 @@ export function renderAgentTrace({
     // byte-identical durable history and future-model context, but rendering it
     // again below the card would create two apparent answers.
     onInterleavedText?.();
-    const caption = doc.createElement("p");
-    caption.className = "llm-plan-document-completion-caption";
-    caption.textContent = "Document completed and verified.";
-    caption.hidden = true;
-    const card = renderPlanDocumentCard({
-      doc,
-      documentId: planDocumentId,
-      citationContext: panelItem
-        ? {
-            panelItem,
-            assistantMessage: message,
-            pairedUserMessage: userMessage,
-          }
-        : undefined,
-      onReady: () => {
-        caption.hidden = false;
-      },
-    });
-    wrap.append(card, caption);
+    const existing = view.document;
+    if (
+      !existing ||
+      existing.id !== planDocumentId ||
+      existing.formattingVersion !== (view.formattingVersion || 0) ||
+      existing.panelItem !== panelItem ||
+      existing.user !== userMessage ||
+      existing.message !== message
+    ) {
+      if (existing) {
+        disposePlanCard(existing.node);
+        existing.caption.remove();
+      }
+      const caption = doc.createElement("p");
+      caption.className = "llm-plan-document-completion-caption";
+      caption.textContent = "Document completed and verified.";
+      caption.hidden = true;
+      const card = renderPlanDocumentCard({
+        doc,
+        documentId: planDocumentId,
+        citationContext: panelItem
+          ? {
+              panelItem,
+              assistantMessage: message,
+              pairedUserMessage: userMessage,
+            }
+          : undefined,
+        onReady: () => {
+          caption.hidden = false;
+        },
+      });
+      view.document = {
+        id: planDocumentId,
+        formattingVersion: view.formattingVersion || 0,
+        panelItem,
+        user: userMessage,
+        message,
+        node: card,
+        caption,
+      };
+      wrap.append(card, caption);
+    }
+  } else if (view.document) {
+    disposePlanCard(view.document.node);
+    view.document.caption.remove();
+    view.document = undefined;
   }
 
   // The rule separates the activity trace from the answer, so visible answer

@@ -1,3 +1,4 @@
+import { getPendingRequestId, recordLivePlanExecution } from "../state";
 /**
  * Agent mode execution engine.
  *
@@ -282,7 +283,19 @@ export function createAgentTurnEventHandler(
     scheduleQueueDrain,
     uiRelease,
   } = ctx;
+  const executionRequestId = getPendingRequestId(conversationKey);
   return async (event: AgentEvent): Promise<void> => {
+    if (
+      event.type === "plan_execution_updated" &&
+      assistantMessage.agentRunId
+    ) {
+      recordLivePlanExecution(
+        conversationKey,
+        executionRequestId,
+        assistantMessage.agentRunId,
+        event.ledger,
+      );
+    }
     if (assistantMessage.agentRunId) {
       pushTraceEvent(assistantMessage.agentRunId, event);
     }

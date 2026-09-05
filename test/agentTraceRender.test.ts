@@ -1,3 +1,8 @@
+import {
+  renderPlanProgress,
+  disposePlanProgress,
+  isFloatingPlanExecutionStatus,
+} from "../src/modules/contextPanel/agentTrace/planProgressView";
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
 import {
@@ -6,7 +11,6 @@ import {
   buildAgentTraceMarkdownForRender,
   formatAgentActivityDuration,
   getPendingActionButtonLayout,
-  isFloatingPlanExecutionStatus,
   renderAgentTrace,
   renderAgentTraceDetailsBodyForTests,
   renderPendingActionCard,
@@ -205,6 +209,13 @@ class FakeElement {
     if (selector.startsWith(".")) return this.findByClass(selector.slice(1));
     if (selector === "summary") return this.findAllByTag("summary")[0] || null;
     return null;
+  }
+
+  removeEventListener(type: string, listener: (event: any) => void): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) || []).filter((fn) => fn !== listener),
+    );
   }
 
   addEventListener(type: string, listener: (event: any) => void): void {
@@ -1135,10 +1146,10 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("floats only active or recoverable Plan execution states", function () {
+  it("floats only starting or running Plan execution states", function () {
     assert.isTrue(isFloatingPlanExecutionStatus("running"));
-    assert.isTrue(isFloatingPlanExecutionStatus("interrupted"));
-    assert.isTrue(isFloatingPlanExecutionStatus("waiting_for_user"));
+    assert.isFalse(isFloatingPlanExecutionStatus("interrupted"));
+    assert.isFalse(isFloatingPlanExecutionStatus("waiting_for_user"));
     assert.isFalse(isFloatingPlanExecutionStatus("completed"));
     assert.isFalse(isFloatingPlanExecutionStatus("failed"));
   });
@@ -1614,16 +1625,18 @@ describe("agentTrace render", function () {
 
     const trace = renderAgentTrace({
       doc: fakeDocument,
-      message: {
-        role: "assistant",
-        text: "Evidence is being synthesized.",
-        timestamp: 2,
-        runMode: "agent",
-        streaming: true,
-      },
+      message: { role: "assistant", text: "", timestamp: 2, streaming: true },
       events,
     }) as unknown as FakeElement;
-    const root = trace.findByClass("llm-plan-container-execution");
+    assert.isNull(
+      trace.findByClass("llm-plan-container-execution"),
+      "even stale streaming history cannot mount progress",
+    );
+    const root = renderPlanProgress(
+      fakeDocument,
+      (events[0].payload as any).ledger,
+      events,
+    ) as unknown as FakeElement;
     const trigger = root?.findByClass("llm-plan-progress-trigger");
     const popover = root?.findByClass("llm-plan-progress-popover");
 
@@ -1696,17 +1709,8 @@ describe("agentTrace render", function () {
       updatedAt: number,
       previous?: FakeElement,
     ) =>
-      renderAgentTrace({
-        previous: previous as unknown as HTMLElement,
-        doc: fakeDocument,
-        message: {
-          role: "assistant",
-          text: "Evidence is being synthesized.",
-          timestamp: updatedAt,
-          runMode: "agent",
-          streaming: status === "running",
-        },
-        events: [
+      (() => {
+        const events: AgentRunEventRecord[] = [
           {
             runId: "run-stable-progress",
             seq: updatedAt,
@@ -1762,8 +1766,25 @@ describe("agentTrace render", function () {
             },
             createdAt: updatedAt,
           },
-        ],
-      }) as unknown as FakeElement;
+        ];
+        const trace = renderAgentTrace({
+          doc: fakeDocument,
+          message: {
+            role: "assistant",
+            text: "",
+            timestamp: updatedAt,
+            streaming: status === "running",
+          },
+          events,
+        }) as unknown as FakeElement;
+        assert.isNull(trace.findByClass("llm-plan-container-execution"));
+        return renderPlanProgress(
+          fakeDocument,
+          (events[0].payload as any).ledger,
+          events,
+          previous as unknown as HTMLElement,
+        ) as unknown as FakeElement;
+      })();
 
     const first = renderProgress("running", 2);
     const firstRoot = first.findByClass("llm-plan-container-execution");
@@ -1781,11 +1802,97 @@ describe("agentTrace render", function () {
     assert.equal(updatedTrigger?.attributes["aria-expanded"], "true");
     assert.include(updatedTrigger?.attributes["aria-label"] || "", "Hide");
 
-    renderProgress("completed", 4, updated);
+    disposePlanProgress(updated as unknown as HTMLElement);
+    assert.isNull(updated.parentElement);
     const restarted = renderProgress("running", 5);
     const restartedRoot = restarted.findByClass("llm-plan-container-execution");
     assert.isFalse(restartedRoot?.classList.contains("llm-plan-progress-open"));
   });
+
+  it("disposes progress observers and listeners when its live owner unmounts", function () {
+    let observers = 0;
+    const listeners = new Set<EventListener>();
+    const doc = {
+      ...fakeDocument,
+      defaultView: {
+        ResizeObserver: class {
+          observe() {
+            observers++;
+          }
+          disconnect() {
+            observers--;
+          }
+        },
+        addEventListener(_type: string, listener: EventListener) {
+          listeners.add(listener);
+        },
+        removeEventListener(_type: string, listener: EventListener) {
+          listeners.delete(listener);
+        },
+      },
+    } as unknown as Document;
+    const root = renderPlanProgress(
+      doc,
+      {
+        executionId: "dispose",
+        planId: "dispose",
+        revision: 1,
+        status: "running",
+        createdAt: 1,
+        updatedAt: 1,
+        tasks: [],
+      } as any,
+      [],
+    ) as unknown as FakeElement;
+    const trigger = root.findByClass("llm-plan-progress-trigger")!;
+    assert.equal(observers, 1);
+    assert.equal(listeners.size, 1);
+    disposePlanProgress(root as unknown as HTMLElement);
+    trigger.dispatchFakeEvent("click");
+    assert.equal(observers, 0);
+    assert.equal(listeners.size, 0);
+    assert.equal(trigger.attributes["aria-expanded"], "false");
+  });
+
+  for (const status of [
+    "pending",
+    "running",
+    "waiting_for_user",
+    "blocked",
+    "interrupted",
+    "completed",
+    "completed_with_exceptions",
+    "failed",
+    "cancelled",
+    "superseded",
+  ]) {
+    it(`never projects ${status} historical ledgers as task progress`, function () {
+      const trace = renderAgentTrace({
+        doc: fakeDocument,
+        message: {
+          role: "assistant",
+          text: "",
+          timestamp: 2,
+          streaming: true,
+          runMode: "agent",
+        },
+        events: [
+          {
+            runId: "historical",
+            seq: 1,
+            eventType: "plan_execution_updated",
+            createdAt: 1,
+            payload: {
+              type: "plan_execution_updated",
+              ledger: { executionId: "historical", status, tasks: [] } as any,
+            },
+          },
+        ],
+      }) as unknown as FakeElement;
+      assert.isNull(trace.findByClass("llm-plan-container-execution"));
+      assert.isNull(trace.findByClass("llm-plan-progress-trigger"));
+    });
+  }
 
   it("keeps plan review actions centered in one row at narrow widths", function () {
     const source = readFileSync(

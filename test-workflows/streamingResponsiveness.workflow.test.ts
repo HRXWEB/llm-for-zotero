@@ -52,7 +52,7 @@ describe("workflow: streaming responsiveness", function () {
         );
         assert.isTrue(
           result.singleExecutionProgress,
-          "resumed turns share one panel-owned progress view",
+          "historical resumed turns cannot recreate task progress",
         );
       } finally {
         await api.reset();

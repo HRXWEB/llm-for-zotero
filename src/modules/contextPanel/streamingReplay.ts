@@ -1,4 +1,3 @@
-import { loadPlanExecutionLedger } from "../../agent/plans/store";
 /** Deterministic native workflow fixture; never invoked by production UI. */
 import { createAgentTurnEventHandler } from "./agentMode/agentEngine";
 import {
@@ -6,7 +5,13 @@ import {
   getConversationKey,
   refreshConversationPanels,
 } from "./chat";
-import { chatHistory } from "./state";
+import {
+  chatHistory,
+  tryBeginRequest,
+  nextRequestId,
+  recordLivePlanExecution,
+  finishRequest,
+} from "./state";
 import { agentRunTraceCache } from "./agentState";
 import { getConversationWriteGeneration } from "../../shared/conversationWriteFence";
 import { createBlockStreamCoalescer } from "./blockStreamCoalescer";
@@ -35,6 +40,11 @@ export type StreamingReplayResult = {
   composerPreserved: boolean;
   resumeVisibilityCorrect: boolean;
   singleExecutionProgress: boolean;
+  completedProgressNodes: number;
+  reopenedProgressNodes: number;
+  pausedProgressNodes: number[];
+  resumeStartsProgress: boolean;
+  inactiveProgressReads: number;
 };
 
 export async function exerciseStreamingReplay(
@@ -154,6 +164,10 @@ export async function exerciseStreamingReplay(
   push(runId, { type: "reasoning", round: 1, summary: initial });
   message.reasoningSummary = initial;
   agentRunTraceCache.set(runId, records);
+  const requestId = nextRequestId();
+  if (!tryBeginRequest(key, requestId, null))
+    throw new Error("Fixture request is already busy");
+  recordLivePlanExecution(key, requestId, runId, ledger);
   refreshConversationPanels(body, item);
   await Zotero.Promise.delay(100);
   const findWrapper = () =>
@@ -169,7 +183,6 @@ export async function exerciseStreamingReplay(
     new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }),
   );
   await Zotero.Promise.delay(100);
-  await loadPlanExecutionLedger(runId);
   const progress = findProgress();
   const trigger = progress.querySelector<HTMLButtonElement>(
     ".llm-plan-progress-trigger",
@@ -202,9 +215,12 @@ export async function exerciseStreamingReplay(
     typingFrameMs: [],
     composerPreserved: false,
     singleExecutionProgress: false,
-    resumeVisibilityCorrect:
-      win.getComputedStyle(progress.querySelector(".llm-plan-actions")!)
-        ?.display === "none",
+    completedProgressNodes: -1,
+    reopenedProgressNodes: -1,
+    pausedProgressNodes: [],
+    resumeStartsProgress: true,
+    inactiveProgressReads: 0,
+    resumeVisibilityCorrect: !box.querySelector(".llm-plan-recovery-card"),
   };
   const observer = new win.MutationObserver((mutations) => {
     result.progressMutations += mutations.length;
@@ -373,13 +389,32 @@ export async function exerciseStreamingReplay(
     result.statusVisible = Boolean(
       ui.status?.textContent?.includes("Streaming replay status"),
     );
+    let nextUpdate = 3;
+    for (const status of [
+      "waiting_for_user",
+      "blocked",
+      "interrupted",
+    ] as const) {
+      await handle({
+        type: "plan_execution_updated",
+        ledger: { ...changed, status, updatedAt: nextUpdate++ },
+      });
+      result.pausedProgressNodes.push(
+        box.querySelectorAll(".llm-plan-container-execution").length,
+      );
+      await handle({
+        type: "plan_execution_updated",
+        ledger: { ...changed, status: "running", updatedAt: nextUpdate++ },
+      });
+      result.resumeStartsProgress &&= Boolean(findProgress());
+    }
     await handle({
       type: "plan_execution_updated",
-      ledger: { ...changed, status: "interrupted", updatedAt: 3 },
+      ledger: { ...changed, status: "interrupted", updatedAt: nextUpdate++ },
     });
     result.resumeVisibilityCorrect &&=
-      win.getComputedStyle(progress.querySelector(".llm-plan-actions")!)
-        ?.display !== "none";
+      !findProgress() &&
+      Boolean(box.querySelector(".llm-plan-recovery-card button"));
     await handle({
       type: "final",
       text: "Final replay answer with **evidence**.",
@@ -387,8 +422,8 @@ export async function exerciseStreamingReplay(
     result.finalAnswerVisible = Boolean(
       box.textContent?.includes("Final replay answer with evidence."),
     );
-    // Resuming creates another turn for the same execution. History refreshes
-    // must retain only its newest progress owner inside each mounted panel.
+    // Older and resumed turns can share an execution ID. Restoring these
+    // interrupted history entries must not recreate live progress.
     const resumedRunId = `${runId}-resumed`;
     agentRunTraceCache.set(resumedRunId, [
       {
@@ -412,15 +447,42 @@ export async function exerciseStreamingReplay(
     );
     refreshConversationPanels(body, item);
     result.singleExecutionProgress =
-      box.querySelectorAll(`[data-llm-plan-execution-id="${runId}"]`).length ===
-      1;
+      box.querySelectorAll(".llm-plan-container-execution").length === 0;
     agentRunTraceCache.delete(resumedRunId);
+    history.splice(-2);
+    await handle({
+      type: "plan_execution_updated",
+      ledger: { ...changed, status: "completed", updatedAt: nextUpdate++ },
+    });
+    result.completedProgressNodes = box.querySelectorAll(
+      ".llm-plan-container-execution",
+    ).length;
+    finishRequest(key, requestId);
+    // A stale restored streaming flag and running snapshot are never live authority.
+    message.streaming = true;
+    agentRunTraceCache.set(runId, [
+      { ...records[0], payload: { type: "plan_execution_updated", ledger } },
+    ]);
+    Zotero.DB.queryAsync = async function (sql: string, ...args: unknown[]) {
+      if (
+        /SELECT.*|FROM/s.test(sql) &&
+        sql.includes("llm_for_zotero_plan_executions")
+      )
+        result.inactiveProgressReads++;
+      return (query as Function).call(Zotero.DB, sql, ...args);
+    } as typeof query;
+    refreshConversationPanels(body, item);
+    await Zotero.Promise.delay(100);
+    result.reopenedProgressNodes = box.querySelectorAll(
+      ".llm-plan-container-execution",
+    ).length;
     return result;
   } finally {
     observer.disconnect();
     Zotero.DB.queryAsync = query;
     for (const restore of restoreGeometry) restore();
     coalescer.cancel();
+    finishRequest(key, requestId);
     message.streaming = false;
     agentRunTraceCache.delete(runId);
     body.style.left = "-10000px";

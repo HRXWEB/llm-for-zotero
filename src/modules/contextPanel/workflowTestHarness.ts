@@ -1,3 +1,4 @@
+import { exercisePlanHistoryReplay } from "./planHistoryReplay";
 import { exerciseStreamingReplay } from "./streamingReplay";
 import { buildUI } from "./buildUI";
 import { getAgentRuntime } from "../../agent";
@@ -4706,6 +4707,8 @@ export function installWorkflowTestHarness(targetAddon: {
     createStandaloneNoteFixture,
     renderPanelForItem,
     exerciseBackgroundAgentPublication,
+    exercisePlanHistoryReplay: (input) =>
+      exercisePlanHistoryReplay(getPanel(input.panelId), input),
     exerciseStreamingReplay: (input) =>
       exerciseStreamingReplay(getPanel(input.panelId), input),
     renderStartupPanelForItem,
