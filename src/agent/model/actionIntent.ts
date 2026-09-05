@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import { operationCatalogEntry } from "../contracts/operationCatalog";
 import type { WriteNoteDestination } from "../writeNoteDestination";
+import { withoutQualifiedActionProhibitions } from "../authorization/policy";
 
 function operationDetails(operation: string): {
   operation: AgentActionOperation;
@@ -145,6 +146,8 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
       ? operationDetails(record.operation)
       : null;
   if (!details) return null;
+  const targetSelectors = parseTargetSelectors(record.targetSelectors);
+  if (record.targetSelectors !== undefined && !targetSelectors) return null;
   if (
     record.coverage !== "one" &&
     record.coverage !== "some" &&
@@ -187,6 +190,7 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
     targetKind: record.targetKind === "items" ? "items" : "papers",
     scopeRole: record.scopeRole === "destination" ? "destination" : "source",
     parameters: parseParameters(record.parameters),
+    ...(targetSelectors ? { targetSelectors } : {}),
     ...(scope ? { scope } : {}),
     ...(tagPrefix || readMode || collectionMode
       ? {
@@ -198,6 +202,62 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
         }
       : {}),
   };
+}
+
+function parseTargetSelectors(
+  value: unknown,
+): AgentActionIntent["targetSelectors"] | undefined {
+  if (!Array.isArray(value) || !value.length) return undefined;
+  const selectors: NonNullable<AgentActionIntent["targetSelectors"]> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return undefined;
+    if (
+      entry.kind === "item_id" &&
+      Number.isInteger(entry.value) &&
+      entry.value > 0
+    ) {
+      selectors.push({ kind: "item_id", value: entry.value });
+    } else if (
+      (entry.kind === "title" || entry.kind === "item_key") &&
+      typeof entry.value === "string" &&
+      entry.value.trim() &&
+      (entry.kind !== "item_key" || /^[A-Z0-9]{8}$/i.test(entry.value))
+    ) {
+      selectors.push({ kind: entry.kind, value: entry.value.trim() });
+    } else return undefined;
+  }
+  return selectors;
+}
+
+/** Only literal identity lists are recognized here; semantic selection belongs to the classifier. */
+function literalTargetSelectors(
+  text: string,
+): AgentActionIntent["targetSelectors"] {
+  const separator = String.raw`(?:\s*,\s*(?:and\s+)?|\s+and\s+)`;
+  const keys = text.match(
+    new RegExp(
+      String.raw`\bitem\s+keys?\s+([A-Z0-9]{8}(?:${separator}[A-Z0-9]{8})*)\b`,
+      "i",
+    ),
+  )?.[1];
+  if (keys)
+    return [...keys.matchAll(/\b[A-Z0-9]{8}\b/gi)].map((match) => ({
+      kind: "item_key",
+      value: match[0].toUpperCase(),
+    }));
+  const quoted = String.raw`["“']([^"”']+)["”']`;
+  const titles = text.match(
+    new RegExp(
+      String.raw`\b(?:papers?|items?)\s+(?:titled|named)\s+(${quoted}(?:${separator}${quoted})*)`,
+      "i",
+    ),
+  )?.[1];
+  if (titles)
+    return [...titles.matchAll(/["“']([^"”']+)["”']/g)].map((match) => ({
+      kind: "title",
+      value: match[1],
+    }));
+  return undefined;
 }
 
 export function parseActionIntents(value: unknown): AgentActionIntent[] {
@@ -217,6 +277,7 @@ function actionIntentKey(intent: AgentActionIntent): string {
     intent.scope?.includeDescendants ? "descendants" : "direct",
     intent.scopeRole || "source",
     JSON.stringify(intent.parameters || {}),
+    JSON.stringify(intent.targetSelectors || []),
   ].join("|");
 }
 
@@ -325,8 +386,17 @@ function requestedFilePath(text: string): string | undefined {
 }
 
 function mutationRequestIsExplicit(text: string): boolean {
+  text = withoutQualifiedActionProhibitions(text);
   if (
-    /\b(?:do not|don't|dont|never|without (?:changing|modifying|writing)|only a question|hypothetical|for advice)\b|(?:不要|不准|不可|不能|禁止|请勿|請勿|切勿)|(?:しないで|しない|するな|禁止)|^\s*(?:no|nunca|sin)\b/i.test(
+    /^\s*in\s+(?:the\s+)?note\s+\d+\s*,\s*(?:replace|edit|update|append)\b/i.test(
+      text,
+    )
+  )
+    return true;
+  if (/^\s*read\s+(?:the\s+)?saved\s+note\s+\d+\s+and\s+export\b/i.test(text))
+    return true;
+  if (
+    /\b(?:only a question|hypothetical|for advice)\b|^\s*(?:no|nunca|sin)\b/i.test(
       text,
     )
   ) {
@@ -351,10 +421,13 @@ function mutationRequestIsExplicit(text: string): boolean {
 export function inferActionIntentsFromRequest(
   request: Pick<AgentRuntimeRequest, "userText" | "turnPaperScope">,
 ): AgentActionIntent[] {
-  const text = (request.userText || "").trim();
+  const text = affirmativeActionText(
+    withoutQualifiedActionProhibitions(request.userText || ""),
+  ).trim();
   if (!text) return [];
   const coverage = requestedCoverage(text);
   const scope = requestedCollectionScope(request);
+  const targetSelectors = literalTargetSelectors(text);
   const intents: AgentActionIntent[] = [];
   const add = (
     operation: AgentActionOperation,
@@ -370,25 +443,44 @@ export function inferActionIntentsFromRequest(
     if (!details) return;
     intents.push({
       ...details,
-      coverage,
+      coverage: targetSelectors
+        ? targetSelectors.length === 1
+          ? "one"
+          : "some"
+        : coverage,
       targetKind: options.targetKind || "papers",
       scopeRole: options.scopeRole || "source",
       scope: Object.prototype.hasOwnProperty.call(options, "scope")
         ? options.scope
         : scope,
       parameters,
+      ...(targetSelectors ? { targetSelectors } : {}),
       constraints: options.constraints,
     });
   };
 
   if (mutationRequestIsExplicit(text)) {
-    const tagSegment = text.split(
-      /\b(?:to|in|for)\s+(?:the\s+)?(?:collection|folder)\b/i,
-    )[0];
+    // Recovery describes a past write; that description is not permission to
+    // repeat it after undo. Keep this high-confidence fallback recovery-only.
+    const recovery = text.match(/^(?:please\s+)?(undo|revert)\b/i)?.[1];
+    if (recovery) {
+      add(recovery.toLowerCase() as "undo" | "revert", undefined, {
+        targetKind: "items",
+        scope: undefined,
+      });
+      return intents;
+    }
+    // Values belong to the tag phrase, not every quoted noun in the request.
+    const tagSegment =
+      text.match(
+        /\btags?\s+((?:["“'][^"”']+["”'](?:\s*,?\s*(?:and\s+)?)?)+)/i,
+      )?.[1] || "";
     const tags = [...tagSegment.matchAll(/["“']([^"”']+)["”']/g)]
       .map((match) => match[1].trim())
       .filter(Boolean);
-    if (
+    if (/\b(?:replace|set)\b[^.!?\n]{0,60}\btags?\b/i.test(text)) {
+      add("set_item_tags", tags.length ? { tags } : undefined);
+    } else if (
       /\b(?:add|apply|assign|tag)\b[\s\S]{0,60}\btags?\b|^\s*(?:please\s+)?tag\b|(?:添加|新增|应用|應用|加上|加)[^。！？\n]{0,40}(?:标签|標籤)|(?:タグ)[^。！？\n]{0,30}(?:追加|付け)|(?:agrega|a[nñ]ade|aplica|asigna)[^.!?\n]{0,40}\betiquetas?\b/i.test(
         text,
       )
@@ -396,8 +488,6 @@ export function inferActionIntentsFromRequest(
       add("apply_tags", tags.length ? { tags } : undefined);
     } else if (/\bremove\b[\s\S]{0,60}\btags?\b/i.test(text)) {
       add("remove_tags", tags.length ? { tags } : undefined);
-    } else if (/\b(?:replace|set)\b[\s\S]{0,60}\btags?\b/i.test(text)) {
-      add("set_item_tags", tags.length ? { tags } : undefined);
     }
 
     if (
@@ -459,13 +549,36 @@ export function inferActionIntentsFromRequest(
         text,
       )
     ) {
-      add("note_create", { noteMode: "create" }, { targetKind: "items" });
+      add(
+        "note_create",
+        { noteMode: "create" },
+        {
+          targetKind: "items",
+          scopeRole: /\bstandalone\b/i.test(text) ? "destination" : "source",
+        },
+      );
+      // "all six sections" describes content, not six requested notes.
+      if (
+        /\b(?:one|single)\s+(?:standalone|child|item|zotero|new|summary|note|version)\b/i.test(
+          text,
+        )
+      )
+        intents[intents.length - 1].coverage = "one";
     } else if (/\bappend\b[\s\S]{0,50}\bnotes?\b/i.test(text)) {
       add("note_append", { noteMode: "append" }, { targetKind: "items" });
     } else if (
-      /\b(?:edit|update|replace)\b[\s\S]{0,50}\bnotes?\b/i.test(text)
+      /\b(?:edit|update|replace)\b[\s\S]{0,50}\bnotes?\b|^\s*in\s+(?:the\s+)?note\s+\d+\s*,\s*(?:replace|edit|update)\b/i.test(
+        text,
+      )
     ) {
-      add("note_edit", { noteMode: "edit" }, { targetKind: "items" });
+      const targetNoteId =
+        Number(text.match(/\bnote\s+(\d+)\b/i)?.[1]) || undefined;
+      add(
+        "note_edit",
+        { noteMode: "edit", ...(targetNoteId ? { targetNoteId } : {}) },
+        { targetKind: "items", scope: undefined },
+      );
+      if (targetNoteId) intents[intents.length - 1].coverage = "one";
     }
     if (/\bimport\b[\s\S]{0,50}\b(?:files?|pdfs?)\b/i.test(text)) {
       add("import_local_files", undefined, {
@@ -482,7 +595,11 @@ export function inferActionIntentsFromRequest(
         scopeRole: "destination",
       });
     }
-    if (/\btrash\b[\s\S]{0,40}\b(?:papers?|items?|entries)\b/i.test(text)) {
+    if (
+      /^(?:please\s+)?(?:move\s+to\s+trash|trash)\b[\s\S]{0,80}\b(?:papers?|items?|entries)\b/i.test(
+        text,
+      )
+    ) {
       add("trash_items", undefined, { targetKind: "items" });
     } else if (
       /\b(?:restore|undelete)\b[\s\S]{0,40}\b(?:papers?|items?|entries)\b/i.test(
@@ -507,10 +624,6 @@ export function inferActionIntentsFromRequest(
     if (/\bannotate\b[\s\S]{0,50}\b(?:pdf|paper|document)\b/i.test(text)) {
       add("annotation_write", undefined, { targetKind: "items" });
     }
-    if (/^\s*(?:please\s+)?undo\b/i.test(text))
-      add("undo", undefined, { targetKind: "items", scope: undefined });
-    if (/^\s*(?:please\s+)?revert\b/i.test(text))
-      add("revert", undefined, { targetKind: "items", scope: undefined });
     if (
       /\b(?:write|save|export)\b[\s\S]{0,80}\b(?:file|markdown|csv|json|vault)\b|(?:写入|寫入|保存|儲存|导出|匯出)[^。！？\n]{0,60}(?:文件|檔案|markdown|csv|json)|(?:ファイル|markdown|csv|json)[^。！？\n]{0,40}(?:書き込|保存|エクスポート)|(?:escribe|guarda|exporta)[^.!?\n]{0,60}\b(?:archivo|markdown|csv|json)\b/i.test(
         text,
@@ -551,4 +664,27 @@ export function inferActionIntentsFromRequest(
     add("read_full", undefined, { constraints: { readMode: "full" } });
   }
   return mergeActionIntents([], intents);
+}
+
+/** Prohibitions constrain a write; their verbs must never create obligations.
+ * Preserve literal quoted payloads and leave constraint enforcement to policy.
+ */
+function affirmativeActionText(text: string): string {
+  const masked = text.replace(
+    /"[^"\n]*"|“[^”\n]*”|`[^`]*`|(?<![\p{L}\p{N}])'[^'\n]*'/gu,
+    (value) => " ".repeat(value.length),
+  );
+  const ranges = [
+    ...masked.matchAll(
+      /\b(?:do\s+not|don't|dont|never|must\s+not)\b[^.!?;\n]*?(?=[.!?;\n]|\bbut\b|$)/gi,
+    ),
+  ];
+  for (const range of ranges.reverse()) {
+    const start = range.index!;
+    text =
+      text.slice(0, start) +
+      " ".repeat(range[0].length) +
+      text.slice(start + range[0].length);
+  }
+  return text;
 }

@@ -3,7 +3,7 @@ import { BALANCED_EVIDENCE_GUIDANCE } from "./quoteGuidance";
 /** Provider-neutral identity and answer-quality rules shared by every route. */
 export const CORE_RESEARCH_CONTRACT = [
   "## Research behavior",
-  "You are a Zotero research assistant. Be concise but thorough by default. Ground claims in context or tools, separate evidence from synthesis, state limits, use the user's language, and never invent facts, sources, IDs, or actions.",
+  "Be concise but thorough, evidence-grounded, and use the user's language. Never invent facts, sources, IDs or actions. Distinguish reported values from your own calculations; verify units and percentage conversions. Check interpretive labels: do not assume a chance baseline, class counts, ceilings or causality from accuracy alone. Missing information stays unknown; labeling a guess does not supply evidence. Label inferences and correct unsupported earlier claims.",
 ].join("\n");
 
 /**

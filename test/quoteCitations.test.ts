@@ -26,8 +26,56 @@ import { stripLeadingCitationSeparators } from "../src/modules/contextPanel/cita
 import { buildQuoteTextIndex } from "../src/modules/contextPanel/quoteTextNormalization";
 import type { QuoteTextAnchorMatch } from "../src/modules/contextPanel/quoteTextSearch";
 import { renderMarkdown } from "../src/utils/markdown";
+import { buildQuoteRenderPlan } from "../src/modules/contextPanel/quoteRenderPlan";
 
 describe("quoteCitations", function () {
+  it("hydrates a manual subspan and its adjacent source anchor as one quote", async function () {
+    const visible =
+      "Hypothesis: stable readout can coexist with representational drift.";
+    const sourceText = `SYNTHETIC TEST PAPER. ${visible} We call this the amber-readout hypothesis.`;
+    const citation = buildQuoteCitation({
+      id: "Q_original",
+      quoteText: `SYNTHETIC TEST PAPER. ${visible}`,
+      citationLabel: "(Fixture, 2024)",
+      contextItemId: 3921,
+      itemId: 3920,
+      sourceMatchKind: "exact",
+      sourceMatchSource: "context-text",
+    })!;
+    const input = {
+      markdown: `## Hypothesis\n\n> ${visible}\n[[quote:${citation.id}]]\n\nThe paper names this amber-readout.`,
+      quoteCitations: [citation],
+      sourceIndex: buildQuoteSourceIndex({
+        quoteCitations: [citation],
+        sourceTexts: [
+          {
+            sourceText,
+            sourceLabel: "(Fixture, 2024)",
+            contextItemId: 3921,
+            itemId: 3920,
+            sourceMatchSource: "context-text",
+          },
+        ],
+      }),
+      quoteSourceReview: { sourceEvidenceComplete: true },
+    };
+    for (const finalized of [
+      finalizeAssistantQuoteCitations(input),
+      await finalizeAssistantQuoteCitationsCooperatively(input, {
+        yieldToMain: async () => {},
+      }),
+    ]) {
+      assert.isNotNull(finalized);
+      if (!finalized) throw new Error("Unexpected cancelled quote validation");
+      const plan = buildQuoteRenderPlan({
+        markdown: finalized.markdown,
+        quoteCitations: finalized.quoteCitations,
+      });
+      assert.lengthOf(plan.occurrences, 1);
+      assert.notInclude(finalized.markdown, "SYNTHETIC TEST PAPER.");
+    }
+  });
+
   function countOccurrences(value: string, needle: string): number {
     if (!needle) return 0;
     return value.split(needle).length - 1;

@@ -225,7 +225,11 @@ export function normalizeExplicitTargetSyntax(params: {
       if (hasUnsupportedFields(entry, PAPER_TARGET_FIELDS)) {
         return invalidTargetSyntax(
           "unsupported_target_selector",
-          `targets[${index}] contains an unsupported paper selector.`,
+          `targets[${index}] has unsupported fields: ${Object.keys(entry)
+            .filter((field) => !PAPER_TARGET_FIELDS.has(field))
+            .join(
+              ", ",
+            )}. Use only paperContext, itemId, contextItemId; omit descriptive metadata.`,
         );
       }
       const selector = toPaperTargetSelector(entry);

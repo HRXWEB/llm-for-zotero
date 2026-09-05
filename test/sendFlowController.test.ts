@@ -21,6 +21,8 @@ import { FULL_PDF_UNSUPPORTED_MESSAGE } from "../src/modules/contextPanel/pdfSup
 import { setUserSkills, type AgentSkill } from "../src/agent/skills";
 import type { LocalDocumentResource } from "../src/shared/types";
 import { resolvePromptText as resolveProductionPromptText } from "../src/modules/contextPanel/textUtils";
+import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
+import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
 
 describe("sendFlowController", function () {
   const item = { id: 101 } as unknown as Zotero.Item;
@@ -257,6 +259,68 @@ describe("sendFlowController", function () {
     }
   });
 
+  for (const newConversation of [false, true]) {
+    it(`binds a metadata-only paper through the runtime send boundary (${newConversation ? "new conversation" : "initial conversation"})`, async function () {
+      const previousZotero = globalThis.Zotero;
+      const paper = {
+        id: 3919,
+        libraryID: 1,
+        isRegularItem: () => true,
+        isAttachment: () => false,
+        isNote: () => false,
+        getAttachments: () => [],
+        getField: (field: string) =>
+          field === "title" ? "Metadata-only population code" : "",
+      } as unknown as Zotero.Item;
+      globalThis.Zotero = {
+        Items: { get: (id: number) => (id === paper.id ? paper : null) },
+        Prefs: { get: () => undefined },
+      } as unknown as typeof Zotero;
+      try {
+        const conversationItem = newConversation
+          ? createPaperPortalItem(paper, 1500000126, 1)
+          : paper;
+        const request = await buildAgentRuntimeRequestForTests({
+          conversationKey: conversationItem.id,
+          item: conversationItem,
+          userText: "Set only this paper's journal to Behavior Journal.",
+          selectedTexts: [],
+          paperContexts: [],
+          fullTextPaperContexts: [],
+          effectiveRequestConfig: {
+            model: "deepseek-v4-flash",
+            apiBase: "https://api.deepseek.com",
+            apiKey: "test",
+          },
+          history: [],
+        });
+        assert.equal(request.activeItemId, paper.id);
+        assert.equal(request.conversationKey, conversationItem.id);
+        assert.deepInclude(request.activePaperContext, {
+          libraryID: 1,
+          itemId: paper.id,
+          contextItemId: paper.id,
+        });
+        assert.isEmpty(
+          request.fullTextPaperContexts || [],
+          "metadata identity does not invent body text",
+        );
+        const scope = buildTurnPaperScope(request);
+        assert.isTrue(scope.ok);
+        if (scope.ok) {
+          assert.deepEqual(scope.scope.papers[0].roles, ["active"]);
+          assert.deepInclude(scope.scope.papers[0].paper, {
+            libraryID: 1,
+            itemId: paper.id,
+            contextItemId: paper.id,
+          });
+        }
+      } finally {
+        globalThis.Zotero = previousZotero;
+      }
+    });
+  }
+
   it("repairs legacy stored rows that duplicated a raw PDF into text routes", function () {
     const pdfContext: PaperContextRef = {
       itemId: 707,
@@ -307,6 +371,8 @@ describe("sendFlowController", function () {
           isAttachment: () => false,
           isRegularItem: () => true,
           isNote: () => false,
+          getField: () => "Native provider paper",
+          getAttachments: () => [],
         } as unknown as Zotero.Item,
         userText: "Analyze the selected PDF.",
         selectedTexts: [],

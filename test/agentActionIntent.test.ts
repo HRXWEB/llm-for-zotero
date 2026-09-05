@@ -9,6 +9,8 @@ import {
 } from "../src/agent/model/skillClassifier";
 import type { AgentRuntimeRequestInput } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import { classifyWriteNoteDestination } from "../src/agent/writeNoteDestination";
+import { reconcileNoteDestinationActionIntents } from "../src/agent/model/actionIntent";
 
 function request(
   input: Partial<AgentRuntimeRequestInput>,
@@ -23,6 +25,121 @@ function request(
 }
 
 describe("Agent action intent", function () {
+  it("does not turn a prohibition on other fields into a requested metadata edit", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          "Set exactly these three tags on only the papers with item keys WTI4KW3E, MG2MBGKQ, and N2TKK3CR in My Library: coding-GOAL-20260905, drift-GOAL-20260905, memory-GOAL-20260905. Replace their previous tags with this exact set; do not change any other item or field.",
+      }),
+    );
+    assert.deepEqual(
+      intents.map((intent) => intent.operation),
+      ["set_item_tags"],
+    );
+  });
+  it("does not confuse quoted paper titles with tag values or expand each named paper to the library", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          'Apply exactly these three tags to each of the papers titled "Geometry of population coding 05a2342c", "Memory and representational drift 05a2342c", "Geometry and memory shared paper 05a2342c": coding-GOAL-20260905, drift-GOAL-20260905, memory-GOAL-20260905. Replace their old tags with this exact set. Do not tag any other paper.',
+      }),
+    );
+    assert.lengthOf(intents, 1);
+    assert.equal(intents[0].operation, "set_item_tags");
+    assert.equal(intents[0].coverage, "some");
+    assert.lengthOf(intents[0].targetSelectors!, 3);
+    assert.notInclude(
+      JSON.stringify(intents[0].parameters || {}),
+      "population coding",
+    );
+  });
+  it("binds an affirmative existing-note replacement, not the prohibited creation", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          "Replace the content of existing note 3961 with this exact HTML: <h1>HTML review probe</h1><p>A <strong>formatted</strong> result.</p>. Do not create a new note.",
+      }),
+    );
+    assert.deepEqual(
+      intents.map((intent) => intent.operation),
+      ["note_edit"],
+    );
+    assert.equal(intents[0].parameters?.targetNoteId, 3961);
+    assert.equal(intents[0].coverage, "one");
+  });
+
+  it("treats the described historical edit as the undo target, not a fresh write", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          "Undo the last note edit in this conversation. Restore note 3932 exactly from its saved pre-edit journal content.",
+      }),
+    );
+    assert.deepEqual(
+      intents.map((intent) => intent.operation),
+      ["undo"],
+    );
+  });
+
+  it("binds a target-first exact note edit instead of treating it as a read", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          'In note 3932, replace only the first occurrence of the exact text "copper-limitation" with "copper-limitation (reviewed)". Preserve every other character and section.',
+      }),
+    );
+    assert.lengthOf(intents, 1);
+    assert.equal(intents[0].operation, "note_edit");
+    assert.equal(intents[0].parameters?.targetNoteId, 3932);
+    assert.equal(intents[0].coverage, "one");
+  });
+
+  it("distinguishes a standalone note destination from a source collection", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          'Create exactly one standalone version of note 3932 and file it in the collection named "notes 05a2342c" (collection 79, library 1). Preserve its complete content and all six sections.',
+      }),
+    );
+    assert.lengthOf(intents, 1);
+    assert.equal(intents[0].operation, "note_create");
+    assert.equal(intents[0].scopeRole, "destination");
+    assert.equal(intents[0].scope?.path, "notes 05a2342c");
+    assert.equal(intents[0].coverage, "one");
+  });
+
+  it("keeps the requested trash action when permanent deletion is prohibited", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          "Move to trash (do not permanently delete) only the paper with item key JBU4RMQ9.",
+      }),
+    );
+    assert.deepEqual(
+      intents.map((intent) => intent.operation),
+      ["trash_items"],
+    );
+  });
+
+  it("keeps file export independent of a prohibition on Zotero edits", function () {
+    for (const userText of [
+      'Read saved note 3932 and export its complete content as Markdown to "/tmp/behavior-vault/conversation.md". Preserve all six sections; save the actual file.',
+      'Write a short summary of this paper including one actual cropped figure. Use the figure-analysis pipeline, save the Markdown to "/tmp/behavior-vault/figures.md" and copy the cropped figure into that vault using a relative image link. Include a caption and page provenance. Do not edit Zotero or substitute a placeholder.',
+    ]) {
+      const intents = reconcileNoteDestinationActionIntents(
+        inferActionIntentsFromRequest(request({ userText })),
+        classifyWriteNoteDestination(userText),
+      );
+      assert.deepEqual(
+        intents.map((intent) => intent.operation),
+        ["file_write"],
+      );
+      assert.match(
+        intents[0].parameters?.filePath || "",
+        /^\/tmp\/behavior-vault\//,
+      );
+    }
+  });
   it("fails closed when required intent has no valid obligations", async function () {
     const service = new ActionContractService({} as ActionContractGateway);
     let message = "";

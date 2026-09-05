@@ -10,6 +10,7 @@ import {
   type ActionCompletionFeedback,
 } from "../../actionStatusText";
 import { renderPendingActionCard } from "../../agentTrace/render";
+import { createDocumentCardLayout } from "../../documentCard";
 
 const PAGED_REVIEW_TRANSITION_ACTION_IDS = new Set([
   "next",
@@ -42,21 +43,19 @@ export function renderActionCompletionCard(
   secondsRemaining = ACTION_COMPLETION_DISMISS_MS / 1000,
 ): HTMLDivElement {
   const card = doc.createElement("div");
-  card.className = "llm-agent-hitl-card llm-agent-hitl-card-complete";
+  card.className =
+    "llm-agent-hitl-card llm-plan-container llm-agent-hitl-card-complete";
   card.dataset.status = feedback.status;
   const content = doc.createElement("div");
   content.className = "llm-agent-hitl-content llm-agent-hitl-status-content";
   card.appendChild(content);
 
-  const header = doc.createElement("div");
-  header.className = "llm-agent-hitl-header";
-  header.textContent = feedback.status === "failure" ? "Failed" : "Complete";
+  const { header } = createDocumentCardLayout(doc, {
+    title: feedback.title,
+    status: feedback.status === "failure" ? "Failed" : "Complete",
+    statusKind: feedback.status === "failure" ? "failed" : "completed",
+  });
   content.appendChild(header);
-
-  const title = doc.createElement("div");
-  title.className = "llm-agent-hitl-title";
-  title.textContent = feedback.title;
-  content.appendChild(title);
 
   if (feedback.description) {
     const description = doc.createElement("div");
@@ -143,24 +142,22 @@ export function renderActionTransitionCard(
   actionId?: string,
 ): HTMLDivElement {
   const card = doc.createElement("div");
-  card.className = "llm-agent-hitl-card llm-agent-hitl-card-transition";
+  card.className =
+    "llm-agent-hitl-card llm-plan-container llm-agent-hitl-card-transition";
   card.setAttribute("role", "status");
   card.setAttribute("aria-live", "polite");
   const content = doc.createElement("div");
   content.className = "llm-agent-hitl-content llm-agent-hitl-status-content";
   card.appendChild(content);
 
-  const header = doc.createElement("div");
-  header.className = "llm-agent-hitl-header";
-  header.textContent = "Working";
-  content.appendChild(header);
-
   const { title: titleText, description: descriptionText } =
     getActionTransitionText(actionId);
-  const title = doc.createElement("div");
-  title.className = "llm-agent-hitl-title";
-  title.textContent = titleText;
-  content.appendChild(title);
+  const { header } = createDocumentCardLayout(doc, {
+    title: titleText,
+    status: "Working",
+    statusKind: "executing",
+  });
+  content.appendChild(header);
 
   const description = doc.createElement("div");
   description.className = "llm-agent-hitl-description";
@@ -330,21 +327,18 @@ export function createActionCommandLifecycle(params: {
       if (element && element.isConnected) return;
       chatBox.querySelector(".llm-action-progress-card")?.remove();
       const wrapper = ownerDoc.createElement("div");
-      wrapper.className = "llm-action-progress-card";
-      const eyebrow = ownerDoc.createElement("div");
-      eyebrow.className = "llm-action-progress-eyebrow";
-      eyebrow.textContent = "Working";
-      const header = ownerDoc.createElement("div");
-      header.className = "llm-action-progress-header";
-      const title = ownerDoc.createElement("div");
-      title.className = "llm-action-progress-title";
-      title.textContent = `${formatActionLabel(actionName)}`;
+      wrapper.className = "llm-action-progress-card llm-plan-container";
+      const { header, actions } = createDocumentCardLayout(ownerDoc, {
+        title: formatActionLabel(actionName),
+        status: "Working",
+        statusKind: "executing",
+      });
       const typing = ownerDoc.createElement("div");
       typing.className = "llm-typing llm-action-progress-typing";
       typing.innerHTML =
         '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
-      header.append(title, typing);
-      wrapper.append(eyebrow, header);
+      actions.appendChild(typing);
+      wrapper.appendChild(header);
       stepText = ownerDoc.createElement("div");
       stepText.className = "llm-action-progress-step";
       stepText.textContent = "Starting...";

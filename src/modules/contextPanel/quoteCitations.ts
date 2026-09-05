@@ -479,7 +479,7 @@ function shouldIncludeStructuredAnchorInBlockquote(params: {
   return Boolean(parseCitationOnlyLine(stripBlockquoteMarker(nextLine)));
 }
 
-function findAdjacentStandaloneQuoteCitation(params: {
+export function findAdjacentStandaloneQuoteCitation(params: {
   markdownLines: string[];
   followingLineStartIndex: number;
 }): { quoteCitationId: string; lineIndex: number } | null {
@@ -3536,7 +3536,8 @@ function resolveAdjacentManualQuoteAnchor(params: {
   if (
     !displayedQuote ||
     !anchoredQuote ||
-    findCanonicalTextMatchStart(displayedQuote, anchoredQuote) < 0
+    (findCanonicalTextMatchStart(displayedQuote, anchoredQuote) < 0 &&
+      !bindQuoteCitationToDisplayedText(existingCitation, params.quoteText))
   ) {
     return [];
   }

@@ -312,6 +312,8 @@ async function onStartup() {
     ]),
   );
 
+  zoteroChangeDispatcher.registerNativeObserver();
+
   try {
     await measureStartupPhase("startup preference migrations", () => {
       runStartupPreferenceMigrations();
@@ -359,6 +361,16 @@ async function onStartup() {
     installWorkflowTestHarness(addon);
   }
   addon.data.initialized = true;
+
+  // Compiled out of normal builds. Only the explicit manual behavior runner
+  // supplies this request; this is not part of startup or release validation.
+  if (__env__ === "development" && __behaviorSuiteRequest__) {
+    void import("../test-behavior/run")
+      .then(({ runBehaviorSuite }) =>
+        runBehaviorSuite(__behaviorSuiteRequest__),
+      )
+      .catch((error) => Zotero.logError(error));
+  }
 
   scheduleDeferredStartupWork(conversationStoreReadiness);
 }
@@ -453,6 +465,8 @@ async function onMainWindowUnload(win: Window): Promise<void> {
 }
 
 async function onShutdown(): Promise<void> {
+  zoteroChangeDispatcher.unregisterNativeObserver();
+  await zoteroChangeDispatcher.flush();
   unregisterPaperConversationRestoreNotifications();
   await shutdownPaperRestoreSelections();
   ztoolkit.unregisterAll();

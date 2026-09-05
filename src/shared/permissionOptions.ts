@@ -28,7 +28,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Safe",
       compactLabel: "safe",
       description:
-        "Review filesystem reads outside the current context and every write, command, script, or network action.",
+        "Create requested new notes directly. Review other writes, filesystem reads outside the current context, commands, scripts, and network actions.",
       available: true,
     },
     auto: {

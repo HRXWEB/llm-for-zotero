@@ -43,7 +43,7 @@ DEFAULT_POPPLER_BIN_VALUE = os.environ.get("LLM_FOR_ZOTERO_POPPLER_BIN") or (
 DEFAULT_POPPLER_BIN = Path(DEFAULT_POPPLER_BIN_VALUE).expanduser()
 MIN_ACCEPTED_CONFIDENCE = 0.40
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
-DIRECT_EXTRACTOR_VERSION = "raw-pdf-evaluator-v4"
+DIRECT_EXTRACTOR_VERSION = "raw-pdf-evaluator-v6"
 
 CAPTION_PATTERN = re.compile(
     r"^\s*((?:Extended\s+Data\s+)?Fig(?:ure)?\.?\s*S?\d+[A-Za-z]?|"
@@ -567,7 +567,10 @@ def targets_from_manifest(case: PdfCase) -> list[Target]:
 def targets_from_mineru_semantics(case: PdfCase) -> list[Target]:
     content_path = case.mineru_dir / "content_list.json"
     if not content_path.exists():
-        return []
+        candidates = sorted(case.mineru_dir.glob("*_content_list.json"))
+        if len(candidates) != 1:
+            return []
+        content_path = candidates[0]
     try:
         content = json.loads(content_path.read_text())
     except Exception:
@@ -2269,7 +2272,7 @@ def evaluate_case(
                 "captionPageNumber": target.page_number,
                 "pageRelation": relation,
                 "captionSource": target.source,
-                "captionText": target.caption_text[:240],
+                "captionText": target.caption_text,
                 "source": candidate.source,
                 "confidence": round(candidate.confidence, 3),
                 "rect": candidate.rect.to_json(),

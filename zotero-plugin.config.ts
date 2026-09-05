@@ -45,6 +45,9 @@ export default defineConfig({
         entryPoints: ["src/index.ts"],
         define: {
           __env__: `"${process.env.NODE_ENV}"`,
+          __behaviorSuiteRequest__: JSON.stringify(
+            process.env.LLM_FOR_ZOTERO_BEHAVIOR_REQUEST || "",
+          ),
         },
         bundle: true,
         target: "firefox115",

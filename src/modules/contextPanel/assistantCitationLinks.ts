@@ -1692,6 +1692,9 @@ async function attemptCitationParagraphJump(params: {
   verifiedSourceMatchText?: string;
   verifiedFullSpan?: boolean;
 }): Promise<ExactQuoteJumpResult> {
+  // Source navigation is user-initiated. Raise an existing PDF above standalone
+  // chat/document windows too, even if its paragraph cannot be highlighted.
+  Zotero.getMainWindow()?.focus();
   const quoteTexts = Array.from(
     new Set(
       [
@@ -3361,6 +3364,7 @@ async function resolveAndNavigateAssistantCitation(params: {
       }
       const opened = await openReaderForItem(firstCandidate.contextItemId);
       if (opened) {
+        Zotero.getMainWindow()?.focus();
         if (status) {
           setStatus(
             status,

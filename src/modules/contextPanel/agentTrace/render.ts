@@ -79,13 +79,19 @@ import {
 import { copyTextToClipboard } from "../clipboard";
 import type { PlanDocument } from "../../../agent/documents/types";
 import {
-  decoratePlanDocumentCitations,
+  renderPlanDocumentContent,
   getPlanDocumentItemTitle as itemTitle,
   navigatePlanDocumentCitationSource,
   planDocumentCitationSourceHref as citationSourceHref,
   renderPlanDocumentFigures,
 } from "../planDocumentPresentation";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
+import { createDocumentCardLayout } from "../documentCard";
+import { getNoteReviewContent, renderNoteReviewCard } from "./noteReviewCard";
+import {
+  renderSavedNoteCard,
+  savedNoteIsPrimaryOutcome,
+} from "./savedNoteCard";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -151,6 +157,7 @@ type AgentTraceDisplayItem =
 
 type RenderAgentTraceParams = {
   doc: Document;
+  panelItem?: Zotero.Item;
   message: Message;
   userMessage?: Message | null;
   events: AgentRunEventRecord[];
@@ -1121,15 +1128,17 @@ function renderTagAssignmentTableField(
  */
 function renderResultCardList(
   doc: Document,
-  cards: AgentToolResultCard[],
+  cards: Exclude<AgentToolResultCard, { kind: "saved_note" }>[],
 ): HTMLDivElement {
   const container = doc.createElement("div");
   container.className =
-    "llm-agent-hitl-card llm-search-results llm-search-results-readonly";
+    "llm-agent-hitl-card llm-plan-container llm-search-results llm-search-results-readonly";
 
-  const header = doc.createElement("div");
-  header.className = "llm-agent-hitl-header";
-  header.textContent = `${cards.length} paper${cards.length === 1 ? "" : "s"} found online`;
+  const { header } = createDocumentCardLayout(doc, {
+    title: `${cards.length} paper${cards.length === 1 ? "" : "s"} found online`,
+    status: "Results",
+    statusKind: "completed",
+  });
   container.appendChild(header);
 
   const list = doc.createElement("div");
@@ -1771,7 +1780,8 @@ function renderPlanningQuestionCard(
   );
   const normalizedActions = normalizePendingActions(pending.action);
   const card = doc.createElement("div");
-  card.className = "llm-agent-hitl-card llm-planning-question-card";
+  card.className =
+    "llm-agent-hitl-card llm-plan-container llm-planning-question-card";
   card.dataset.requestId = pending.requestId;
   card.dataset.planningQuestionCard = "true";
 
@@ -1779,13 +1789,12 @@ function renderPlanningQuestionCard(
   content.className = "llm-agent-hitl-content llm-planning-question-content";
   card.appendChild(content);
 
-  const header = doc.createElement("div");
-  header.className = "llm-agent-hitl-header llm-planning-question-eyebrow";
-  header.textContent = "Review required";
-  const title = doc.createElement("div");
-  title.className = "llm-agent-hitl-title llm-planning-question-title";
-  title.textContent = pending.action.title;
-  content.append(header, title);
+  const { header } = createDocumentCardLayout(doc, {
+    title: pending.action.title,
+    status: "Your input",
+    statusKind: "awaiting_approval",
+  });
+  content.appendChild(header);
 
   const viewport = doc.createElement("div");
   viewport.className = "llm-planning-question-viewport";
@@ -2136,8 +2145,23 @@ export function renderPendingActionCard(
   if (isPlanningQuestionAction(pending.action)) {
     return renderPlanningQuestionCard(doc, pending);
   }
+  const noteContent = getNoteReviewContent(pending.action);
+  if (noteContent) {
+    const actions = normalizePendingActions(pending.action);
+    return renderNoteReviewCard({
+      doc,
+      pending,
+      field: noteContent,
+      confirmActionId: actions.defaultActionId,
+      cancelActionId: actions.cancelActionId,
+      resolve: (resolution) => {
+        getAgentRuntime().resolveConfirmation(pending.requestId, resolution);
+      },
+      renderChanges: (field) => renderDiffPreviewField(doc, field),
+    });
+  }
   const card = doc.createElement("div");
-  card.className = "llm-agent-hitl-card";
+  card.className = "llm-agent-hitl-card llm-plan-container";
   card.dataset.requestId = pending.requestId;
   const normalizedActions = normalizePendingActions(pending.action);
   const isPagedReviewCard = isPagedReviewAction(pending.action);
@@ -2149,18 +2173,14 @@ export function renderPendingActionCard(
   content.className = "llm-agent-hitl-content";
   card.appendChild(content);
 
-  const header = doc.createElement("div");
-  header.className = "llm-agent-hitl-header";
-  header.textContent =
-    pending.action.mode === "review" && !isPagedReviewCard
-      ? "Review required"
-      : "Action required";
+  const { header } = createDocumentCardLayout(doc, {
+    title: pending.action.title,
+    status: pending.action.selectionAction
+      ? "Choose papers"
+      : "Awaiting approval",
+    statusKind: "awaiting_approval",
+  });
   content.appendChild(header);
-
-  const title = doc.createElement("div");
-  title.className = "llm-agent-hitl-title";
-  title.textContent = pending.action.title;
-  content.appendChild(title);
 
   if (pending.action.description) {
     const description = doc.createElement("div");
@@ -2569,7 +2589,8 @@ export function renderPendingActionCard(
     )?.id || normalizedActions.defaultActionId;
   let actionChooser: HTMLDivElement | null = null;
   const actionRow = doc.createElement("div");
-  actionRow.className = "llm-agent-hitl-actions llm-agent-hitl-footer";
+  actionRow.className =
+    "llm-plan-actions llm-agent-hitl-actions llm-agent-hitl-footer";
   const safeActionGroup = doc.createElement("div");
   safeActionGroup.className = "llm-agent-hitl-footer-safe";
   const primaryActionGroup = doc.createElement("div");
@@ -2609,6 +2630,14 @@ export function renderPendingActionCard(
     const isValid = isActionValid(activeActionId);
     if (executeButton) {
       executeButton.disabled = !isValid;
+      const selectionAction = pending.action.selectionAction;
+      if (selectionAction) {
+        const value = fieldAccessors
+          .find((accessor) => accessor.id === selectionAction.fieldId)
+          ?.getValue();
+        const count = Array.isArray(value) ? value.length : 0;
+        executeButton.textContent = `${selectionAction.verb} ${count} paper${count === 1 ? "" : "s"}`;
+      }
     }
   };
   const syncAlternativeButtons = () => {
@@ -2654,8 +2683,8 @@ export function renderPendingActionCard(
       executeButton.dataset.actionId = activeActionId;
       executeButton.className =
         activeAction?.style === "danger"
-          ? "llm-agent-hitl-btn llm-agent-hitl-btn-danger"
-          : "llm-agent-hitl-btn";
+          ? "llm-plan-action llm-agent-hitl-btn llm-agent-hitl-btn-danger"
+          : "llm-plan-action llm-plan-approve llm-agent-hitl-btn";
     }
     if (backButton) {
       backButton.hidden = !isSeparateSubmitMode;
@@ -5461,6 +5490,7 @@ async function pickMarkdownExportPath(
 function renderPlanDocumentCard(params: {
   doc: Document;
   documentId: string;
+  citationContext?: import("../assistantRichText").AssistantCitationContext;
   onReady?: () => void;
 }): HTMLElement {
   const root = params.doc.createElement("section");
@@ -5470,24 +5500,15 @@ function renderPlanDocumentCard(params: {
 
   const paint = (document: PlanDocument) => {
     root.replaceChildren();
-    const header = params.doc.createElement("header");
-    header.className = "llm-plan-header llm-plan-document-header";
-    const heading = params.doc.createElement("div");
-    heading.className = "llm-plan-heading";
-    const title = params.doc.createElement("span");
-    title.className = "llm-plan-title";
-    title.textContent = document.title;
-    const status = params.doc.createElement("span");
-    status.className = "llm-plan-status";
-    status.dataset.status = document.validation.integrityValidated
-      ? "completed"
-      : "failed";
-    status.textContent = document.coverageStatus
-      ? document.coverageStatus.replace(/_/g, " ")
-      : "Ready";
-    heading.append(title, status);
-    const actions = params.doc.createElement("div");
-    actions.className = "llm-plan-document-actions";
+    const { header, actions, content } = createDocumentCardLayout(params.doc, {
+      title: document.title,
+      status: document.coverageStatus
+        ? document.coverageStatus.replace(/_/g, " ")
+        : "Ready",
+      statusKind: document.validation.integrityValidated
+        ? "completed"
+        : "failed",
+    });
     const actionStatus = params.doc.createElement("span");
     actionStatus.className = "llm-plan-document-action-status";
     const setActionStatus = (text: string, error = false) => {
@@ -5552,21 +5573,24 @@ function renderPlanDocumentCard(params: {
       title: "Open larger view",
     });
     expand.addEventListener("click", () => {
-      if (openStandalonePlanDocumentWindow(params.doc, document)) {
+      if (
+        openStandalonePlanDocumentWindow(
+          params.doc,
+          document,
+          params.citationContext,
+        )
+      ) {
         setActionStatus("Opened in a separate window");
       } else {
         setActionStatus("The document window could not be opened", true);
       }
     });
     actions.append(copy, note, exportButton, expand);
-    header.append(heading, actions);
-    const content = params.doc.createElement("article");
-    content.className = "llm-plan-markdown llm-plan-document-content";
-    renderRenderedMarkdownInto(content, document.visibleMarkdown, params.doc);
-    decoratePlanDocumentCitations({
+    renderPlanDocumentContent({
       doc: params.doc,
       root: content,
       document,
+      citationContext: params.citationContext,
     });
     const coverage = renderCoverageInspector(params.doc, document);
     root.append(header, actionStatus, content);
@@ -5600,6 +5624,7 @@ function renderPlanDocumentCard(params: {
 
 export function renderAgentTrace({
   doc,
+  panelItem,
   message,
   userMessage,
   events,
@@ -5707,7 +5732,10 @@ export function renderAgentTrace({
     }
 
     if (itemEntry.type === "card_list") {
-      list.appendChild(renderResultCardList(doc, itemEntry.cards));
+      const papers = itemEntry.cards.filter(
+        (card) => card.kind !== "saved_note",
+      );
+      if (papers.length) list.appendChild(renderResultCardList(doc, papers));
       continue;
     }
 
@@ -5856,6 +5884,17 @@ export function renderAgentTrace({
     forceOpen: Boolean(pending),
   });
 
+  let hasSavedNote = false;
+  for (const item of processItems) {
+    if (item.type !== "card_list") continue;
+    for (const card of item.cards) {
+      if (card.kind === "saved_note") {
+        hasSavedNote = true;
+        wrap.appendChild(renderSavedNoteCard(doc, card));
+      }
+    }
+  }
+
   const planProjection = getPlanProjection(events);
   if (planProjection) {
     // The structured plan is the planning turn's visible answer. Keep the
@@ -5909,7 +5948,11 @@ export function renderAgentTrace({
 
   const planDocumentId =
     message.documentId || message.planDocumentId || getPlanDocumentId(events);
-  if (planDocumentId) {
+  const savedNotePrimary =
+    hasSavedNote &&
+    savedNoteIsPrimaryOutcome(userMessage?.text || "", Boolean(planProjection));
+  if (savedNotePrimary) onInterleavedText?.();
+  if (planDocumentId && !savedNotePrimary) {
     // The immutable card is the visible deliverable. The message text remains
     // byte-identical durable history and future-model context, but rendering it
     // again below the card would create two apparent answers.
@@ -5921,6 +5964,13 @@ export function renderAgentTrace({
     const card = renderPlanDocumentCard({
       doc,
       documentId: planDocumentId,
+      citationContext: panelItem
+        ? {
+            panelItem,
+            assistantMessage: message,
+            pairedUserMessage: userMessage,
+          }
+        : undefined,
       onReady: () => {
         caption.hidden = false;
       },

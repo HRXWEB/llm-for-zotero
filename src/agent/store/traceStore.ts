@@ -214,7 +214,8 @@ function scheduleAgentRunTraceExport(runId: string, delayMs = 250): void {
   traceExportTimers.set(normalizedRunId, timer);
 }
 
-export async function initAgentTraceStore(): Promise<void> {
+/** Schema preparation is safe while other conversations are running. */
+export async function ensureAgentTraceSchema(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `CREATE TABLE IF NOT EXISTS ${AGENT_RUNS_TABLE} (
@@ -258,14 +259,19 @@ export async function initAgentTraceStore(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS ${AGENT_RUN_EVENTS_INDEX}
        ON ${AGENT_RUN_EVENTS_TABLE} (run_id, seq, id)`,
     );
-    await Zotero.DB.queryAsync(
-      `UPDATE ${AGENT_RUNS_TABLE}
-       SET status = ?, completed_at = ?, final_text = ?
-       WHERE status = 'running'`,
-      ["failed", Date.now(), INTERRUPTED_AGENT_RUN_MARKER],
-    );
     await installConversationKeyLedgerAgentTriggers();
   });
+}
+
+/** Startup recovery runs only before the new runtime is published. */
+export async function initAgentTraceStore(): Promise<void> {
+  await ensureAgentTraceSchema();
+  await Zotero.DB.queryAsync(
+    `UPDATE ${AGENT_RUNS_TABLE}
+     SET status = ?, completed_at = ?, final_text = ?
+     WHERE status = 'running'`,
+    ["failed", Date.now(), INTERRUPTED_AGENT_RUN_MARKER],
+  );
   await sweepOrphanedAgentTraceExports();
 }
 

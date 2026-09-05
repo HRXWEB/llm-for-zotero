@@ -96,6 +96,103 @@ describe("library operations against real Zotero", function () {
     }
   });
 
+  it("reports metadata-only members in the collection tree", async function () {
+    const collection = await makeCollection("Metadata-only count");
+    const paper = await makeItem("journalArticle", "Without PDF");
+    paper.addToCollection(collection.id);
+    await paper.saveTx();
+    const tool =
+      Zotero.LLMForZotero.api.agent.getToolDefinition("library_search");
+    const parsed = tool.validate({
+      entity: "collections",
+      mode: "list",
+      view: "tree",
+      libraryID: libraryID(),
+    });
+    assert.isTrue(parsed.ok);
+    const result = await tool.execute(parsed.value, {
+      request: {
+        conversationKey: paper.id,
+        libraryID: libraryID(),
+        mode: "agent",
+        userText: "List collections",
+      },
+      item: paper,
+      modelName: "workflow",
+      currentAnswerText: "",
+    });
+    const node = result.collections.find(
+      (value) => value.collectionId === collection.id,
+    );
+    assert.equal(node?.paperCount, 1);
+    assert.equal(node?.descendantPaperCount, 1);
+  });
+
+  it("keeps note discovery inside the requested collection before limiting results", async function () {
+    const inside = await makeCollection("Notes-Inside");
+    const outside = await makeCollection("Notes-Outside");
+    const parent = await makeItem("journalArticle", "Note parent");
+    parent.addToCollection(inside.id);
+    await parent.saveTx();
+    const notes: any[] = [];
+    for (const target of [outside, inside, parent]) {
+      const note = new Zotero.Item("note");
+      note.libraryID = libraryID();
+      if (target === parent) note.parentID = parent.id;
+      else note.addToCollection(target.id);
+      note.setNote(`<h1>Scoped note ${SUFFIX}</h1>`);
+      await note.saveTx();
+      created.items.push(note.id);
+      notes.push(note);
+    }
+    // Use the installed query owner and its subscribed native index. A second
+    // bundled gateway would cache this early fixture without the app's events.
+    const tool =
+      Zotero.LLMForZotero.api.agent.getToolDefinition("library_search");
+    const context = {
+      request: {
+        conversationKey: parent.id,
+        libraryID: libraryID(),
+        mode: "agent",
+        userText: "Find notes in this collection",
+      },
+      item: parent,
+      currentAnswerText: "",
+      modelName: "workflow",
+    };
+    for (const mode of ["list", "search"] as const) {
+      const parsed = tool.validate({
+        entity: "notes",
+        mode,
+        libraryID: libraryID(),
+        text: SUFFIX,
+        filters: { collectionId: inside.id },
+        limit: 50,
+      });
+      assert.isTrue(parsed.ok);
+      if (!parsed.ok) continue;
+      const result = (await tool.execute(
+        parsed.value,
+        context as never,
+      )) as any;
+      assert.sameMembers(
+        result.results.map((row: any) => row.itemId),
+        mode === "list" ? [notes[1].id] : [notes[1].id, notes[2].id],
+      );
+      assert.isTrue(
+        result.results.every((row: any) =>
+          row.collectionIds.includes(inside.id),
+        ),
+      );
+      const limited = (await tool.execute(
+        { ...parsed.value, limit: 1 },
+        context as never,
+      )) as any;
+      assert.lengthOf(limited.results, 1);
+      assert.include([notes[1].id, notes[2].id], limited.results[0].itemId);
+    }
+  });
+
   describe("MCP active library resolution", function () {
     it("reads the selected Zotero library when libraryID is omitted", async function () {
       const collection = await makeCollection("McpScopeProbe");

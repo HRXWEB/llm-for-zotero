@@ -252,6 +252,101 @@ describe("OpenAICompatibleAgentAdapter", function () {
     assert.notInclude(args.rawPreview, "secret generated script");
   });
 
+  it("discards a broken stream's partial tool call and preserves completed conversation state", async function () {
+    const bodies: Record<string, unknown>[] = [];
+    let requests = 0;
+    (globalThis as any).ztoolkit = {
+      getGlobal: (name: string) =>
+        name === "fetch"
+          ? async (_url: string, init: RequestInit) => {
+              bodies.push(JSON.parse(String(init.body)));
+              let pulls = 0;
+              return {
+                ok: true,
+                headers: { get: () => "text/event-stream" },
+                body:
+                  requests++ === 0
+                    ? new ReadableStream<Uint8Array>({
+                        pull(controller) {
+                          if (pulls++)
+                            return controller.error(
+                              new Error("Error in input stream"),
+                            );
+                          controller.enqueue(
+                            new TextEncoder().encode(
+                              'data: {"choices":[{"delta":{"content":"Unfinished text","tool_calls":[{"index":0,"id":"partial","function":{"name":"read_paper","arguments":"{"}}]}}]}\n\n',
+                            ),
+                          );
+                        },
+                      })
+                    : makeSseStream([
+                        'data: {"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\n',
+                        "data: [DONE]\n\n",
+                      ]),
+              };
+            }
+          : undefined,
+    };
+    const request = makeRequest({ providerProtocol: "openai_chat_compat" });
+    const messages = [
+      { role: "user" as const, content: "Continue the recorded research" },
+    ];
+    const step = await adapter.runStep({ request, messages, tools });
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "stream_interrupted");
+    assert.notProperty(step.assistantMessage, "tool_calls");
+    assert.equal(step.text, "");
+    const recovered = await adapter.runStep({
+      request,
+      messages,
+      continuationMessages: [
+        { role: "user", content: step.recoveryInstruction },
+      ],
+      tools,
+    });
+    assert.equal(recovered.kind, "final");
+    assert.notInclude(JSON.stringify(bodies[1]), '"partial"');
+    assert.notInclude(JSON.stringify(bodies[1]), "Unfinished text");
+    assert.include(JSON.stringify(bodies[1]), "Continue the recorded research");
+  });
+
+  for (const aborted of [false, true]) {
+    it(`does not retry ${aborted ? "an aborted stream" : "an unrelated parser failure"}`, async function () {
+      const error = new Error(
+        aborted ? "Error in input stream" : "Unrelated failure",
+      );
+      const controller = new AbortController();
+      if (aborted) controller.abort();
+      (globalThis as any).ztoolkit = {
+        getGlobal: (name: string) =>
+          name === "fetch"
+            ? async () => ({
+                ok: true,
+                headers: { get: () => "text/event-stream" },
+                body: new ReadableStream<Uint8Array>({
+                  start(stream) {
+                    stream.error(error);
+                  },
+                }),
+              })
+            : undefined,
+      };
+      let caught: unknown;
+      try {
+        await adapter.runStep({
+          request: makeRequest(),
+          messages: [],
+          tools,
+          signal: controller.signal,
+        });
+      } catch (failure) {
+        caught = failure;
+      }
+      assert.strictEqual(caught, error);
+    });
+  }
+
   it("preserves a streamed provider output-limit stop instead of reporting a final answer", async function () {
     (
       globalThis as typeof globalThis & {

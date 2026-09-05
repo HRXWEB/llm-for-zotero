@@ -30,6 +30,78 @@ function acceptingActionSession(): AgentFinalActionSession {
 }
 
 describe("AgentFinalAnswerController", function () {
+  it("requires one source check before publishing an evidence-based paper answer", async function () {
+    const controller = new AgentFinalAnswerController(
+      makeRequest({
+        conversationKind: "paper",
+        userText: "Explain the reported decoding comparison.",
+        classifiedIntent: {
+          // Single-paper reads deliberately use none: this field controls
+          // collection/library retrieval, not whether an answer needs evidence.
+          retrievalIntent: "none",
+          wantedSections: ["results"],
+          actionIntents: [],
+        },
+      }),
+      acceptingActionSession(),
+      [],
+    );
+    const records = [
+      {
+        name: "paper_read",
+        ok: true,
+        content: {
+          results: [
+            { text: "Intact accuracy is 0.80; shuffled accuracy is 0.52." },
+          ],
+        },
+      },
+    ];
+    const first = await controller.evaluate({
+      candidateText: "Shuffled accuracy is near chance for a binary task.",
+      canCorrect: true,
+      toolExecutionRecords: records,
+    });
+    assert.equal(first.kind, "correct");
+    if (first.kind !== "correct") return;
+    assert.include(first.correction, "source-check");
+    assert.include(first.correction, "unsupported");
+    assert.include(first.correction, "do not create");
+    const second = await controller.evaluate({
+      candidateText:
+        "The source gives no class count or chance baseline. Intact accuracy is 0.80 and shuffled accuracy is 0.52.",
+      canCorrect: true,
+      toolExecutionRecords: records,
+    });
+    assert.equal(
+      second.kind,
+      "accept",
+      "one review, not an endless self-review loop",
+    );
+  });
+
+  it("does not require a paper source-check for a write receipt or a finalized document", async function () {
+    for (const overrides of [
+      { actionContract: { obligations: [{ operation: "note_create" }] } },
+      { documentOutcomePolicy: { required: true } },
+    ]) {
+      const controller = new AgentFinalAnswerController(
+        makeRequest({ conversationKind: "paper", ...overrides } as never),
+        acceptingActionSession(),
+        [],
+      );
+      const result = await controller.evaluate({
+        candidateText: "Saved.",
+        canCorrect: true,
+        toolExecutionRecords: [
+          { name: "paper_read", ok: true },
+          { name: "submit_document", ok: true },
+        ],
+      });
+      assert.equal(result.kind, "accept");
+    }
+  });
+
   it("lets Plan correction policy observe successful tool progress", async function () {
     const observedCounts: number[] = [];
     const controller = new AgentFinalAnswerController(

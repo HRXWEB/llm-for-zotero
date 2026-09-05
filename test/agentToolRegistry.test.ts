@@ -82,6 +82,176 @@ describe("AgentToolRegistry", function () {
     );
   });
 
+  it("does not invent a write receipt when an explicit adapter describes a confined read", async function () {
+    for (const contracts of [
+      undefined,
+      new ActionContractService({} as never),
+    ]) {
+      const registry = new AgentToolRegistry(contracts);
+      registry.register({
+        spec: {
+          name: "zotero_script",
+          description: "Confined read",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: true,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        describeAction: () => [],
+        planInvocation: () =>
+          readOnlyInvocationPlan({ reason: "Runtime-confined read" }),
+        execute: async () => ({
+          content: { value: "Read result" },
+          effect: "none",
+        }),
+      });
+      const result = await registry.prepareExecution(
+        { id: "read", name: "zotero_script", arguments: {} },
+        baseContext,
+      );
+      assert.equal(result.kind, "result");
+      if (result.kind !== "result") return;
+      assert.isTrue(result.execution.result.ok);
+      assert.isEmpty(result.execution.result.actionReceipts || []);
+    }
+  });
+
+  it("keeps protected integrity checks active after plan approval", async function () {
+    globalThis.Zotero = { DB: new ChangeJournalTestDb() } as never;
+    await initAgentChangeJournal();
+    let writes = 0;
+    const contracts = new ActionContractService({} as never);
+    const registry = new AgentToolRegistry(contracts);
+    registry.register({
+      spec: {
+        name: "library_settings",
+        description: "Protected fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: true,
+      },
+      validate: () => ({ ok: true, value: {} }),
+      describeAction: describeTestMutation,
+      planInvocation: () =>
+        prohibitedInvocationPlan({
+          reason: "Protected target",
+          riskSignals: ["protected_target"],
+        }),
+      execute: async () => {
+        writes++;
+        return { content: {}, effect: "applied" };
+      },
+    });
+    const contract = {
+      version: 3,
+      id: "approved-protected-test",
+      hardConstraints: [],
+      writeDisposition: "required",
+      interpretationSource: "classifier",
+      obligations: [
+        {
+          id: "settings",
+          operation: "settings_update",
+          proofDomain: "zotero_state",
+          capability: "zotero.settings",
+          coverage: "one",
+          targetKind: "items",
+        },
+      ],
+    } as const;
+    const result = await registry.prepareExecution(
+      { id: "protected", name: "library_settings", arguments: {} },
+      {
+        ...baseContext,
+        request: {
+          ...baseContext.request,
+          actionContract: contract as never,
+          actionProgress: contracts.createProgress(contract as never),
+          planContext: {
+            phase: "executing",
+            planId: "p",
+            revision: 1,
+          } as never,
+        },
+      },
+    );
+    assert.equal(writes, 0, "approval cannot execute a prohibited target");
+    assert.equal(result.kind, "result");
+    if (result.kind !== "result") return;
+    assert.isFalse(result.execution.result.ok);
+    assert.include(
+      JSON.stringify(result.execution.result.content),
+      "protected integrity boundary",
+    );
+  });
+
+  for (const mode of ["safe", "auto", "yolo"]) {
+    it(`requires the discovery selection path before importing in ${mode}`, async function () {
+      globalThis.Zotero = {
+        DB: new ChangeJournalTestDb(),
+        Prefs: { get: () => mode },
+      } as never;
+      await initAgentChangeJournal();
+      const registry = new AgentToolRegistry();
+      let imports = 0;
+      registry.register({
+        spec: {
+          name: "library_import",
+          description: "Import fixture",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: true,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        describeAction: () => [
+          {
+            id: "import:test",
+            proofDomain: "zotero_state",
+            capability: "zotero.import",
+            operation: "import_identifiers",
+            source: "zotero_native",
+            requestedTargets: [],
+            destinationCollectionIds: [],
+          },
+        ],
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            domains: ["zotero_library"],
+            effects: ["create"],
+            reversibility: "full",
+            reason: "Import selected paper",
+          }),
+        execute: async () => {
+          imports++;
+          return { content: {}, effect: "applied" };
+        },
+      });
+      const result = await registry.prepareExecution(
+        { id: "import", name: "library_import", arguments: {} },
+        {
+          ...baseContext,
+          request: {
+            ...baseContext.request,
+            userText:
+              "Find five relevant papers and import only the ones I select.",
+          },
+        },
+      );
+      assert.equal(imports, 0);
+      assert.equal(
+        result.kind,
+        "result",
+        "do not substitute a generic effect confirmation",
+      );
+      if (result.kind !== "result") return;
+      assert.isFalse(result.execution.result.ok);
+      assert.include(
+        JSON.stringify(result.execution.result.content),
+        "literature_review",
+      );
+    });
+  }
+
   it("gives every registered tool one complete invocation planner", async function () {
     const registry = new AgentToolRegistry();
     registry.register({
@@ -339,15 +509,10 @@ describe("AgentToolRegistry", function () {
     assert.equal(result.kind, "confirmation");
     if (result.kind !== "confirmation") return;
     assert.equal(result.action.toolName, "mutate_library");
-    assert.includeMembers(
+    assert.deepEqual(
       result.action.fields.map((field) => field.id),
-      [
-        "selectedOperations",
-        "operationsJson",
-        "invocationImpact",
-        "invocationEffects",
-        "invocationReversibility",
-      ],
+      ["selectedOperations", "operationsJson"],
+      "internal authorization diagnostics must not become user-editable review fields",
     );
     assert.equal(result.deny().result.ok, false);
     const approved = await result.execute({
@@ -365,98 +530,100 @@ describe("AgentToolRegistry", function () {
     });
   });
 
-  it("executes a contract-matched Chinese note request in Auto without confirmation", async function () {
-    globalThis.Zotero = {
-      DB: new ChangeJournalTestDb(),
-      Prefs: { get: () => "auto" },
-      debug: () => undefined,
-    } as never;
-    await initAgentChangeJournal();
-    const contracts = new ActionContractService({
-      getCollectionSummary: () => null,
-      listCollectionSummaries: () => [],
-      listCollectionPaperTargets: async () => ({ papers: [] }),
-      listCollectionItemTargets: async () => ({ items: [] }),
-      getItem: () => null,
-      getEditableArticleMetadata: () => null,
-    });
-    const registry = new AgentToolRegistry(contracts);
-    let executions = 0;
-    registry.register({
-      spec: {
-        name: "write_note",
-        description: "write a Zotero note",
-        inputSchema: { type: "object" },
-        executionClass: "external_effect",
-        requiresConfirmation: true,
-      },
-      validate: () => ({ ok: true, value: {} }),
-      planInvocation: () =>
-        stateChangeInvocationPlan({
-          domains: ["zotero_library"],
-          effects: ["create"],
-          targets: ["note:new"],
-          reversibility: "full",
-          reason: "Create the requested Zotero note.",
-        }),
-      describeAction: () => [
-        {
-          id: "note:create",
-          proofDomain: "zotero_state",
-          capability: "zotero.notes",
-          operation: "note_create",
-          parameters: { noteMode: "create" },
-          source: "zotero_native",
-          requestedTargets: [],
-          destinationCollectionIds: [],
+  for (const permissionMode of ["safe", "auto", "yolo"]) {
+    it(`creates a contract-matched new note in ${permissionMode} without confirmation`, async function () {
+      globalThis.Zotero = {
+        DB: new ChangeJournalTestDb(),
+        Prefs: { get: () => permissionMode },
+        debug: () => undefined,
+      } as never;
+      await initAgentChangeJournal();
+      const contracts = new ActionContractService({
+        getCollectionSummary: () => null,
+        listCollectionSummaries: () => [],
+        listCollectionPaperTargets: async () => ({ papers: [] }),
+        listCollectionItemTargets: async () => ({ items: [] }),
+        getItem: () => null,
+        getEditableArticleMetadata: () => null,
+      });
+      const registry = new AgentToolRegistry(contracts);
+      let executions = 0;
+      registry.register({
+        spec: {
+          name: "write_note",
+          description: "write a Zotero note",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: true,
         },
-      ],
-      execute: async () => {
-        executions += 1;
-        return {
-          content: { noteId: 91 },
-          effect: "applied" as const,
-        };
-      },
-    });
-    const actionContract = {
-      version: 3 as const,
-      id: "contract:chinese-note",
-      hardConstraints: [],
-      writeDisposition: "required" as const,
-      interpretationSource: "classifier" as const,
-      obligations: [
-        {
-          id: "obligation:chinese-note",
-          operation: "note_create" as const,
-          proofDomain: "zotero_state" as const,
-          capability: "zotero.notes" as const,
-          coverage: "one" as const,
-          targetKind: "items" as const,
-          parameters: { noteMode: "create" as const },
+        validate: () => ({ ok: true, value: {} }),
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            domains: ["zotero_library"],
+            effects: ["create"],
+            targets: ["note:new"],
+            reversibility: "full",
+            reason: "Create the requested Zotero note.",
+          }),
+        describeAction: () => [
+          {
+            id: "note:create",
+            proofDomain: "zotero_state",
+            capability: "zotero.notes",
+            operation: "note_create",
+            parameters: { noteMode: "create" },
+            source: "zotero_native",
+            requestedTargets: [],
+            destinationCollectionIds: [],
+          },
+        ],
+        execute: async () => {
+          executions += 1;
+          return {
+            content: { noteId: 91 },
+            effect: "applied" as const,
+          };
         },
-      ],
-    };
+      });
+      const actionContract = {
+        version: 3 as const,
+        id: "contract:chinese-note",
+        hardConstraints: [],
+        writeDisposition: "required" as const,
+        interpretationSource: "classifier" as const,
+        obligations: [
+          {
+            id: "obligation:chinese-note",
+            operation: "note_create" as const,
+            proofDomain: "zotero_state" as const,
+            capability: "zotero.notes" as const,
+            coverage: "one" as const,
+            targetKind: "items" as const,
+            parameters: { noteMode: "create" as const },
+          },
+        ],
+      };
 
-    const prepared = await registry.prepareExecution(
-      { id: "call:chinese-note", name: "write_note", arguments: {} },
-      {
-        ...baseContext,
-        request: {
-          ...baseContext.request,
-          // Deliberately avoids the lexical fallback: the exact typed contract
-          // is the language-neutral authorization signal here.
-          userText: "烦请于 Zotero 里生成一则备忘。",
-          actionContract,
-          actionProgress: contracts.createProgress(actionContract),
+      const prepared = await registry.prepareExecution(
+        { id: "call:chinese-note", name: "write_note", arguments: {} },
+        {
+          ...baseContext,
+          request: {
+            ...baseContext.request,
+            // Deliberately avoids the lexical fallback: the exact typed contract
+            // is the language-neutral authorization signal here.
+            userText: "烦请于 Zotero 里生成一则备忘。",
+            actionContract,
+            actionProgress: contracts.createProgress(actionContract),
+          },
         },
-      },
-      { callerKind: "model" },
-    );
+        { callerKind: "model" },
+      );
 
-    assert.equal(prepared.kind, "result");
-    assert.equal(executions, 1);
-  });
+      assert.equal(prepared.kind, "result");
+      assert.equal(executions, 1);
+    });
+  }
 
   it("replans edited confirmation input and confirms an expanded target exactly once", async function () {
     globalThis.Zotero = {

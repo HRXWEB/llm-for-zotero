@@ -32,6 +32,8 @@
     "test": "npm run typecheck && npm run test:unit && npm run test:workflow",
     "test:unit": "npx tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs 'test/**/*.test.ts'",
     "test:workflow": "node scripts/run-workflow-tests.mjs",
+    "test:behavior": "node scripts/run-behavior-tests.mjs",
+    "test:behavior:smoke": "node scripts/run-behavior-tests.mjs --tier smoke",
     "eval:skill-router": "tsx scripts/evaluate-skill-router.ts",
     "test:webchat:live": "node scripts/run-workflow-tests.mjs --webchat-live",
     "update-deps": "npm update --save",

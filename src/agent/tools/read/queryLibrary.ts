@@ -722,6 +722,7 @@ export function createQueryLibraryTool(
         if (input.mode === "search") {
           const result = await queryService.searchNotes({
             libraryID,
+            collectionId: input.filters?.collectionId,
             text: input.text || "",
             limit: input.limit,
           });
@@ -735,6 +736,7 @@ export function createQueryLibraryTool(
         // list mode
         const result = await queryService.listStandaloneNotes({
           libraryID,
+          collectionId: input.filters?.collectionId,
           limit: input.limit,
         });
         return withResultCounts(

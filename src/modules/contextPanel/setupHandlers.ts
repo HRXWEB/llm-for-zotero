@@ -7252,14 +7252,14 @@ export function setupHandlers(
     consumeForcedSkillIds,
   });
   doSend = sendFlowController.doSend;
-  body.addEventListener(PLAN_APPROVED_EVENT, (event: Event) => {
+  const handlePlanApproved = (event: Event) => {
     const detail = (event as CustomEvent<{ planId?: string }>).detail;
     syncPlanModeChip();
     void doSend({
       overrideText: `Execute the approved plan${detail?.planId ? ` ${detail.planId}` : ""}. Follow the durable task ledger and verify every required step.`,
     });
-  });
-  body.addEventListener(PLAN_REVISE_EVENT, (event: Event) => {
+  };
+  const handlePlanRevise = (event: Event) => {
     if (!item) return;
     const detail = (
       event as CustomEvent<{
@@ -7280,11 +7280,14 @@ export function setupHandlers(
     void doSend({
       overrideText: `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
     });
-  });
-  body.addEventListener(PLAN_CANCEL_EVENT, () => {
+  };
+  const handlePlanCancel = () => {
     if (item) disableComposePlanMode(getConversationKey(item));
     syncPlanModeChip();
-  });
+  };
+  body.addEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
+  body.addEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
+  body.addEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
   // The header trash action uses the same durable, undoable deletion
   // lifecycle as Delete in conversation history.
   const executeSend = async () => {
@@ -8367,6 +8370,9 @@ export function setupHandlers(
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
     disposeConversationTurnNavigator(body);
+    body.removeEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
+    body.removeEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
+    body.removeEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
     codexDirectController?.dispose();
     codexDirectController = null;
     body.removeEventListener(

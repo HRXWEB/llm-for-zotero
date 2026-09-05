@@ -28,10 +28,12 @@ describe("standalone response document window", function () {
       "src/modules/contextPanel/standaloneResponseDocumentWindow.ts",
     );
 
-    assert.include(windowSource, "renderRenderedMarkdownInto");
-    assert.include(windowSource, "renderQuoteCitationPlaceholders");
-    assert.include(windowSource, "decorateAssistantCitationLinks");
-    assert.include(windowSource, "decorateWebSourceIndicators");
+    assert.include(windowSource, "renderAssistantRichText");
+    const shared = source("src/modules/contextPanel/assistantRichText.ts");
+    assert.include(shared, "renderRenderedMarkdownInto");
+    assert.include(shared, "renderQuoteCitationPlaceholders");
+    assert.include(shared, "decorateAssistantCitationLinks");
+    assert.include(shared, "decorateWebSourceIndicators");
     assert.include(windowSource, "renderAssistantGeneratedImagesInto");
     assert.include(windowSource, "Response from ${model}");
     assert.notInclude(windowSource, "reasoningSummary");

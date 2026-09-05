@@ -453,6 +453,214 @@ describe("detectTurnIntent", function () {
     );
   });
 
+  it("classifies collection union as rename, filing and collection-only removal", async function () {
+    let actionPrompt = "";
+    const actions = [
+      {
+        operation: "update_collection",
+        coverage: "one",
+        targetKind: "items",
+        parameters: { collectionId: 98, collectionName: "geometry_memory" },
+      },
+      {
+        operation: "move_to_collection",
+        coverage: "all",
+        targetKind: "papers",
+        scope: {
+          kind: "collection",
+          path: "memory",
+          includeDescendants: false,
+        },
+        scopeRole: "source",
+        parameters: { destinationCollectionId: 98 },
+      },
+      {
+        operation: "delete_collection",
+        coverage: "one",
+        targetKind: "items",
+        parameters: { collectionId: 99, deleteItems: false },
+      },
+    ];
+    const result = await detectTurnIntent(
+      {
+        userText:
+          'Merge collections "geometry" (98) and "memory" (99) into one called "geometry_memory". Keep the union of their papers and preserve all other memberships. The old collection names should no longer exist.',
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+      } as any,
+      SKILLS,
+      {
+        llmCall: async (params) => {
+          if (
+            !String(params.prompt).includes("Classify only the exact mutation")
+          )
+            return completeOutcome(
+              '{"schemaVersion":1,"taskKind":"write","requestedScopes":["library-corpus"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+            );
+          actionPrompt = String(params.prompt);
+          return completeOutcome(
+            JSON.stringify({
+              retrievalIntent: "none",
+              wantedSections: [],
+              writeDisposition: "required",
+              actionIntents: actions,
+            }),
+          );
+        },
+      },
+    );
+    assert.include(actionPrompt, "A collection merge requires the full union");
+    assert.include(actionPrompt, "deleteItems:false");
+    assert.include(actionPrompt, "collectionId:number");
+    assert.deepEqual(
+      result.classifiedIntent?.actionIntents.map((action) => action.operation),
+      ["update_collection", "move_to_collection", "delete_collection"],
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[2].parameters?.deleteItems,
+      false,
+    );
+  });
+
+  it("distinguishes future filing destinations from existing source collections in action classification", async function () {
+    let actionPrompt = "";
+    const result = await detectTurnIntent(
+      {
+        userText:
+          'Create "Geometry" under parent collection 74. Add existing papers 41 and 43 to Geometry. Do not create any papers or notes.',
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+      } as any,
+      SKILLS,
+      {
+        llmCall: async (params) => {
+          if (
+            !String(params.prompt).includes("Classify only the exact mutation")
+          )
+            return completeOutcome(
+              '{"schemaVersion":1,"taskKind":"write","requestedScopes":["library-corpus"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+            );
+          actionPrompt = String(params.prompt);
+          return completeOutcome(
+            JSON.stringify({
+              retrievalIntent: "none",
+              wantedSections: [],
+              writeDisposition: "required",
+              actionIntents: [
+                {
+                  operation: "create_collection",
+                  coverage: "one",
+                  targetKind: "items",
+                  parameters: {
+                    collectionName: "Geometry",
+                    parentCollectionId: 74,
+                  },
+                },
+                {
+                  operation: "move_to_collection",
+                  coverage: "some",
+                  targetKind: "papers",
+                  targetSelectors: [
+                    { kind: "item_id", value: 41 },
+                    { kind: "item_id", value: 43 },
+                  ],
+                  scopeRole: "destination",
+                  scope: {
+                    kind: "collection",
+                    path: "Geometry",
+                    includeDescendants: false,
+                  },
+                },
+              ],
+            }),
+          );
+        },
+      },
+    );
+    assert.include(
+      actionPrompt,
+      'For collection filing without a named source, use scopeRole:"destination"',
+    );
+    assert.include(actionPrompt, "parentCollectionId");
+    assert.equal(
+      result.classifiedIntent?.actionInterpretationSource,
+      "classifier",
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[0].parameters?.parentCollectionId,
+      74,
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[1].scopeRole,
+      "destination",
+    );
+    assert.deepEqual(
+      result.classifiedIntent?.actionIntents[1].targetSelectors,
+      [
+        { kind: "item_id", value: 41 },
+        { kind: "item_id", value: 43 },
+      ],
+    );
+  });
+
+  it("preserves an exact replacement classification for named papers instead of letting the additive fallback veto it", async function () {
+    const titles = ["Geometry of population coding", "Memory and drift"];
+    const result = await detectTurnIntent(
+      {
+        userText: `Apply exactly these tags to each of the papers titled "${titles[0]}", "${titles[1]}": coding, drift. Replace their old tags with this exact set. Do not tag any other paper.`,
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+      } as any,
+      SKILLS,
+      {
+        llmCall: async (params) =>
+          completeOutcome(
+            String(params.prompt).includes("Classify only the exact mutation")
+              ? JSON.stringify({
+                  retrievalIntent: "none",
+                  wantedSections: [],
+                  writeDisposition: "required",
+                  actionIntents: [
+                    {
+                      operation: "set_item_tags",
+                      coverage: "some",
+                      targetKind: "papers",
+                      targetSelectors: titles.map((value) => ({
+                        kind: "title",
+                        value,
+                      })),
+                      parameters: { tags: ["coding", "drift"] },
+                    },
+                  ],
+                })
+              : '{"schemaVersion":1,"taskKind":"write","requestedScopes":["library-corpus"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+          ),
+      },
+    );
+    assert.equal(
+      result.classifiedIntent?.actionInterpretationSource,
+      "classifier",
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[0]?.operation,
+      "set_item_tags",
+    );
+    assert.deepEqual(
+      (result.classifiedIntent?.actionIntents[0] as any)?.targetSelectors,
+      titles.map((value) => ({ kind: "title", value })),
+    );
+    assert.deepEqual(
+      result.classifiedIntent?.actionIntents[0]?.parameters?.tags,
+      ["coding", "drift"],
+    );
+  });
+
   it("rejects a contextually impossible comparison even when the model selects it", async function () {
     const compareSkill: AgentSkill = {
       ...SKILLS[1],

@@ -1,8 +1,11 @@
 import { assert } from "chai";
+import { stripNoteHtml } from "../src/utils/noteText";
+import { renderMarkdownForNote } from "../src/utils/markdown";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentRuntime } from "../src/agent/runtime";
+import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
@@ -371,6 +374,68 @@ describe("AgentRuntime", function () {
     clearAgentToolResultHandleStore();
   });
 
+  it("source-checks a single-paper draft even when no library-wide retrieval is requested", async function () {
+    const restoreDb = installMockDb();
+    const draft = "Shuffled accuracy of 0.52 is near chance for a binary task.";
+    const corrected =
+      "The paper reports 0.80 intact and 0.52 shuffled accuracy. It supplies neither a class count nor a chance baseline.";
+    let steps = 0;
+    const events: AgentEvent[] = [];
+    try {
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            steps++;
+            if (steps === 2) {
+              assert.include(JSON.stringify(params.messages), "source-check");
+              assert.include(JSON.stringify(params.messages), draft);
+            }
+            const text = steps === 1 ? draft : corrected;
+            return {
+              kind: "final",
+              text,
+              assistantMessage: { role: "assistant", content: text },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 939301,
+          mode: "agent",
+          conversationKind: "paper",
+          libraryID: 1,
+          userText: "Explain the reported decoding comparison.",
+          model: "test-model",
+          apiKey: "test",
+          apiBase: "",
+          classifiedIntent: {
+            retrievalIntent: "none",
+            wantedSections: ["results"],
+            actionIntents: [],
+          },
+        },
+        onEvent: (event) => events.push(event),
+      });
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.text, corrected);
+      assert.equal(steps, 2);
+      assert.isFalse(
+        events.some((event) => event.type === "confirmation_required"),
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("falls back when the adapter does not support tools", async function () {
     const restoreDb = installMockDb();
     try {
@@ -445,8 +510,106 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("retains figure provenance for authored documents before their submission", async function () {
+    const restoreDb = installMockDb();
+    try {
+      (Zotero as unknown as { Items: unknown }).Items = {
+        get: (id: number) => ({
+          id,
+          key: id === 10 ? "PAPER001" : "PDF00001",
+          libraryID: 1,
+          ...(id === 20 ? { parentID: 10 } : {}),
+        }),
+      };
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "Extract figure",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({
+          mode: "figures",
+          figures: [
+            {
+              paperContext: { itemId: 10, contextItemId: 20 },
+              cropPath: "/tmp/crop.png",
+              pageIndex: 2,
+              sourceFingerprint: "sha256:pdf",
+            },
+          ],
+        }),
+      });
+      let observed: AgentRuntimeRequest["documentReadObservations"];
+      let calls = 0;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          supportsTools: () => true,
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          runStep: async ({ request }) => {
+            if (calls++) {
+              observed = request.documentReadObservations;
+              throw new Error("test provenance checkpoint");
+            }
+            const call = {
+              id: "read-figure",
+              name: "paper_read",
+              arguments: { mode: "figures" },
+            };
+            return {
+              kind: "tool_calls",
+              calls: [call],
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: [call],
+              },
+            };
+          },
+        }),
+      });
+      try {
+        await runtime.runTurn({
+          request: {
+            conversationKey: 421,
+            libraryID: 1,
+            mode: "agent",
+            userText: "Write a report including Figure 1",
+            model: "gpt-5.4",
+            apiKey: "test",
+          },
+        });
+        assert.fail("expected test checkpoint");
+      } catch (error) {
+        assert.include(String(error), "test provenance checkpoint");
+      }
+      assert.lengthOf(observed || [], 1);
+      assert.deepInclude(observed![0], {
+        itemKey: "PAPER001",
+        attachmentItemKey: "PDF00001",
+        pageIndex: 2,
+      });
+      assert.deepEqual(observed![0].capabilities, ["figure"]);
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("finalizes a run row when the provider throws", async function () {
     const restoreDb = installMockDb();
+    const originalInterrupt = PlanExecutionRunSession.prototype.interrupt;
+    const interruptions: string[] = [];
+    PlanExecutionRunSession.prototype.interrupt = async function (reason) {
+      interruptions.push(reason);
+    };
     try {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
@@ -483,7 +646,13 @@ describe("AgentRuntime", function () {
       );
       assert.equal(run?.status, "failed");
       assert.equal(run?.finalText, INTERRUPTED_AGENT_RUN_MARKER);
+      assert.lengthOf(
+        interruptions,
+        1,
+        "provider failure must terminalize the active plan session too",
+      );
     } finally {
+      PlanExecutionRunSession.prototype.interrupt = originalInterrupt;
       restoreDb();
     }
   });
@@ -559,6 +728,14 @@ describe("AgentRuntime", function () {
                   role: "assistant",
                   content: "",
                   tool_calls: [toolCall],
+                },
+              },
+              {
+                kind: "final",
+                text: "The paper uses a stable readout.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "The paper uses a stable readout.",
                 },
               },
               {
@@ -1514,6 +1691,121 @@ describe("AgentRuntime", function () {
     }
   });
 
+  for (const failingRounds of [1, 3]) {
+    it(`counts repeated tool failures across ${failingRounds} model rounds, not sibling calls`, async function () {
+      const restoreDb = installMockDb();
+      try {
+        const registry = new AgentToolRegistry();
+        const paperTool = createPaperReadTool(
+          {} as never,
+          {} as never,
+          {} as never,
+          {} as never,
+        );
+        let reads = 0;
+        registry.register({
+          ...paperTool,
+          execute: async () => {
+            reads += 1;
+            return { text: "Verified paper evidence" };
+          },
+        });
+        const steps: AgentModelStep[] = Array.from(
+          { length: failingRounds },
+          (_, round) => {
+            const calls = Array.from({ length: 3 }, (_, i) => ({
+              id: `invalid-${round}-${i}`,
+              name: "paper_read",
+              arguments: {
+                mode: "overview",
+                targets: [
+                  {
+                    itemId: 101,
+                    contextItemId: 202,
+                    title: "Descriptive title from research manifest",
+                  },
+                ],
+              },
+            }));
+            return {
+              kind: "tool_calls" as const,
+              calls,
+              assistantMessage: {
+                role: "assistant" as const,
+                content: "",
+                tool_calls: calls,
+              },
+            };
+          },
+        );
+        const repaired = {
+          id: "corrected-selector",
+          name: "paper_read",
+          arguments: {
+            mode: "overview",
+            targets: [{ itemId: 101, contextItemId: 202 }],
+          },
+        };
+        steps.push(
+          {
+            kind: "tool_calls",
+            calls: [repaired],
+            assistantMessage: {
+              role: "assistant",
+              content: "",
+              tool_calls: [repaired],
+            },
+          },
+          {
+            kind: "final",
+            text: "Evidence read successfully.",
+            assistantMessage: {
+              role: "assistant",
+              content: "Evidence read successfully.",
+            },
+          },
+        );
+        const events: AgentEvent[] = [];
+        const runtime = new AgentRuntime({
+          registry,
+          adapterFactory: () =>
+            new MockAdapter(steps, {
+              streaming: false,
+              toolCalls: true,
+              multimodal: false,
+            }),
+        });
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 9010 + failingRounds,
+            mode: "agent",
+            userText: "Read these papers and answer from their evidence.",
+            model: "gpt-5.4",
+            apiBase: "",
+            apiKey: "test",
+          },
+          onEvent: (event) => events.push(event),
+        });
+        assert.equal(
+          events.filter((event) => event.type === "tool_result" && !event.ok)
+            .length,
+          failingRounds * 3,
+        );
+        assert.equal(reads, failingRounds === 1 ? 1 : 0);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(
+          outcome.text,
+          failingRounds === 1
+            ? "Evidence read successfully."
+            : "Agent stopped after repeated tool errors. Please adjust the request and try again.",
+        );
+      } finally {
+        restoreDb();
+      }
+    });
+  }
+
   it("stops segmented continuation when a full segment only repeats prior work", async function () {
     const restoreDb = installMockDb();
     try {
@@ -1865,11 +2157,93 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("rolls back a streamed output cutoff and continues from the preserved step", async function () {
+  for (const incompleteReason of [
+    "output_limit",
+    "stream_interrupted",
+  ] as const) {
+    it(`rolls back ${incompleteReason} and continues from the preserved step`, async function () {
+      const restoreDb = installMockDb();
+      try {
+        let modelSteps = 0;
+        let continuationMessages: AgentModelMessage[] = [];
+        const runtime = new AgentRuntime({
+          registry: new AgentToolRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: () => ({
+              streaming: true,
+              toolCalls: true,
+              multimodal: false,
+            }),
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              modelSteps += 1;
+              if (modelSteps === 1) {
+                await params.onTextDelta?.("Partial scratch text");
+                return {
+                  kind: "incomplete",
+                  reason: incompleteReason,
+                  text: "Partial scratch text",
+                  recoveryInstruction:
+                    "Continue without repeating prior text and emit only complete tool arguments.",
+                  assistantMessage: {
+                    role: "assistant",
+                    content: "Partial scratch text",
+                  },
+                };
+              }
+              continuationMessages = structuredClone(params.messages);
+              return {
+                kind: "final",
+                text: "Complete answer",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Complete answer",
+                },
+              };
+            },
+          }),
+        });
+        const events: AgentEvent[] = [];
+
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 1_909,
+            mode: "agent",
+            userText: "finish this task",
+            model: "gpt-5.4",
+            apiBase: "https://api.openai.com/v1/responses",
+            apiKey: "test",
+            advanced: { outputTokenLimit: { mode: "auto" } },
+          },
+          onEvent: (event) => events.push(event),
+        });
+
+        assert.equal(modelSteps, 2);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind === "completed") {
+          assert.equal(outcome.text, "Complete answer");
+        }
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "message_rollback" &&
+              event.text === "Partial scratch text",
+          ),
+        );
+        assert.include(
+          JSON.stringify(continuationMessages),
+          "Continue without repeating prior text",
+        );
+      } finally {
+        restoreDb();
+      }
+    });
+  }
+
+  it("bounds stream recovery to one retry instead of an endless interrupted Plan", async function () {
     const restoreDb = installMockDb();
     try {
-      let modelSteps = 0;
-      let continuationMessages: AgentModelMessage[] = [];
+      let calls = 0;
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
@@ -1879,65 +2253,28 @@ describe("AgentRuntime", function () {
             multimodal: false,
           }),
           supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            modelSteps += 1;
-            if (modelSteps === 1) {
-              await params.onTextDelta?.("Partial scratch text");
-              return {
-                kind: "incomplete",
-                reason: "output_limit",
-                text: "Partial scratch text",
-                recoveryInstruction:
-                  "Continue without repeating prior text and emit only complete tool arguments.",
-                assistantMessage: {
-                  role: "assistant",
-                  content: "Partial scratch text",
-                },
-              };
-            }
-            continuationMessages = structuredClone(params.messages);
+          runStep: async () => {
+            calls++;
             return {
-              kind: "final",
-              text: "Complete answer",
-              assistantMessage: {
-                role: "assistant",
-                content: "Complete answer",
-              },
-            };
+              kind: "incomplete",
+              reason: "stream_interrupted",
+              text: "",
+              recoveryInstruction: "Retry the unfinished step",
+            } as AgentModelStep;
           },
         }),
       });
-      const events: AgentEvent[] = [];
-
       const outcome = await runtime.runTurn({
         request: {
-          conversationKey: 1_909,
+          conversationKey: 19091,
           mode: "agent",
           userText: "finish this task",
-          model: "gpt-5.4",
-          apiBase: "https://api.openai.com/v1/responses",
-          apiKey: "test",
-          advanced: { outputTokenLimit: { mode: "auto" } },
         },
-        onEvent: (event) => events.push(event),
       });
-
-      assert.equal(modelSteps, 2);
+      assert.equal(calls, 2);
       assert.equal(outcome.kind, "completed");
-      if (outcome.kind === "completed") {
-        assert.equal(outcome.text, "Complete answer");
-      }
-      assert.isTrue(
-        events.some(
-          (event) =>
-            event.type === "message_rollback" &&
-            event.text === "Partial scratch text",
-        ),
-      );
-      assert.include(
-        JSON.stringify(continuationMessages),
-        "Continue without repeating prior text",
-      );
+      if (outcome.kind === "completed") assert.include(outcome.text, "stream");
+      assert.equal([...restoreDb.runs.values()][0]?.status, "failed");
     } finally {
       restoreDb();
     }
@@ -3211,7 +3548,7 @@ describe("AgentRuntime", function () {
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
       assert.include(outcome.text, "Grounded answer after the full read.");
-      assert.lengthOf(continuationDeltas, 4);
+      assert.lengthOf(continuationDeltas, 5);
       assert.deepEqual(
         continuationDeltas[1].map((message) => message.role),
         ["tool"],
@@ -3234,6 +3571,15 @@ describe("AgentRuntime", function () {
       );
       assert.include(
         JSON.stringify(continuationDeltas[3]),
+        "call-full-read-after-correction",
+      );
+      assert.deepEqual(
+        continuationDeltas[4].map((message) => message.role),
+        ["user"],
+      );
+      assert.include(JSON.stringify(continuationDeltas[4]), "source-check");
+      assert.notInclude(
+        JSON.stringify(continuationDeltas[4]),
         "call-full-read-after-correction",
       );
     } finally {
@@ -3321,7 +3667,9 @@ describe("AgentRuntime", function () {
             source: "zotero_native",
             parameters: {
               noteMode: "create",
-              expectedText: String(input.operation.content || ""),
+              expectedText: stripNoteHtml(
+                renderMarkdownForNote(input.operation.content),
+              ),
             },
             requestedTargets: [],
             destinationCollectionIds: [],

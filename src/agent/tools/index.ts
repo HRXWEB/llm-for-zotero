@@ -15,14 +15,19 @@ import { clearPdfToolCaches } from "./read/pdfToolUtils";
 import {
   createSearchLiteratureOnlineTool,
   matchesLiteratureSearchGuidance,
+  LITERATURE_WORKFLOW_GUIDANCE,
 } from "./read/searchLiteratureOnline";
+import { createLiteratureReviewTool } from "./read/reviewLiterature";
 import { createToolResultReadTool } from "./read/toolResultRead";
 import { createWebSearchTool } from "./read/webSearch";
 import { createWebReadTool } from "./read/webRead";
 import { createCiteExportTool } from "./read/citeExport";
 import { createDelegatingTool, createRenamedTool } from "./facade";
 
-import { createEditCurrentNoteTool } from "./write/editCurrentNote";
+import {
+  createEditCurrentNoteTool,
+  SOURCE_NOTE_COPY_GUIDANCE,
+} from "./write/editCurrentNote";
 import { createRevertChangesTool } from "./write/revertChanges";
 import { createAnnotatePdfTool } from "./write/annotatePdf";
 import { createUndoLastActionTool } from "./write/undoLastAction";
@@ -124,7 +129,7 @@ const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
 const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
   matches: matchesLiteratureSearchGuidance,
   instruction:
-    "When the request needs external scholarly evidence, call literature_search with workflow:'answer' by default, analyze the results, and answer with explicit source attribution. A mixed request may also use web_search for distinct general-web evidence. Use workflow:'review' only when the user wants to import/add papers to Zotero, save selected search results to a note, refine results inside the card, or review metadata changes. Do not use this tool for questions about the content of papers already in context (e.g. counting references, summarizing, explaining). Preserve the user's language by default." +
+    LITERATURE_WORKFLOW_GUIDANCE +
     "\n\nSource selection:" +
     "\n- recommendations, references, citations modes -> always use source:'openalex' (only OpenAlex supports these)." +
     "\n- search mode -> source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
@@ -155,7 +160,8 @@ const NOTE_WRITE_GUIDANCE: ToolGuidance = {
       ),
     ),
   instruction:
-    "For an open/current Zotero note, use mode:'edit' for revision and prefer patches over a full content replacement. Use mode:'append' for an existing destination note and mode:'create' only for a new child or standalone note. A named Zotero folder means a collection: resolve its ID, create a standalone note, and pass collections:[...]. Pass Markdown unless the user explicitly requests HTML. The requested note must be written with note_write rather than returned as note-ready prose in chat.",
+    "For an open/current Zotero note, use mode:'edit' for revision and prefer patches over a full content replacement. Use mode:'append' for an existing destination note and mode:'create' only for a new child or standalone note. A named Zotero folder means a collection: resolve its ID, create a standalone note, and pass collections:[...]. Pass Markdown unless the user explicitly requests HTML. The requested note must be written with note_write rather than returned as note-ready prose in chat. Requested new notes are created without draft confirmation in every mode; after verification the UI displays the saved content and a direct link to the native note. Do not repeat the full saved content in the completion message. Existing-note edits follow the current permission mode. " +
+    SOURCE_NOTE_COPY_GUIDANCE,
 };
 
 const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
@@ -249,7 +255,8 @@ function createLibraryUpdateTool(tools: {
         },
         tags: {
           ...STRING_ARRAY_SCHEMA,
-          description: "Tags to add or remove when kind:'tags'.",
+          description:
+            "Uniform tags to add, remove, or set on itemIds when kind:'tags'. For action:'set', this is the complete replacement list (an empty array clears tags). Use assignments instead only when different items need different lists.",
         },
         assignments: {
           type: "array",
@@ -340,6 +347,26 @@ function createLibraryUpdateTool(tools: {
         if (args.action === "set") {
           const setArgs = { ...delegateArgs };
           delete setArgs.action;
+          if (
+            args.assignments !== undefined &&
+            (args.itemIds !== undefined || args.tags !== undefined)
+          ) {
+            return fail(
+              "Use either itemIds with tags for one uniform replacement, or per-item assignments, not both.",
+            );
+          }
+          if (
+            args.assignments === undefined &&
+            Array.isArray(args.itemIds) &&
+            Array.isArray(args.tags)
+          ) {
+            setArgs.assignments = args.itemIds.map((itemId) => ({
+              itemId,
+              tags: args.tags,
+            }));
+          }
+          delete setArgs.itemIds;
+          delete setArgs.tags;
           return ok({ tool: tools.setItemTags, args: setArgs });
         }
         return ok({ tool: tools.applyTags, args: delegateArgs });
@@ -609,10 +636,11 @@ export function createBuiltInToolRegistry(
       name: "literature_search",
       label: "Search Literature",
       description:
-        "Search scholarly sources and fetch external scholarly metadata. Use workflow:'answer' for source-cited chat answers, or workflow:'review' for Zotero import/review-card workflows.",
+        "Search scholarly sources and return saved candidates for ranking. Discovery then uses literature_review; explicit imports use library_import directly. Use workflow:'review', mode:'metadata' for external metadata review.",
       guidance: LITERATURE_SEARCH_GUIDANCE,
     }),
   );
+  registry.register(createLiteratureReviewTool(deps.zoteroGateway));
   registry.register(
     createLibraryUpdateTool({
       applyTags,
@@ -638,7 +666,7 @@ export function createBuiltInToolRegistry(
       name: "note_write",
       label: "Write Note",
       description:
-        "Create, append to, or edit a single Zotero note. Use this for note writing instead of returning note-ready text in chat. To write a note onto many items, use note_write_batch instead — one card for the whole set, rather than one approval per paper.",
+        "Create, append to, or edit a single Zotero note. Requested new notes are created directly and shown as saved-note cards. Use this for note writing instead of returning note-ready text in chat. To write a note onto many items, use note_write_batch instead.",
       guidance: NOTE_WRITE_GUIDANCE,
     }),
   );
@@ -648,7 +676,7 @@ export function createBuiltInToolRegistry(
       name: "note_write_batch",
       label: "Write Notes",
       description:
-        "Write a note onto each of many items in one approved operation. Use this whenever the user asks for a note on several papers — calling note_write once per paper means one confirmation dialog per paper.",
+        "Write a note onto each of many items in one batch operation. Use this whenever the user asks for a note on several papers.",
     }),
   );
   registry.register(savedSearchUpdate);

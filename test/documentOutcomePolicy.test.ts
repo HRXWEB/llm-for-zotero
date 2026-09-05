@@ -13,6 +13,28 @@ function request(userText: string, extra: Record<string, unknown> = {}) {
 }
 
 describe("DocumentOutcomePolicy", function () {
+  it("does not require a second document when creating a note on or about a source paper", function () {
+    for (const text of [
+      'Create one new child note on this paper titled "Note card live review" with a short paragraph, two bullet points, and one exact source quotation. I authorize creation of this new note now.',
+      "Write a summary note about this article.",
+      "Create a standalone note from the attached paper.",
+    ])
+      assert.isFalse(
+        resolveDocumentOutcomePolicy({
+          request: request(text),
+          matchedSkillIds: ["write-note"],
+        }).required,
+        text,
+      );
+    assert.isTrue(
+      resolveDocumentOutcomePolicy({
+        request: request(
+          "Write a report about this paper and save it as a note.",
+        ),
+        matchedSkillIds: ["write-note"],
+      }).required,
+    );
+  });
   it("requires research-grounded documents for planned literature reviews", function () {
     const policy = resolveDocumentOutcomePolicy({
       request: request("continue", {

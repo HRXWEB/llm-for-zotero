@@ -1230,6 +1230,10 @@ const FULLTEXT_INDEX_STATE_MAP: Record<
 };
 
 export class ZoteroGateway {
+  getItemByLibraryAndKey(libraryID: number, key: string): Zotero.Item | null {
+    return Zotero.Items.getByLibraryAndKey(libraryID, key) || null;
+  }
+
   getItem(itemId: number | undefined): Zotero.Item | null {
     if (!Number.isFinite(itemId) || !itemId || itemId <= 0) return null;
     return Zotero.Items.get(Math.floor(itemId)) || null;
@@ -1871,7 +1875,10 @@ export class ZoteroGateway {
       throw new Error("No active library available for browsing collections");
     }
     const snapshot = await libraryIndexService.getSnapshot(libraryID);
-    const paperIds = new Set(orderedGatewayPaperIds(snapshot));
+    // Collection membership is bibliographic, not conditional on a PDF.
+    const paperIds = new Set(
+      orderedIndexIds(snapshot, (item) => item.kind === "regular"),
+    );
     const nodes = new Map<number, CollectionBrowseNode>();
     for (const collection of snapshot.collectionById.values()) {
       if (collection.deleted) continue;
@@ -3010,6 +3017,7 @@ export class ZoteroGateway {
 
   async listStandaloneNotes(params: {
     libraryID: number;
+    collectionId?: number;
     limit?: number;
   }): Promise<{ notes: LibraryItemTarget[]; totalCount: number }> {
     const libraryID = Number.isFinite(params.libraryID)
@@ -3019,7 +3027,10 @@ export class ZoteroGateway {
     const snapshot = await libraryIndexService.getSnapshot(libraryID);
     const ids = orderedIndexIds(
       snapshot,
-      (item) => item.kind === "standalone-note",
+      (item) =>
+        item.kind === "standalone-note" &&
+        (!params.collectionId ||
+          item.collectionIds.includes(params.collectionId)),
     );
     return {
       notes: buildItemTargetsForIds(this, pageIds(ids, params.limit)),
@@ -3163,6 +3174,7 @@ export class ZoteroGateway {
 
   async searchAllNotes(params: {
     libraryID: number;
+    collectionId?: number;
     query: string;
     limit?: number;
   }): Promise<
@@ -3184,12 +3196,17 @@ export class ZoteroGateway {
       search.addCondition("itemType", "is", "note");
       search.addCondition("quicksearch-everything", "contains", query);
       const noteIds: number[] = await search.search();
-      return this._buildNoteResults(noteIds, normalizedLimit);
+      return this._buildNoteResults(
+        noteIds,
+        normalizedLimit,
+        params.collectionId,
+      );
     } catch (_error) {
       void _error;
       // Fallback: in-memory scan across all items and child notes
       return this._searchAllNotesInMemory({
         libraryID,
+        collectionId: params.collectionId,
         query,
         limit: normalizedLimit,
       });
@@ -3199,6 +3216,7 @@ export class ZoteroGateway {
   private _buildNoteResults(
     noteIds: number[],
     limit: number,
+    collectionId?: number,
   ): Array<
     LibraryItemTarget & { parentItemId?: number; parentItemTitle?: string }
   > {
@@ -3209,6 +3227,11 @@ export class ZoteroGateway {
       if (results.length >= limit) break;
       const noteItem = this.getItem(noteId);
       if (!noteItem?.isNote?.()) continue;
+      const owner = noteItem.parentID
+        ? this.getItem(noteItem.parentID)
+        : noteItem;
+      const collectionIds = owner?.getCollections() || [];
+      if (collectionId && !collectionIds.includes(collectionId)) continue;
       const rawTitle = normalizeText(
         (noteItem as any).getNoteTitle?.() ||
           noteItem.getDisplayTitle?.() ||
@@ -3227,7 +3250,7 @@ export class ZoteroGateway {
           title,
           attachments: [],
           tags: getItemTags(noteItem),
-          collectionIds: [],
+          collectionIds,
           noteKind: "item",
           parentItemId: noteItem.parentID as number,
           parentItemTitle: parentTitle,
@@ -3242,6 +3265,7 @@ export class ZoteroGateway {
 
   private async _searchAllNotesInMemory(params: {
     libraryID: number;
+    collectionId?: number;
     query: string;
     limit: number;
   }): Promise<
@@ -3259,6 +3283,11 @@ export class ZoteroGateway {
       const indexed = snapshot.itemById.get(itemId);
       const item = this.getItem(itemId);
       if (!indexed || indexed.deleted || !item) continue;
+      if (
+        params.collectionId &&
+        !indexed.collectionIds.includes(params.collectionId)
+      )
+        continue;
       if (indexed.kind === "standalone-note") {
         const html = item.getNote?.() || "";
         const text = normalizeNoteSourceText(html);
@@ -3300,7 +3329,7 @@ export class ZoteroGateway {
           title,
           attachments: [],
           tags: getItemTags(noteItem),
-          collectionIds: [],
+          collectionIds: [...indexed.collectionIds],
           noteKind: "item",
           parentItemId: item.id,
           parentItemTitle: parentTitle,
@@ -6675,7 +6704,9 @@ export class ZoteroGateway {
                 setIdentifier(id: Record<string, string>): void;
                 getTranslators(): Promise<unknown[]>;
                 setTranslator(t: unknown): void;
-                translate(opts?: { libraryID?: number }): Promise<unknown[]>;
+                translate(opts?: {
+                  libraryID?: number | false;
+                }): Promise<unknown[]>;
               };
             };
           }
@@ -6695,7 +6726,41 @@ export class ZoteroGateway {
           continue;
         }
         translate.setTranslator(translators);
-        const items = await translate.translate({ libraryID: targetLibraryID });
+        // Search inherits Zotero's Web translator, which does not forward
+        // saveOptions and automatically selects its newly saved item. Resolve
+        // metadata first, then let the native ItemSaver persist the complete
+        // translator payload without changing the user's conversation context.
+        const translatedItems = await translate.translate({ libraryID: false });
+        const ItemSaver = (
+          Zotero as unknown as {
+            Translate: {
+              ItemSaver: {
+                new (options: {
+                  libraryID: number;
+                  collections: number[] | null;
+                  attachmentMode: number;
+                  forceTagType: number;
+                  saveOptions: { skipSelect: boolean };
+                }): {
+                  saveItems(
+                    items: unknown[],
+                    onAttachment: () => void,
+                  ): Promise<unknown[]>;
+                };
+                ATTACHMENT_MODE_DOWNLOAD: number;
+              };
+            };
+          }
+        ).Translate.ItemSaver;
+        const items = translatedItems?.length
+          ? await new ItemSaver({
+              libraryID: targetLibraryID,
+              collections: targetCollection ? [targetCollection.id] : null,
+              attachmentMode: ItemSaver.ATTACHMENT_MODE_DOWNLOAD,
+              forceTagType: 1,
+              saveOptions: { skipSelect: true },
+            }).saveItems(translatedItems, () => {})
+          : [];
         if (items && items.length > 0) {
           const importedRegularItemIds = items
             .map((item) =>
@@ -6709,19 +6774,6 @@ export class ZoteroGateway {
               const importedItem = this.getItem(itemId);
               return Boolean(importedItem?.isRegularItem?.());
             });
-          if (targetCollection) {
-            for (const itemId of importedRegularItemIds) {
-              const importedItem = this.getItem(itemId);
-              if (
-                !importedItem ||
-                importedItem.inCollection?.(targetCollection.id)
-              ) {
-                continue;
-              }
-              importedItem.addToCollection(targetCollection.id);
-              await importedItem.saveTx();
-            }
-          }
           itemIds.push(...importedRegularItemIds);
           // Previously `|| items.length`, which reported success when the
           // translator returned something but nothing survived the

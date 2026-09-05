@@ -59,6 +59,19 @@ export function inferExplicitNoteIntent(userText: string | undefined): boolean {
   return NOTE_OBJECT_PATTERN.test(text) && NOTE_ACTION_PATTERN.test(text);
 }
 
+/** Conversational memory is not a request for a durable research asset. */
+export function isConversationOnlyMemoryRequest(userText: string): boolean {
+  return (
+    /\bremember\b[^.!?\n]{0,160}\b(?:discussion|conversation|chat)\b/i.test(
+      userText,
+    ) &&
+    !inferExplicitNoteIntent(userText) &&
+    !/\b(?:save|export|write|create)\b[^.!?\n]{0,100}\b(?:file|markdown|obsidian|vault)\b/i.test(
+      userText,
+    )
+  );
+}
+
 /**
  * Full note-intent check: text signals as in inferExplicitNoteIntent, plus
  * weaker phrasings accepted when a note is open or note text is selected.

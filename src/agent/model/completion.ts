@@ -2,7 +2,8 @@ import type { ModelTurnCompletion } from "../../shared/llm";
 
 export type AgentRecoverableCompletionReason =
   | "output_limit"
-  | "provider_pause";
+  | "provider_pause"
+  | "stream_interrupted";
 
 export function resolveAgentRecoverableCompletion(
   completion: ModelTurnCompletion,
@@ -39,6 +40,9 @@ export function buildAgentRecoveryInstruction(
   reason: AgentRecoverableCompletionReason,
   toolNoun: "tool call" | "function call",
 ): string {
+  if (reason === "stream_interrupted") {
+    return `The response stream was interrupted before this step completed. Its partial text and tool arguments were discarded and no tool call from that step executed. Resume from the preserved completed results, without repeating completed actions, and emit the next required ${toolNoun} with complete arguments.`;
+  }
   return reason === "output_limit"
     ? `The provider stopped at its output limit before completing this step. Continue without repeating completed analysis, and emit the next required ${toolNoun} only after all arguments are complete.`
     : `The provider paused this step. Resume from the preserved state without repeating completed analysis, and emit the next required ${toolNoun} only after all arguments are complete.`;

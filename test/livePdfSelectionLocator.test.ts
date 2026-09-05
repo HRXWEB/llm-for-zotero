@@ -18,6 +18,7 @@ import {
   scrollToSelectedTextInReader,
   verifyCompleteQuoteInLivePdfJs,
   verifyQuoteLocationForAttachment,
+  warmPageTextCache,
   warmPageTextCacheForAttachment,
   warmQuoteLocationCacheForAttachment,
   waitForFindControllerPageMatchesForTests,
@@ -955,6 +956,61 @@ describe("citation page cache warming", function () {
     }
   });
 
+  it("does not join another attachment's pending reader work just because its PDF bytes match", async function () {
+    const quote = "Stable readout persists across recording sessions.";
+    const restore = installPdfWorkerStub(async () => ({ text: quote }));
+    let releaseOldReader!: () => void;
+    const oldReaderWait = new Promise<void>((resolve) => {
+      releaseOldReader = resolve;
+    });
+    let reportOldRead!: () => void;
+    const oldReadStarted = new Promise<void>((resolve) => {
+      reportOldRead = resolve;
+    });
+    const reader = (itemID: number, paused: boolean) => ({
+      itemID,
+      _window: {
+        PDFViewerApplication: {
+          pdfDocument: {
+            numPages: 1,
+            fingerprints: ["same-pdf-different-attachment"],
+            getPage: async () => {
+              if (paused) {
+                reportOldRead();
+                await oldReaderWait;
+              }
+              return {
+                getTextContent: async () => ({ items: [{ str: quote }] }),
+              };
+            },
+          },
+          pdfViewer: { pageLabels: ["1"] },
+        },
+      },
+    });
+    let first: ReturnType<typeof warmPageTextCache> | undefined;
+    let second: ReturnType<typeof warmPageTextCache> | undefined;
+    try {
+      first = warmPageTextCache(reader(3098, true));
+      await oldReadStarted;
+      let resolved = false;
+      second = warmPageTextCache(reader(3099, false));
+      void second.then(() => {
+        resolved = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.isTrue(
+        resolved,
+        "the new attachment must not await a closed or suspended reader for another item",
+      );
+      assert.equal((await second)?.pages[0].text, quote);
+    } finally {
+      releaseOldReader();
+      await Promise.all([first, second]);
+      restore();
+    }
+  });
+
   it("dedupes repeated attachment warm calls while a PDFWorker read is pending", async function () {
     clearPageTextCache();
     let release!: () => void;
@@ -1026,6 +1082,72 @@ describe("citation page cache warming", function () {
       restore();
     }
   });
+
+  for (const entryPoint of ["attachment verification", "reader navigation"]) {
+    it(`promotes a paused background text task for foreground ${entryPoint}`, async function () {
+      clearPageTextCache();
+      const quote = "Stable readout persists across recording sessions.";
+      let calls = 0;
+      const restore = installPdfWorkerStub(async () => {
+        calls++;
+        return { text: quote, pageChars: [quote.length] };
+      });
+      const originalNow = Date.now;
+      let now = 1000;
+      Date.now = () => (now += 9);
+      let releaseIdle!: () => void;
+      const idle = new Promise<void>((resolve) => {
+        releaseIdle = resolve;
+      });
+      let reportYield!: () => void;
+      const yielded = new Promise<void>((resolve) => {
+        reportYield = resolve;
+      });
+      let background:
+        | ReturnType<typeof warmPageTextCacheForAttachment>
+        | undefined;
+      let foreground: Promise<unknown> | undefined;
+      try {
+        background = warmPageTextCacheForAttachment(7501, {
+          yieldToMain: async () => {
+            reportYield();
+            await idle;
+          },
+        });
+        await yielded;
+        // Real navigation preempts the idle validation task. It must not await
+        // that task's idle-only continuation: idle cannot resume until this click ends.
+        let resolved = false;
+        foreground =
+          entryPoint === "attachment verification"
+            ? verifyQuoteLocationForAttachment(7501, quote).then((result) => {
+                assert.equal(result.status, "resolved");
+              })
+            : warmPageTextCache({ itemID: 7501 }).then((result) => {
+                assert.equal(result?.pages[0].text, quote);
+              });
+        void foreground.then(() => {
+          resolved = true;
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.isTrue(
+          resolved,
+          "foreground verification must finish without releasing the background idle gate",
+        );
+        await foreground;
+        assert.equal(
+          calls,
+          1,
+          "promote the existing work rather than extract the same PDF twice",
+        );
+      } finally {
+        releaseIdle();
+        await Promise.all([background, foreground]);
+        Date.now = originalNow;
+        restore();
+      }
+    });
+  }
 
   it("evicts least-recently-used page-text entries beyond the entry limit", async function () {
     clearPageTextCache();

@@ -2555,16 +2555,18 @@ describe("primitive agent tools", function () {
     assert.exists(pending);
     assert.deepEqual(
       pending?.fields.map((field) => field.type),
-      ["diff_preview"],
+      ["textarea", "diff_preview"],
     );
     assert.equal(pending?.mode, "review");
-    const reviewField = pending?.fields[0] as Extract<
+    const reviewField = pending?.fields.find(
+      (field) => field.type === "diff_preview",
+    ) as Extract<
       NonNullable<typeof pending>["fields"][number],
       { type: "diff_preview" }
     >;
     assert.equal(reviewField.before, "Original body");
     assert.equal(reviewField.after, "Rewritten body");
-    assert.isUndefined(reviewField.sourceFieldId);
+    assert.equal(reviewField.sourceFieldId, "content");
 
     const confirmed = tool.applyConfirmation?.(
       validated.value,
@@ -2624,7 +2626,9 @@ describe("primitive agent tools", function () {
     if (!validated.ok) return;
 
     const pending = tool.createPendingAction?.(validated.value, baseContext);
-    const reviewField = pending?.fields[0] as Extract<
+    const reviewField = pending?.fields.find(
+      (field) => field.type === "diff_preview",
+    ) as Extract<
       NonNullable<typeof pending>["fields"][number],
       { type: "diff_preview" }
     >;
@@ -3704,7 +3708,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note normalizes HTML note content before review and save", async function () {
+  it("edit_current_note compares HTML as Markdown but preserves the approved HTML payload", async function () {
     const tool = createEditCurrentNoteTool({
       getActiveNoteSnapshot: () => ({
         noteId: 55,
@@ -3715,7 +3719,7 @@ describe("primitive agent tools", function () {
         noteKind: "standalone",
       }),
       replaceCurrentNote: async ({ content }: { content: string }) => {
-        assert.equal(content, "Approved *note*");
+        assert.equal(content, "<p>Approved <em>note</em></p>");
         return {
           noteId: 55,
           title: "",
@@ -3749,14 +3753,25 @@ describe("primitive agent tools", function () {
     });
     assert.exists(pending);
     assert.include(pending?.description || "", '"Untitled note"');
-    const diffField = pending?.fields[0] as Extract<
+    const diffField = pending?.fields.find(
+      (field) => field.type === "diff_preview",
+    ) as Extract<
       NonNullable<typeof pending>["fields"][number],
       { type: "diff_preview" }
     >;
     assert.equal(diffField.before, "");
     assert.equal(diffField.after, "# Summary\n\n**Key point**");
     assert.equal(diffField.emptyMessage, "No note changes yet.");
-    assert.lengthOf(pending?.fields || [], 1);
+    assert.lengthOf(pending?.fields || [], 2);
+    const contentField = pending?.fields.find(
+      (field) => field.type === "textarea",
+    );
+    assert.equal(
+      contentField?.value,
+      "<h1>Summary</h1><p><strong>Key point</strong></p>",
+    );
+    if (contentField?.type === "textarea")
+      assert.equal(contentField.contentFormat, "html");
 
     const confirmed = tool.applyConfirmation?.(
       validated.value,
@@ -3768,7 +3783,7 @@ describe("primitive agent tools", function () {
     );
     assert.isTrue(confirmed?.ok);
     if (!confirmed?.ok) return;
-    assert.equal(confirmed.value.content, "Approved *note*");
+    assert.equal(confirmed.value.content, "<p>Approved <em>note</em></p>");
 
     const result = (
       await tool.execute(confirmed.value, {
@@ -3776,7 +3791,10 @@ describe("primitive agent tools", function () {
         request: noteRequest,
       })
     ).content;
-    assert.equal((result as { noteText: string }).noteText, "Approved *note*");
+    assert.equal(
+      (result as { noteText: string }).noteText,
+      "<p>Approved <em>note</em></p>",
+    );
   });
 
   it("zotero_script refuses effects when durable authorization persistence is unavailable", async function () {

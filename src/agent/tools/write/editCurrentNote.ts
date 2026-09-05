@@ -8,6 +8,7 @@ import {
 import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
 import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
 import {
+  isLikelyHtmlNoteContent,
   normalizeNoteSourceText,
   stripNoteHtml,
   renderRawNoteHtml,
@@ -21,6 +22,7 @@ import {
   persistVerifiedNoteHtml,
 } from "../../../modules/contextPanel/notePersistence";
 import { escapeNoteHtml } from "../../../modules/contextPanel/textUtils";
+import { decodeNoteHtmlEntities } from "../../../utils/noteText";
 import {
   ok,
   fail,
@@ -29,8 +31,12 @@ import {
   normalizePositiveIntArray,
 } from "../shared";
 import { executeAndRecordUndo } from "./mutateLibraryShared";
+import { buildSavedNoteResultCards } from "./noteResultPresentation";
 
 type NotePatch = { find: string; replace: string };
+
+export const SOURCE_NOTE_COPY_GUIDANCE =
+  "To copy an existing note without revising its content, use mode:'create' with sourceNoteId and the requested target/collections instead of reconstructing its content. This preserves the native note, including formatting, original provenance and embedded images; do not generate a new header or perform a corrective edit.";
 
 /**
  * Sanitise HTML before writing to a Zotero note.  Strips dangerous
@@ -56,25 +62,21 @@ function sanitizeNoteHtml(html: string): string {
   return s;
 }
 
-/** Detect whether an HTML string contains inline `style=` attributes. */
-function htmlHasInlineStyles(html: string): boolean {
-  return /<[^>]+\bstyle\s*=/i.test(html);
-}
-
 type EditCurrentNoteInput = {
   mode: "edit" | "create" | "append";
   content: string;
+  sourceNoteId?: number;
+  _sourceOriginalHtml?: string;
   expectedOriginalHtml?: string;
+  _patches?: NotePatch[];
   /** Pre-patched HTML computed by applying patches directly to the original
    *  note HTML.  When set, `execute()` uses this instead of round-tripping
    *  through `renderRawNoteHtml` to preserve images, list numbering, etc. */
   _patchedHtml?: string;
-  /** True when the content is styled HTML that should bypass markdown
+  /** True when the content is HTML that should bypass markdown
    *  normalisation and be written directly via `setNote()`. */
   _isHtml?: boolean;
-  /** Raw HTML content from the LLM, kept until `createPendingAction` can
-   *  verify that the source note is actually a styled template (edit mode)
-   *  or accept it outright (create mode). */
+  /** Raw HTML retained until preparation sanitizes the final native payload. */
   _rawHtmlContent?: string;
   noteId?: number;
   noteTitle?: string;
@@ -124,46 +126,10 @@ function resolveEditSnapshot(
 }
 
 /**
- * Apply find-and-replace patches to a base text.
- * Each patch replaces the first occurrence of `find` with `replace`.
- * Returns the patched text.
- */
-function applyPatches(base: string, patches: NotePatch[]): string {
-  let result = base;
-  for (const patch of patches) {
-    const index = result.indexOf(patch.find);
-    if (index >= 0) {
-      result =
-        result.slice(0, index) +
-        patch.replace +
-        result.slice(index + patch.find.length);
-    }
-  }
-  return result;
-}
-
-/**
- * Render a replacement string as inline HTML.  Uses the full markdown
- * renderer but strips the outer `<p>` wrapper so the result can be
- * inserted into an existing HTML element.
- */
-function renderReplacementAsInlineHtml(text: string): string {
-  try {
-    const rendered = renderRawNoteHtml(text);
-    const match = rendered.match(/^<p>([\s\S]*)<\/p>\s*$/);
-    if (match) return match[1];
-    return escapeNoteHtml(text);
-  } catch {
-    return escapeNoteHtml(text);
-  }
-}
-
-/**
  * Find plain text content within HTML (skipping tags and decoding common
  * entities) and replace it, preserving surrounding HTML structure.
  *
- * Returns the patched HTML, or `null` when the text cannot be located
- * (caller should fall back to full-note replacement).
+ * Returns the patched HTML, or `null` when the text cannot be located.
  */
 function replaceTextContentInHtml(
   html: string,
@@ -172,101 +138,43 @@ function replaceTextContentInHtml(
 ): string | null {
   if (!find) return html;
 
-  // Strategy 1: Direct match (no entities or inline tags in the way)
-  const directIdx = html.indexOf(find);
-  if (directIdx >= 0) {
-    return (
-      html.slice(0, directIdx) +
-      escapeNoteHtml(replace) +
-      html.slice(directIdx + find.length)
-    );
-  }
-
-  // Strategy 2: Walk HTML character-by-character, building a text→HTML
-  // position map that handles tags and common HTML entities.
+  // Match only text tokens, never attributes. Keep the source markup intact
+  // rather than serializing a parsed document or replacing an HTML range that
+  // may contain just one side of an inline element.
   const textChars: string[] = [];
-  // For each text character, record the HTML start and end positions
-  // of the source token (a single char or an entity like &amp;).
   const htmlStarts: number[] = [];
   const htmlEnds: number[] = [];
-
-  let i = 0;
-  while (i < html.length) {
-    if (html[i] === "<") {
-      const tagEnd = html.indexOf(">", i);
-      if (tagEnd < 0) break;
-      i = tagEnd + 1;
+  const tokens =
+    /<!--[\s\S]*?(?:-->|$)|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>|<\/?[a-z][a-z\d:-]*\b(?:"[^"]*"|'[^']*'|[^'">])*\s*\/?\s*>|&(?:#x[0-9a-f]+|#\d+|[a-z]+);|[\s\S]/gi;
+  for (const match of html.matchAll(tokens)) {
+    const token = match[0];
+    if (token.length > 1 && token.startsWith("<")) {
       continue;
     }
-
-    if (html[i] === "&") {
-      const semiPos = html.indexOf(";", i);
-      if (semiPos > i && semiPos - i <= 10) {
-        const entity = html.slice(i, semiPos + 1);
-        let decoded: string;
-        switch (entity.toLowerCase()) {
-          case "&amp;":
-            decoded = "&";
-            break;
-          case "&lt;":
-            decoded = "<";
-            break;
-          case "&gt;":
-            decoded = ">";
-            break;
-          case "&nbsp;":
-            decoded = " ";
-            break;
-          case "&quot;":
-            decoded = '"';
-            break;
-          case "&apos;":
-          case "&#39;":
-            decoded = "'";
-            break;
-          default: {
-            const numMatch = entity.match(/^&#(\d+);$/);
-            if (numMatch) {
-              decoded = String.fromCodePoint(parseInt(numMatch[1], 10));
-            } else {
-              const hexMatch = entity.match(/^&#x([0-9a-fA-F]+);$/i);
-              decoded = hexMatch
-                ? String.fromCodePoint(parseInt(hexMatch[1], 16))
-                : entity;
-            }
-            break;
-          }
-        }
-        for (const ch of decoded) {
-          textChars.push(ch);
-          htmlStarts.push(i);
-          htmlEnds.push(semiPos + 1);
-        }
-        i = semiPos + 1;
-        continue;
-      }
+    const decoded = decodeNoteHtmlEntities(token);
+    // String.indexOf uses UTF-16 offsets, including both halves of an astral
+    // character. The mapping must use the same units.
+    for (let offset = 0; offset < decoded.length; offset++) {
+      textChars.push(decoded[offset]);
+      const isEntity = decoded !== token;
+      htmlStarts.push(match.index + (isEntity ? 0 : offset));
+      htmlEnds.push(match.index + (isEntity ? token.length : offset + 1));
     }
-
-    textChars.push(html[i]);
-    htmlStarts.push(i);
-    htmlEnds.push(i + 1);
-    i++;
   }
 
   const text = textChars.join("");
   const findIdx = text.indexOf(find);
   if (findIdx < 0) return null;
 
-  const findEndIdx = findIdx + find.length;
-  const htmlStart = htmlStarts[findIdx];
-  const htmlEnd =
-    findEndIdx <= htmlEnds.length ? htmlEnds[findEndIdx - 1] : html.length;
-
-  return (
-    html.slice(0, htmlStart) +
-    renderReplacementAsInlineHtml(replace) +
-    html.slice(htmlEnd)
-  );
+  const parts = [html.slice(0, htmlStarts[findIdx]), escapeNoteHtml(replace)];
+  let cursor = htmlEnds[findIdx];
+  for (let offset = findIdx + 1; offset < findIdx + find.length; offset++) {
+    if (htmlStarts[offset] >= cursor)
+      parts.push(html.slice(cursor, htmlStarts[offset]));
+    cursor = Math.max(cursor, htmlEnds[offset]);
+  }
+  parts.push(html.slice(cursor));
+  return parts.join("");
 }
 
 /**
@@ -274,9 +182,8 @@ function replaceTextContentInHtml(
  * preserving images, list structure, and other formatting in blocks that
  * are not being edited.
  *
- * Returns the patched HTML, or `null` if any patch cannot be located
- * (the caller should fall back to full-note replacement via
- * `renderRawNoteHtml`).
+ * Returns the patched HTML, or `null` if any patch cannot be located.
+ * A missing match must stop the write, never rewrite the whole note.
  */
 function applyPatchesToNoteHtml(
   html: string,
@@ -413,6 +320,75 @@ function resolveAppendNoteTarget(
   );
 }
 
+/** Finalize the payload before authorization, whether or not a card is shown.
+ * Keep the original snapshot on subsequent calls so approval/execution cannot
+ * silently rebase an already prepared edit onto a concurrently changed note. */
+function prepareNoteWriteInput(
+  zoteroGateway: ZoteroGateway,
+  input: EditCurrentNoteInput,
+  context: AgentToolContext,
+): void {
+  if (input.sourceNoteId) {
+    const source = getNoteItemById(zoteroGateway, input.sourceNoteId);
+    if (!source || source.deleted) {
+      throw new Error("The source note is no longer available.");
+    }
+    if (source.libraryID !== context.request.libraryID) {
+      throw new Error("The source note must belong to the current library.");
+    }
+    const html = source.getNote();
+    if (
+      input._sourceOriginalHtml !== undefined &&
+      input._sourceOriginalHtml !== html
+    ) {
+      throw new Error(
+        "The source note changed before copying. Read it again before retrying.",
+      );
+    }
+    input._sourceOriginalHtml = html;
+    input._isHtml = true;
+    input.content = sanitizeNoteHtml(html);
+  }
+  resolveCreateOrAppendContent(input);
+  if (input.mode === "create" || input.expectedOriginalHtml !== undefined)
+    return;
+  const snapshot =
+    input.mode === "append"
+      ? readNoteSnapshot(resolveAppendNoteTarget(zoteroGateway, input, context))
+      : resolveEditSnapshot(zoteroGateway, input, context);
+  if (!snapshot) {
+    throw new Error(
+      input.targetNoteId
+        ? `Note ${input.targetNoteId} was not found, or is not a note.`
+        : "No active note is available to edit. Pass targetNoteId to edit a specific note, or use mode 'create' to write a new note.",
+    );
+  }
+  if (input.mode === "edit") {
+    if (input._patches) {
+      const patchedHtml = applyPatchesToNoteHtml(snapshot.html, input._patches);
+      if (patchedHtml === null) {
+        throw new Error(
+          "Note patch text was not found. No content was changed; read the current note before retrying.",
+        );
+      }
+      input._patchedHtml = patchedHtml;
+      input.content = normalizeNoteSourceText(patchedHtml);
+      delete input._patches;
+    }
+    if (input._rawHtmlContent) {
+      input._isHtml = true;
+      input.content = sanitizeNoteHtml(input._rawHtmlContent);
+    }
+    delete input._rawHtmlContent;
+    input.content = input._isHtml
+      ? input.content
+      : normalizeNoteSourceText(input.content);
+  }
+  input.expectedOriginalHtml = snapshot.html;
+  input.noteId = snapshot.noteId;
+  input.noteTitle = snapshot.title || "Untitled note";
+}
+
 export function createEditCurrentNoteTool(
   zoteroGateway: ZoteroGateway,
 ): AgentWriteToolDefinition<EditCurrentNoteInput, unknown> {
@@ -435,7 +411,11 @@ export function createEditCurrentNoteTool(
           targetItemId: input.targetItemId,
           targetNoteId: input.targetNoteId || input.noteId,
           expectedText: input.content
-            ? stripNoteHtml(renderRawNoteHtml(input.content))
+            ? stripNoteHtml(
+                input._isHtml
+                  ? sanitizeNoteHtml(input.content)
+                  : input._patchedHtml || renderRawNoteHtml(input.content),
+              )
             : undefined,
         },
         requestedTargets: [
@@ -465,7 +445,12 @@ export function createEditCurrentNoteTool(
           content: {
             type: "string",
             description:
-              "The full note body as plain text or Markdown. Use this OR patches, not both. Required for mode 'create'.",
+              "The full note body as plain text or Markdown. Use this OR patches OR sourceNoteId, not more than one. Required for a newly authored note.",
+          },
+          sourceNoteId: {
+            type: "number",
+            description:
+              "For mode 'create' only: copy this existing note's complete native content and embedded images. Use instead of content when making a standalone/child copy, preserving formatting and provenance without generating a second header.",
           },
           patches: {
             type: "array",
@@ -523,6 +508,9 @@ export function createEditCurrentNoteTool(
         "When the user asks to append/add content to an existing note, call `edit_current_note` with mode 'append' and `content`; pass `targetNoteId` when the destination note is known. " +
         "When the user asks to create/write/save a new item note, call `edit_current_note` with mode 'create', target 'item', and `content`; create means a brand-new child note, not appending to the response-save note. " +
         "For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
+        SOURCE_NOTE_COPY_GUIDANCE +
+        " " +
+        "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Existing-note edits follow the current permission mode. " +
         "Pass Markdown by default. When the user explicitly requests HTML output (e.g. for styled note templates), pass well-formed HTML with inline styles directly. " +
         "When the note discusses a specific figure, first use `paper_read({ mode:'figures' })` and embed the extracted PDF crop path: `![Figure N](file:///{path})` — auto-imported as a Zotero attachment. " +
         "Treat paper_read mode:'figures' as the authority for figure crop cache reuse/regeneration; use returned crop paths as-is and do not inspect or validate `figure_crops` metadata before writing. " +
@@ -534,6 +522,8 @@ export function createEditCurrentNoteTool(
     },
     presentation: {
       label: "Edit / Create / Append Note",
+      buildResultCards: (content) =>
+        buildSavedNoteResultCards(zoteroGateway, content),
       summaries: {
         onCall: "Preparing note changes",
         onPending: "Waiting for confirmation on note edit",
@@ -575,9 +565,18 @@ export function createEditCurrentNoteTool(
       const hasPatches = Array.isArray(args.patches) && args.patches.length > 0;
       const hasContent =
         typeof args.content === "string" && args.content.trim();
+      const sourceNoteId = normalizePositiveInt(args.sourceNoteId);
+      if (
+        args.sourceNoteId !== undefined &&
+        (!sourceNoteId || mode !== "create" || hasContent || hasPatches)
+      ) {
+        return fail(
+          "sourceNoteId requires mode 'create' and cannot be combined with content or patches",
+        );
+      }
 
       if (mode === "create" || mode === "append") {
-        if (!hasContent) {
+        if (!hasContent && !sourceNoteId) {
           return fail(
             `content is required for mode '${mode}': provide the note body as a string`,
           );
@@ -613,21 +612,21 @@ export function createEditCurrentNoteTool(
           ? ("standalone" as const)
           : ("item" as const);
 
-      // For patches mode, content will be resolved in createPendingAction
-      // using the current note snapshot + patches
+      // Patches are resolved against a native snapshot before authorization.
       const rawContent = hasContent ? (args.content as string) : "";
-      // Always normalise content.  If the LLM produced styled HTML, keep the
-      // raw version aside — createPendingAction will decide whether to use it
-      // based on whether the *source* note is a styled template (edit mode)
-      // or accept it outright (create mode).
-      const contentHasStyledHtml =
-        hasContent && htmlHasInlineStyles(rawContent);
+      // Preserve the supplied format independently of the previous note's
+      // styling. Preparation binds one sanitized payload before authorization.
+      const contentHasHtml =
+        hasContent &&
+        rawContent.trimStart().startsWith("<") &&
+        isLikelyHtmlNoteContent(rawContent);
       const content = hasContent ? normalizeNoteSourceText(rawContent) : "";
 
-      return ok<EditCurrentNoteInput & { _patches?: NotePatch[] }>({
+      return ok<EditCurrentNoteInput>({
         mode,
         content,
-        _rawHtmlContent: contentHasStyledHtml ? rawContent.trim() : undefined,
+        sourceNoteId,
+        _rawHtmlContent: contentHasHtml ? rawContent.trim() : undefined,
         _patches: patches,
         target: mode === "create" ? target : undefined,
         targetItemId:
@@ -650,35 +649,7 @@ export function createEditCurrentNoteTool(
       } as EditCurrentNoteInput);
     },
     createPendingAction: (input, context) => {
-      // Resolve patches into full content if needed
-      const inputExt = input as EditCurrentNoteInput & {
-        _patches?: NotePatch[];
-      };
-      if (inputExt._patches && input.mode === "edit") {
-        const snapshot = resolveEditSnapshot(zoteroGateway, input, context);
-        if (!snapshot) {
-          throw new Error(
-            "No active note is available to edit. Use mode 'create' with target 'item' when the user asks to write or save a new paper note.",
-          );
-        }
-        // Apply patches to the plain text representation for the diff preview.
-        const patched = applyPatches(snapshot.text, inputExt._patches);
-        input.content = normalizeNoteSourceText(patched);
-
-        // Also apply patches directly to the original HTML so that images,
-        // list numbering, and other structure are preserved when executing.
-        const patchedHtml = applyPatchesToNoteHtml(
-          snapshot.html,
-          inputExt._patches,
-        );
-        if (patchedHtml) {
-          input._patchedHtml = patchedHtml;
-        }
-        delete inputExt._patches;
-      }
-
-      // Resolve styled create/append input on both reviewed and direct paths.
-      resolveCreateOrAppendContent(input);
+      prepareNoteWriteInput(zoteroGateway, input, context);
 
       const normalizedContent = input._isHtml
         ? input.content
@@ -722,6 +693,7 @@ export function createEditCurrentNoteTool(
               id: "content",
               label: "Final note content",
               value: normalizedContent,
+              contentFormat: input._isHtml ? "html" : "markdown",
             },
           ],
         };
@@ -737,9 +709,6 @@ export function createEditCurrentNoteTool(
         if (!snapshot) {
           throw new Error("Could not read the target note");
         }
-        input.expectedOriginalHtml = snapshot.html;
-        input.noteId = snapshot.noteId;
-        input.noteTitle = snapshot.title || "Untitled note";
 
         const appendText = input._isHtml
           ? normalizeNoteSourceText(input.content)
@@ -754,11 +723,21 @@ export function createEditCurrentNoteTool(
           cancelLabel: "Cancel",
           fields: [
             {
+              type: "textarea",
+              id: "content",
+              label: "Content to append",
+              value: input.content,
+              contentFormat: input._isHtml ? "html" : "markdown",
+            },
+            {
               type: "diff_preview",
               id: "noteDiff",
               label: "Note changes",
-              before: snapshot.text,
-              after: buildAppendedNoteText(snapshot.text, appendText),
+              before: normalizeNoteSourceText(snapshot.html),
+              after: buildAppendedNoteText(
+                normalizeNoteSourceText(snapshot.html),
+                appendText,
+              ),
               contextLines: 0,
               emptyMessage: "No note changes yet.",
             },
@@ -775,18 +754,6 @@ export function createEditCurrentNoteTool(
         );
       }
 
-      // --- Resolve _isHtml for edit mode: only activate when the source
-      //     note itself is a styled template (has inline style= attributes). ---
-      if (input._rawHtmlContent && htmlHasInlineStyles(snapshot.html)) {
-        input._isHtml = true;
-        input.content = sanitizeNoteHtml(input._rawHtmlContent);
-      }
-      delete input._rawHtmlContent;
-
-      input.expectedOriginalHtml = snapshot.html;
-      input.noteId = snapshot.noteId;
-      input.noteTitle = snapshot.title || "Untitled note";
-
       // Diff preview always uses readable text, even for styled HTML notes
       const diffAfter = input._isHtml
         ? normalizeNoteSourceText(input.content)
@@ -801,10 +768,18 @@ export function createEditCurrentNoteTool(
         cancelLabel: "Cancel",
         fields: [
           {
+            type: "textarea",
+            id: "content",
+            label: "Final note content",
+            value: input.content,
+            contentFormat: input._isHtml ? "html" : "markdown",
+          },
+          {
             type: "diff_preview",
             id: "noteDiff",
             label: "Note changes",
-            before: snapshot.text,
+            sourceFieldId: "content",
+            before: normalizeNoteSourceText(snapshot.html),
             after: diffAfter,
             contextLines: 0,
             emptyMessage: "No note changes yet.",
@@ -832,10 +807,15 @@ export function createEditCurrentNoteTool(
         _patchedHtml: patchedHtml,
       });
     },
-    planInvocation(input) {
+    planInvocation(input, context) {
+      prepareNoteWriteInput(zoteroGateway, input, context);
       const hasLocalImages =
         /!\[[^\]]*\]\(file:\/\/|<img\s+[^>]*src\s*=\s*"file:\/\//i.test(
           input.content,
+        ) ||
+        Boolean(
+          input.sourceNoteId &&
+          /\bdata-attachment-key\s*=/i.test(input.content),
         );
       return stateChangeInvocationPlan({
         effects: [input.mode === "create" ? "create" : "modify"],
@@ -846,7 +826,10 @@ export function createEditCurrentNoteTool(
       });
     },
     execute: async (input, context) => {
-      resolveCreateOrAppendContent(input);
+      prepareNoteWriteInput(zoteroGateway, input, context);
+      const copyHasImages = Boolean(
+        input.sourceNoteId && /\bdata-attachment-key\s*=/i.test(input.content),
+      );
       const hasLocalImages =
         /!\[[^\]]*\]\(file:\/\/|<img\s+[^>]*src\s*=\s*"file:\/\//i.test(
           input.content,
@@ -994,26 +977,37 @@ export function createEditCurrentNoteTool(
             const persisted = await createFinalizedZoteroNote({
               note,
               initialHtml,
-              finalize: hasLocalImages
-                ? async ({ noteId, saveOptions }) => {
-                    const finalContent = await importLocalImagesIntoNote(
-                      input.content,
-                      noteId,
+              finalize: copyHasImages
+                ? async () => {
+                    const source = getNoteItemById(
                       zoteroGateway,
-                      saveOptions,
-                    );
-                    const html = input._isHtml
-                      ? sanitizeNoteHtml(finalContent)
-                      : renderRawNoteHtml(finalContent);
-                    const warnings =
-                      /(?:src\s*=\s*["']file:|!\[[^\]]*\]\(file:)/i.test(
-                        finalContent,
-                      )
-                        ? ["One or more local images could not be embedded"]
-                        : [];
-                    return { html, warnings };
+                      input.sourceNoteId,
+                    )!;
+                    await Zotero.DB.executeTransaction(async () => {
+                      await Zotero.Notes.copyEmbeddedImages(source, note);
+                    });
+                    return note.getNote();
                   }
-                : undefined,
+                : hasLocalImages
+                  ? async ({ noteId, saveOptions }) => {
+                      const finalContent = await importLocalImagesIntoNote(
+                        input.content,
+                        noteId,
+                        zoteroGateway,
+                        saveOptions,
+                      );
+                      const html = input._isHtml
+                        ? sanitizeNoteHtml(finalContent)
+                        : renderRawNoteHtml(finalContent);
+                      const warnings =
+                        /(?:src\s*=\s*["']file:|!\[[^\]]*\]\(file:)/i.test(
+                          finalContent,
+                        )
+                          ? ["One or more local images could not be embedded"]
+                          : [];
+                      return { html, warnings };
+                    }
+                  : undefined,
               log: (message, error) => {
                 Zotero.debug?.(
                   `[llm-for-zotero] ${message}: ${
@@ -1060,12 +1054,14 @@ export function createEditCurrentNoteTool(
                 htmlChecksum: await sha256Text(note.getNote?.() || ""),
                 collections: filedCollections,
               },
-              reversibility: hasLocalImages
-                ? ("partial" as const)
-                : ("full" as const),
-              reason: hasLocalImages
-                ? "The note itself is recoverable; embedded attachment creation is covered by Zotero's note trash cascade."
-                : undefined,
+              reversibility:
+                hasLocalImages || copyHasImages
+                  ? ("partial" as const)
+                  : ("full" as const),
+              reason:
+                hasLocalImages || copyHasImages
+                  ? "The note itself is recoverable; embedded attachment creation is covered by Zotero's note trash cascade."
+                  : undefined,
               affectedCount: 1,
               effect: "applied",
             };

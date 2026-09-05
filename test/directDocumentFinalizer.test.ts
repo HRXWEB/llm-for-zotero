@@ -7,6 +7,7 @@ import type {
 import type { TrustedReadObservation } from "../src/agent/plans/types";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type { AgentRuntimeRequest } from "../src/agent/types";
+import { clearPageTextCache } from "../src/modules/contextPanel/livePdfSelectionLocator";
 
 const observation: TrustedReadObservation = {
   version: 1,
@@ -93,16 +94,19 @@ async function expectRejected(
 
 describe("DirectDocumentFinalizer", function () {
   let originalZotero: unknown;
+  let originalZtoolkit: unknown;
   let finalizer: DirectDocumentFinalizer;
   const queries: Array<{ sql: string; params: unknown[] }> = [];
 
   before(function () {
     originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown })
       .Zotero;
+    originalZtoolkit = (globalThis as any).ztoolkit;
   });
 
   beforeEach(function () {
     queries.length = 0;
+    (globalThis as any).ztoolkit = { log: () => undefined };
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
@@ -157,7 +161,209 @@ describe("DirectDocumentFinalizer", function () {
   after(function () {
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
       originalZotero;
+    (globalThis as any).ztoolkit = originalZtoolkit;
   });
+
+  for (const { integrityPolicy, pageLocated } of (
+    ["authored", "research_grounded"] as const
+  ).flatMap((integrityPolicy) =>
+    [true, false].map((pageLocated) => ({ integrityPolicy, pageLocated })),
+  )) {
+    it(`verifies direct ${integrityPolicy} quotes from ${pageLocated ? "page-located" : "whole-paper extracted"} text using the live PDF and persists their certificates`, async function () {
+      clearPageTextCache();
+      const quote = "Stable readout can coexist with representational drift.";
+      const originalLookup = Zotero.Items.getByLibraryAndKey;
+      (Zotero.Items as any).getByLibraryAndKey = (
+        libraryID: number,
+        key: string,
+      ) =>
+        key === "PDF11111" && libraryID === 1
+          ? { id: 102, parentID: 101, isAttachment: () => true }
+          : originalLookup(libraryID, key);
+      (Zotero as any).Reader = {
+        _readers: [
+          {
+            itemID: 102,
+            _window: {
+              PDFViewerApplication: {
+                pdfDocument: {
+                  numPages: 1,
+                  fingerprints: ["direct-quote-fingerprint"],
+                  getPage: async () => ({
+                    getTextContent: async () => ({ items: [{ str: quote }] }),
+                  }),
+                },
+              },
+            },
+          },
+        ],
+      };
+      const observed = {
+        ...observation,
+        attachmentItemKey: "PDF11111",
+        pageIndex: pageLocated ? 0 : undefined,
+        sourceFingerprint: pageLocated
+          ? "pdfjs:direct-quote-fingerprint"
+          : undefined,
+      };
+      const policy: DocumentOutcomePolicy = {
+        required: true,
+        documentKind: "custom",
+        integrityPolicy,
+        trigger: "document_intent",
+      };
+      const draft = {
+        ...input({
+          markdown:
+            "# Finding\n\n[[quote:Q1]]\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.",
+          citations: [groundedCitation],
+        }),
+        quotes: [
+          {
+            quoteId: "Q1",
+            text: quote,
+            libraryID: 1,
+            itemKey: "AAAA1111",
+            attachmentItemKey: "PDF11111",
+            evidenceRefs: [observed.observationId],
+          },
+        ],
+      };
+      const result = await finalizer.finalize({
+        request: request(policy, [observed]),
+        runId: `direct-quote-${integrityPolicy}`,
+        input: draft,
+      });
+      assert.include(result.document.visibleMarkdown, `> ${quote}`);
+      assert.notInclude(result.document.visibleMarkdown, "[[quote:");
+      assert.equal(result.document.validation.quoteVerified, "verified");
+      assert.lengthOf(result.document.verifiedQuotes, 1);
+      assert.equal(result.document.verifiedQuotes[0].certificate.pageIndex, 0);
+      assert.equal(
+        result.document.verifiedQuotes[0].certificate.sourceFingerprint,
+        "pdfjs:direct-quote-fingerprint",
+      );
+      assert.isTrue(
+        queries.some(({ params }) =>
+          params.some(
+            (param) =>
+              typeof param === "string" &&
+              param.includes('"verifiedQuotes":[{"quoteId":"Q1"'),
+          ),
+        ),
+        "the quote certificate is persisted, not only returned",
+      );
+      const duplicate = await finalizer.finalize({
+        request: request(policy, [observed]),
+        runId: `adjacent-manual-quote-${integrityPolicy}`,
+        input: {
+          ...draft,
+          markdown: `# Finding\n\n> ${quote}\n\n(Fixture, 2024) [[quote:Q1]] [[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+        },
+      });
+      assert.equal(
+        duplicate.document.visibleMarkdown.split(`> ${quote}`).length - 1,
+        1,
+        "a literal quote with its adjacent verified anchor is published once",
+      );
+      assert.notInclude(
+        duplicate.document.visibleMarkdown,
+        "(Fixture, 2024) >",
+      );
+      const inlineAnchor = await finalizer.finalize({
+        request: request(policy, [observed]),
+        runId: `inline-manual-quote-${integrityPolicy}`,
+        input: {
+          ...draft,
+          markdown: `# Finding\n\n> ${quote} [[quote:Q1]]\n\n(Fixture, 2024)\n\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+        },
+      });
+      assert.equal(
+        inlineAnchor.document.visibleMarkdown.split(quote).length - 1,
+        1,
+        "a verified anchor inside its literal block must not expand a second copy",
+      );
+      const attributedInlineAnchor = await finalizer.finalize({
+        request: request(policy, [observed]),
+        runId: `attributed-inline-quote-${integrityPolicy}`,
+        input: {
+          ...draft,
+          markdown: `# Finding\n\n> ${quote} [[quote:Q1]]\n>\n> (Fixture, 2024)\n\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+        },
+      });
+      assert.equal(
+        attributedInlineAnchor.document.visibleMarkdown.split(quote).length - 1,
+        1,
+        "a trailing attribution inside the same block is not a second quotation",
+      );
+      for (const [name, markdown, expectedCount] of [
+        [
+          "separate occurrence",
+          `> ${quote}\n\nA separate discussion follows.\n\n[[quote:Q1]] [[cite:C1]]`,
+          2,
+        ],
+        [
+          "unrelated manual quote",
+          "> An interpretation not stated by the paper.\n\n[[quote:Q1]] [[cite:C1]]",
+          1,
+        ],
+      ] as const) {
+        const separate = await finalizer.finalize({
+          request: request(policy, [observed]),
+          runId: `preserve-${name}-${integrityPolicy}`,
+          input: {
+            ...draft,
+            markdown: `# Finding\n\n${markdown}\n\n## Scope and limitations\n\nOne paper, one page.`,
+          },
+        });
+        assert.equal(
+          separate.document.visibleMarkdown.split(`> ${quote}`).length - 1,
+          expectedCount,
+          name,
+        );
+        if (name === "unrelated manual quote")
+          assert.include(
+            separate.document.visibleMarkdown,
+            "> An interpretation not stated by the paper.",
+          );
+      }
+      const countWrites = () =>
+        queries.filter(({ sql }) => /^\s*(INSERT|UPDATE|DELETE)/i.test(sql))
+          .length;
+      const savedCount = countWrites();
+      await expectRejected(
+        finalizer.finalize({
+          request: request(policy, [observed]),
+          runId: "fabricated-quote",
+          input: {
+            ...draft,
+            quotes: [
+              {
+                ...draft.quotes[0],
+                text: "The study proves causation in every biological brain.",
+              },
+            ],
+          },
+        }),
+        /failed strict PDF.js verification/,
+      );
+      await expectRejected(
+        finalizer.finalize({
+          request: request(policy, [{ ...observed, pageIndex: 1 }]),
+          runId: "wrong-page-quote",
+          input: draft,
+          // An otherwise valid quotation cannot borrow evidence from another page.
+        }),
+        /not backed by trusted evidence on its verified PDF page/,
+      );
+      assert.equal(
+        countWrites(),
+        savedCount,
+        "rejected quotes are not published",
+      );
+      clearPageTextCache();
+    });
+  }
 
   it("rejects literature reviews without verified research evidence", async function () {
     const policy: DocumentOutcomePolicy = {
@@ -267,6 +473,26 @@ describe("DirectDocumentFinalizer", function () {
       }),
       /not emitted by a successful host tool call/,
     );
+  });
+
+  it("does not silently publish a broken relative figure after the asset submission fails", async function () {
+    await expectRejected(
+      finalizer.finalize({
+        request: request({
+          required: true,
+          documentKind: "report",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        }),
+        runId: "run-missing-figure",
+        input: input({
+          markdown:
+            "# Summary\n\n![Actual cropped figure](assets/figure-1-p3.png)\n\nFigure 1, PDF page 3.",
+        }),
+      }),
+      /figures.*assets|assets.*figures/i,
+    );
+    assert.isFalse(queries.some(({ sql }) => /INSERT INTO/.test(sql)));
   });
 
   it("persists a validated research-grounded document with generated references", async function () {

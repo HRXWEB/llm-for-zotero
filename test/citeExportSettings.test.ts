@@ -240,7 +240,13 @@ describe("citations, export and settings", function () {
     it("navigates an inline Plan citation through Zotero's library pane", async function () {
       let selected: number[] = [];
       let selectedTab = "";
+      let focused = 0;
       install({
+        getMainWindow: () => ({
+          focus: () => {
+            focused++;
+          },
+        }),
         Items: {
           getByLibraryAndKey: (libraryID: number, itemKey: string) =>
             libraryID === 1 && itemKey === "ITEMKEY" ? { id: 42 } : null,
@@ -266,6 +272,15 @@ describe("citations, export and settings", function () {
       assert.isTrue(opened);
       assert.equal(selectedTab, "zotero-pane");
       assert.deepEqual(selected, [42]);
+      assert.equal(focused, 1);
+      assert.isFalse(
+        await navigatePlanDocumentCitationSource({
+          libraryID: 1,
+          itemKey: "MISSING",
+          evidenceRefs: [],
+        }),
+      );
+      assert.equal(focused, 1, "failed navigation does not move focus");
     });
   });
 

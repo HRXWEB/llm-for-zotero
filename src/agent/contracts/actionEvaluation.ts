@@ -294,7 +294,10 @@ export function evaluateActionContract(
     if (matching.some((receipt) => receipt.status === "failed")) {
       failed.push(obligation);
     }
-    if (obligation.targetBoundary && obligation.scopeRole !== "destination") {
+    if (
+      obligation.targetBoundary &&
+      (obligation.scopeRole !== "destination" || obligation.destinationCreation)
+    ) {
       const covered = new Set(
         verified.flatMap((receipt) => [
           ...receipt.appliedTargets,

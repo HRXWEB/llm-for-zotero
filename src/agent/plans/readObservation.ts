@@ -183,6 +183,11 @@ function observationSeeds(
   const mayUseAggregatePayload = direct.length === 0 && sources.length === 1;
   if (toolName === "paper_read") {
     const mode = String(args.mode || output.mode || "overview");
+    if (mode === "figures" && Array.isArray(output.figures)) {
+      return seedRows(output.figures, (row) =>
+        hasText(row, ["cropPath"]) ? ["figure"] : [],
+      );
+    }
     const aggregateHasAbstract = hasText(output, ["abstract", "abstractNote"]);
     const aggregateHasBody =
       hasText(output, ["content", "text", "body", "fullText"]) ||

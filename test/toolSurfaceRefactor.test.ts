@@ -169,6 +169,45 @@ describe("semantic tool surface", function () {
     return schema.properties || {};
   }
 
+  it("normalizes a uniform exact tag replacement to the canonical per-item assignments", function () {
+    const tool = createTestBuiltInRegistry().getTool("library_update")!;
+    const result = tool.validate({
+      kind: "tags",
+      action: "set",
+      itemIds: [41, 42],
+      tags: ["coding", "drift"],
+    });
+    assert.isTrue(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(result.value.delegateInput.operation, {
+      type: "set_item_tags",
+      assignments: [
+        { itemId: 41, tags: ["coding", "drift"] },
+        { itemId: 42, tags: ["coding", "drift"] },
+      ],
+    });
+  });
+
+  it("rejects conflicting tag-assignment forms and invalid members rather than silently dropping targets", function () {
+    const tool = createTestBuiltInRegistry().getTool("library_update")!;
+    for (const input of [
+      {
+        itemIds: [41, 42],
+        tags: ["coding"],
+        assignments: [{ itemId: 41, tags: ["different"] }],
+      },
+      {
+        assignments: [
+          { itemId: 41, tags: ["coding"] },
+          { itemId: 0, tags: ["coding"] },
+        ],
+      },
+    ])
+      assert.isFalse(
+        tool.validate({ kind: "tags", action: "set", ...input }).ok,
+      );
+  });
+
   it("keeps internal delegate tools out of model-visible listings", function () {
     const registry = new AgentToolRegistry();
     registry.register({
@@ -227,6 +266,7 @@ describe("semantic tool surface", function () {
       "library_search",
       "library_settings",
       "library_update",
+      "literature_review",
       "literature_search",
       "note_write",
       "note_write_batch",
@@ -619,6 +659,23 @@ describe("semantic tool surface", function () {
       pages: [1],
     });
     assert.equal(visualPaperTarget.ok, true);
+  });
+
+  it("paper_read names invalid metadata fields so a failed batch can be corrected", function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const parsed = tool.validate({
+      mode: "overview",
+      targets: [{ itemId: 3603, contextItemId: 3604, title: "A known paper" }],
+    });
+    assert.isFalse(parsed.ok);
+    if (parsed.ok) return;
+    assert.include(parsed.error, "title");
+    assert.include(parsed.error, "paperContext, itemId, contextItemId");
   });
 
   it("paper_read advertises non-empty target shapes without root composition", function () {

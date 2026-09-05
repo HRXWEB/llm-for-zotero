@@ -22,9 +22,11 @@ import {
 import {
   listCurrentLibraryTargetIds,
   listScopeTargetIds,
+  resolveCreatedDestinations,
   resolveScope,
 } from "./actionScope";
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
+import { isLocalPathInsideOrEqual } from "../../utils/notesDirectoryConfig";
 import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
 import {
@@ -112,10 +114,38 @@ function matchingObligations(
 ): AgentActionObligation[] {
   return contract.obligations.filter(
     (obligation) =>
+      !obligation.destinationCreation &&
       obligation.operation === proposal.operation &&
       obligation.proofDomain === proposal.proofDomain &&
       parametersMatch(obligation.parameters, proposal.parameters),
   );
+}
+
+function isRequestedFilePreparation(
+  contract: AgentActionContract,
+  proposal: AgentActionProposal,
+): boolean {
+  if (
+    proposal.operation !== "command_execute" ||
+    proposal.source !== "command" ||
+    !proposal.parameters?.filePaths?.length
+  )
+    return false;
+  return contract.obligations.some((obligation) => {
+    const filePath =
+      obligation.operation === "file_write"
+        ? obligation.parameters?.filePath
+        : undefined;
+    if (!filePath) return false;
+    const directory = filePath.replace(/[\\/][^\\/]+$/, "");
+    return (
+      directory !== filePath &&
+      directory.length > 1 &&
+      proposal.parameters!.filePaths!.every((target) =>
+        isLocalPathInsideOrEqual(target, directory),
+      )
+    );
+  });
 }
 
 function obligationStatus(
@@ -358,9 +388,30 @@ export class ActionContractService {
       );
     }
     const contractId = createContractId(request);
+    const collectionCreations = new Map<number, AgentActionObligation[]>();
+    for (const [index, intent] of intents.entries()) {
+      if (intent.operation !== "create_collection") continue;
+      collectionCreations.set(
+        index,
+        (await resolveScope(this.gateway, request, intent)).map(
+          (obligation, offset) => ({
+            ...obligation,
+            id: `${contractId}:creation:${index}:${offset}`,
+          }),
+        ),
+      );
+    }
     const resolved: AgentActionObligation[] = [];
-    for (const intent of intents) {
-      resolved.push(...(await resolveScope(this.gateway, request, intent)));
+    for (const [index, intent] of intents.entries()) {
+      resolved.push(
+        ...(collectionCreations.get(index) ||
+          (await resolveScope(
+            this.gateway,
+            request,
+            intent,
+            [...collectionCreations.values()].flat(),
+          ))),
+      );
     }
     return {
       version: 3,
@@ -372,7 +423,9 @@ export class ActionContractService {
         "deterministic_fallback",
       obligations: resolved.map((obligation, index) => ({
         ...obligation,
-        id: `${contractId}:obligation:${index}`,
+        id: obligation.id.startsWith(`${contractId}:creation:`)
+          ? obligation.id
+          : `${contractId}:obligation:${index}`,
       })),
     };
   }
@@ -388,7 +441,9 @@ export class ActionContractService {
         status: "open",
         verifiedTargetIds: [],
         unresolvedTargetIds:
-          obligation.targetBoundary && obligation.scopeRole !== "destination"
+          obligation.targetBoundary &&
+          (obligation.scopeRole !== "destination" ||
+            obligation.destinationCreation)
             ? obligation.targetBoundary.frozenTargetIds.map(itemTarget)
             : [],
         journalStepIds: [],
@@ -476,6 +531,11 @@ export class ActionContractService {
     } = {},
   ): Promise<ScopeValidationFailure | null> {
     if (!contract) return null;
+    contract = resolveCreatedDestinations(
+      this.gateway,
+      contract,
+      options.progress,
+    );
     if (
       prepared.executionClass === "external_effect" &&
       !prepared.proposals.length &&
@@ -499,6 +559,9 @@ export class ActionContractService {
     }
 
     for (const proposal of prepared.proposals) {
+      // Preparation may support an export, but its execution receipt cannot
+      // satisfy the independent file readback obligation.
+      if (isRequestedFilePreparation(contract, proposal)) continue;
       const matches = matchingObligations(contract, proposal);
       if (!matches.length) {
         return failure(
@@ -685,8 +748,20 @@ export class ActionContractService {
       for (const obligation of openMatches.filter(
         (entry) => !isSourceCollectionItemObligation(entry),
       )) {
-        if (!obligation.targetBoundary) continue;
         const scope = obligation.scope;
+        if (obligation.scopeRole === "destination" && scope) {
+          if (!proposal.destinationCollectionIds.includes(scope.collectionId)) {
+            return failure(
+              `Action destination must be exact collection ${scope.collectionId}.`,
+              contract,
+              prepared,
+              proposal.destinationCollectionIds.map((id) => `collection:${id}`),
+              [`collection:${scope.collectionId}`],
+            );
+          }
+          continue;
+        }
+        if (!obligation.targetBoundary) continue;
         const boundary = obligation.targetBoundary;
         const expected = new Set(boundary.frozenTargetIds.map(itemTarget));
         const rejected = proposal.requestedTargets.filter(
@@ -703,14 +778,21 @@ export class ActionContractService {
           );
         }
         const currentTargets =
-          boundary.kind === "collection" && scope
-            ? await listScopeTargetIds(this.gateway, {
-                libraryID: scope.libraryID,
-                collectionId: scope.collectionId,
-                collectionPath: scope.collectionPath,
-                targetKind: obligation.targetKind,
-                includeDescendants: scope.includeDescendants,
-              })
+          scope &&
+          (boundary.kind === "collection" || boundary.kind === "selection")
+            ? (
+                await listScopeTargetIds(this.gateway, {
+                  libraryID: scope.libraryID,
+                  collectionId: scope.collectionId,
+                  collectionPath: scope.collectionPath,
+                  targetKind: obligation.targetKind,
+                  includeDescendants: scope.includeDescendants,
+                })
+              ).filter(
+                (id) =>
+                  boundary.kind === "collection" ||
+                  boundary.frozenTargetIds.includes(id),
+              )
             : boundary.kind === "library"
               ? await listCurrentLibraryTargetIds(this.gateway, {
                   libraryID: boundary.libraryID,
@@ -758,18 +840,6 @@ export class ActionContractService {
             "stale_scope",
           );
         }
-        if (obligation.scopeRole === "destination" && scope) {
-          if (!proposal.destinationCollectionIds.includes(scope.collectionId)) {
-            return failure(
-              `Action destination must be exact collection ${scope.collectionId}.`,
-              contract,
-              prepared,
-              proposal.destinationCollectionIds.map((id) => `collection:${id}`),
-              [`collection:${scope.collectionId}`],
-            );
-          }
-          continue;
-        }
         if (rejected.length) {
           return failure(
             "Action scope rejected: proposed targets fall outside the frozen boundary.",
@@ -795,6 +865,9 @@ export class ActionContractService {
         progressStatus === "cancelled" ||
         !obligation.targetBoundary ||
         obligation.scopeRole === "destination" ||
+        !prepared.proposals.some((proposal) =>
+          matchingObligations(contract, proposal).includes(obligation),
+        ) ||
         options.allowPartialCoverage
       ) {
         continue;
@@ -849,6 +922,8 @@ export class ActionContractService {
       addedTargetIds: readonly number[];
     }>,
   ): AgentActionReceipt[] {
+    if (contract)
+      contract = resolveCreatedDestinations(this.gateway, contract, progress);
     return prepared.proposals.flatMap((proposal) => {
       let obligations: Array<AgentActionObligation | undefined>;
       if (!contract) {

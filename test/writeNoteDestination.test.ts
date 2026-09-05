@@ -53,6 +53,26 @@ describe("write note destination classifier", function () {
     assert.equal(classifyWriteNoteDestination("summarize this paper"), "none");
   });
 
+  it("keeps the live cropped-figure export file-only despite its negative Zotero mention", function () {
+    const text =
+      'Write a short summary of this paper including one actual cropped figure. Use the figure-analysis pipeline, save the Markdown to "/tmp/behavior-vault/figures.md" and copy the cropped figure into that vault using a relative image link. Include a caption and page provenance. Do not edit Zotero or substitute a placeholder.';
+    assert.equal(classifyWriteNoteDestination(text), "file");
+  });
+
+  it("requires a requested Zotero destination, not a source mention joined to another instruction", function () {
+    for (const text of [
+      "Read this Zotero paper and save a summary to my Obsidian vault",
+      "Export this Zotero note as a Markdown file and include its figures",
+      "Write a summary in my Obsidian vault and do not create a child note",
+    ])
+      assert.equal(classifyWriteNoteDestination(text), "file", text);
+    for (const text of [
+      "Create a child note and also export it to my Obsidian vault",
+      "Write this in Zotero and export it as a Markdown file",
+    ])
+      assert.equal(classifyWriteNoteDestination(text), "both", text);
+  });
+
   it("recognizes multilingual file destinations", function () {
     const fileRequests = [
       "写一篇阅读笔记保存为md文件",

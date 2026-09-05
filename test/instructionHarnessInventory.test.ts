@@ -64,6 +64,35 @@ function readSkill(filename: string): string {
 }
 
 describe("instruction harness inventory", function () {
+  it("requires a numerical grounding check across the shared research routes", function () {
+    for (const prompt of [
+      DEFAULT_SYSTEM_PROMPT,
+      AGENT_PERSONA_INSTRUCTIONS.join("\n"),
+    ]) {
+      assert.include(prompt, "reported values from your own calculations");
+      assert.include(prompt, "units and percentage conversions");
+      assert.include(prompt, "do not assume a chance baseline");
+      assert.include(
+        prompt,
+        "class counts, ceilings or causality from accuracy alone",
+      );
+      assert.include(
+        prompt,
+        "Label inferences and correct unsupported earlier claims",
+      );
+      assert.include(prompt, "Missing information stays unknown");
+      assert.include(prompt, "labeling a guess does not supply evidence");
+    }
+  });
+  it("keeps discovery selection distinct from explicit imports in the fixed persona", function () {
+    const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    assert.include(
+      prompt,
+      "literature_review for user selection in every permission mode",
+    );
+    assert.include(prompt, "library_import for explicit import requests");
+    assert.notInclude(prompt, "only for imports, note saving");
+  });
   it("keeps the shared semantic contracts provider-neutral", function () {
     const contracts = [
       CORE_RESEARCH_CONTRACT,

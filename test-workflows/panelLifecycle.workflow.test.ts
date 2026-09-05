@@ -144,4 +144,35 @@ describe("workflow: panel lifecycle", function () {
       },
     );
   });
+
+  it("starts one plan execution after repeated panel rebuilds and removes disposed plan listeners", async function () {
+    await withPrefs(
+      {
+        enableCodexAppServerMode: false,
+        enableClaudeCodeMode: false,
+        conversationSystem: "upstream",
+      },
+      async () => {
+        fixture = await api.createPaperWithPdfFixture({
+          title: "Rebuilt plan approval",
+          pdfTitle: "Rebuilt plan approval PDF",
+        });
+        const panel = await api.renderPanelForItem(fixture.parentItemId);
+        const result = await api.exerciseRebuiltPanelPlanApproval(
+          panel.panelId,
+        );
+        assert.equal(result.sendsAfterApproval, 1);
+        assert.equal(
+          result.queuedAfterApproval,
+          0,
+          "one approval must not queue duplicate execution prompts",
+        );
+        assert.equal(
+          result.sendsAfterDispose,
+          1,
+          "disposed handlers must not dispatch again",
+        );
+      },
+    );
+  });
 });

@@ -453,31 +453,10 @@ export class LibraryQueryService {
     totalCount: number;
     warnings: string[];
   }> {
-    const filters = params.filters || {};
-    const agentFilters: AgentLibraryFilters | undefined =
-      filters.collectionId ||
-      filters.unfiled ||
-      filters.hasPdf !== undefined ||
-      filters.itemType ||
-      filters.author ||
-      filters.yearFrom != null ||
-      filters.yearTo != null ||
-      filters.tag
-        ? {
-            collectionId: filters.collectionId,
-            unfiled: filters.unfiled,
-            hasPdf: filters.hasPdf,
-            itemType: filters.itemType,
-            author: filters.author,
-            yearFrom: filters.yearFrom,
-            yearTo: filters.yearTo,
-            tag: filters.tag,
-          }
-        : undefined;
     const results = await this.zoteroGateway.searchAllLibraryItems({
       libraryID: params.libraryID,
       query: params.text,
-      filters: agentFilters,
+      filters: params.filters,
       limit: params.limit,
     });
     const enriched = results.items.map((item) =>
@@ -488,6 +467,7 @@ export class LibraryQueryService {
 
   async listStandaloneNotes(params: {
     libraryID: number;
+    collectionId?: number;
     limit?: number;
   }): Promise<{
     results: QueryLibraryItemResult[];
@@ -496,6 +476,7 @@ export class LibraryQueryService {
   }> {
     const result = await this.zoteroGateway.listStandaloneNotes({
       libraryID: params.libraryID,
+      collectionId: params.collectionId,
       limit: params.limit,
     });
     const enriched = result.notes.map(
@@ -515,6 +496,7 @@ export class LibraryQueryService {
 
   async searchNotes(params: {
     libraryID: number;
+    collectionId?: number;
     text: string;
     limit?: number;
   }): Promise<{
@@ -528,6 +510,7 @@ export class LibraryQueryService {
   }> {
     const results = await this.zoteroGateway.searchAllNotes({
       libraryID: params.libraryID,
+      collectionId: params.collectionId,
       query: params.text,
       limit: params.limit,
     });

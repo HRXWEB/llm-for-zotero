@@ -1396,7 +1396,7 @@ type HiddenQuoteLocationCacheRecord = {
 const pageTextCacheByKey = new Map<string, CachedPageTextRecord>();
 const pageTextCachePromisesByKey = new Map<
   string,
-  Promise<CachedPageTextIndex | null>
+  { promise: Promise<CachedPageTextIndex | null>; promote?: () => void }
 >();
 const hiddenQuoteLocationCache = new Map<
   string,
@@ -1556,10 +1556,14 @@ function getCachedPageTextIndex(keys: string[]): CachedPageTextIndex | null {
 
 function getCachedPageTextPromise(
   keys: string[],
+  foreground = false,
 ): Promise<CachedPageTextIndex | null> | null {
   for (const key of keys) {
     const task = pageTextCachePromisesByKey.get(key);
-    if (task) return task;
+    if (task) {
+      if (foreground) task.promote?.();
+      return task.promise;
+    }
   }
   return null;
 }
@@ -1601,9 +1605,15 @@ function touchPageTextCacheRecord(
 function storeCachedPageTextPromise(
   keys: string[],
   task: Promise<CachedPageTextIndex | null>,
+  promote?: () => void,
 ): void {
+  const record = { promise: task, promote };
   for (const key of keys) {
-    pageTextCachePromisesByKey.set(key, task);
+    // Completed immutable text can be reused by fingerprint. Pending work is
+    // bound to a native attachment/reader, which may close independently of
+    // another attachment containing the same PDF bytes.
+    if (key.startsWith("fingerprint-")) continue;
+    pageTextCachePromisesByKey.set(key, record);
   }
 }
 
@@ -1612,7 +1622,7 @@ function clearCachedPageTextPromise(
   task?: Promise<CachedPageTextIndex | null>,
 ): void {
   for (const key of keys) {
-    if (task && pageTextCachePromisesByKey.get(key) !== task) continue;
+    if (task && pageTextCachePromisesByKey.get(key)?.promise !== task) continue;
     pageTextCachePromisesByKey.delete(key);
   }
 }
@@ -2509,7 +2519,7 @@ export async function warmPageTextCache(
   const keys = getReaderCacheKeys(reader);
   const cached = getCachedPageTextIndex(keys);
   if (cached) return cached;
-  const cachedTask = getCachedPageTextPromise(keys);
+  const cachedTask = getCachedPageTextPromise(keys, true);
   if (cachedTask) return cachedTask;
 
   const generation = pageTextCacheGeneration;
@@ -2599,11 +2609,19 @@ export async function warmPageTextCacheForAttachment(
   const keys = reader ? getReaderCacheKeys(reader) : [key];
   const cached = getCachedPageTextIndex(keys);
   if (cached) return cached;
-  const cachedTask = getCachedPageTextPromise(keys);
+  const cachedTask = getCachedPageTextPromise(keys, !options?.yieldToMain);
   if (cachedTask) return cachedTask;
 
   const itemId = Math.floor(Number(contextItemId));
   const generation = pageTextCacheGeneration;
+  let foreground = false;
+  let promote: (() => void) | undefined;
+  const promotion = new Promise<void>((resolve) => {
+    promote = () => {
+      foreground = true;
+      resolve();
+    };
+  });
   let task: Promise<CachedPageTextIndex | null> | null = null;
   task = (async () => {
     try {
@@ -2626,8 +2644,18 @@ export async function warmPageTextCacheForAttachment(
             extracted.pageCount,
             sourceFingerprint,
             {
-              yieldToMain: options.yieldToMain,
-              shouldContinue: options.shouldContinue,
+              yieldToMain: async () => {
+                // A source click preempts idle quote validation. If that click
+                // joins this task, release its idle-only wait instead of
+                // making navigation wait for itself to finish.
+                if (foreground) {
+                  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                } else {
+                  await Promise.race([options.yieldToMain!(), promotion]);
+                }
+              },
+              shouldContinue: () =>
+                foreground || options.shouldContinue?.() !== false,
             },
           )
         : buildCachedPageTextIndex(
@@ -2650,7 +2678,11 @@ export async function warmPageTextCacheForAttachment(
       if (task) clearCachedPageTextPromise(keys, task);
     }
   })();
-  storeCachedPageTextPromise(keys, task);
+  storeCachedPageTextPromise(
+    keys,
+    task,
+    options?.yieldToMain ? promote : undefined,
+  );
   return task;
 }
 

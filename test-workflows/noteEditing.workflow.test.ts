@@ -54,6 +54,10 @@ function assertDualRuntimeControls(
     visible.filter((toggle) => toggle.active).map((toggle) => toggle.system),
     activeSystem ? [activeSystem] : [],
   );
+  assert.isTrue(
+    visible.every((toggle) => !toggle.disabled),
+    "the runtime switch is settled before the next interaction",
+  );
 }
 
 async function diagnosticsMessage(

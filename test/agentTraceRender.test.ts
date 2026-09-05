@@ -2484,6 +2484,19 @@ describe("agentTrace render", function () {
     }
   });
 
+  it("preserves all native note heading levels without allowing executable attributes", function () {
+    for (let level = 1; level <= 6; level++) {
+      const heading = createSanitizerElement(`h${level}`);
+      assert.isTrue(
+        isSafeRenderedMarkdownElementForTests(heading),
+        `h${level}`,
+      );
+      assert.isFalse(
+        isSafeRenderedMarkdownAttributeForTests(heading, "onclick", "alert(1)"),
+      );
+    }
+  });
+
   it("keeps non-KaTeX and unsafe SVG blocked in rendered Markdown", function () {
     const rawSvg = createSanitizerElement("svg");
     const rawPath = createSanitizerElement("path");
@@ -5400,8 +5413,8 @@ describe("agentTrace render", function () {
     assert.exists(card.findByClass("llm-agent-hitl-refresh-btn"));
     assert.isNull(card.findByClass("llm-agent-hitl-action-choices"));
     assert.equal(
-      card.findByClass("llm-agent-hitl-header")?.textContent,
-      "Action required",
+      card.findByClass("llm-plan-status")?.textContent,
+      "Awaiting approval",
     );
     const topControls = card.findByClass("llm-agent-hitl-paged-top-controls");
     assert.equal(

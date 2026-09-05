@@ -1,4 +1,5 @@
 import { inferExplicitNoteIntent } from "./skills/noteIntent";
+import { parseActionConstraints } from "./authorization/policy";
 
 export type WriteNoteDestination = "none" | "zotero" | "file" | "both";
 
@@ -73,15 +74,11 @@ function hasFileDestinationSignal(
   );
 }
 
-/**
- * The narrow case Zotero-first was meant to catch: the user names Zotero as
- * the destination *in contrast to* a file destination. This requires a
- * directional phrase ("in Zotero", "into Zotero", "as a Zotero note"), not a
- * bare mention, so "this Zotero paper" does not qualify.
- */
-function hasExplicitZoteroOverFileSignal(text: string): boolean {
-  return /\b(?:in|into|to|inside|within)\s+zotero\b|\bzotero\s+(?:note|collection|library)\b|\bnot\s+(?:in\s+)?(?:obsidian|a\s+file|to\s+a\s+file)\b/i.test(
-    text,
+/** A destination clause, not a source-paper or source-note mention. */
+function hasZoteroWriteDestination(text: string): boolean {
+  return (
+    /\b(?:in|into|to|inside|within)\s+zotero\b/i.test(text) ||
+    (hasZoteroDestinationSignal(text) && inferExplicitNoteIntent(text))
   );
 }
 
@@ -118,29 +115,34 @@ export function classifyWriteNoteDestination(
     text,
     notesDirectoryNickname,
   );
-  if (
-    fileDestination &&
-    hasZoteroDestinationSignal(text) &&
-    /\b(?:and|also|then|plus)\b/i.test(text)
-  ) {
-    return "both";
+  if (fileDestination) {
+    const zoteroWritesProhibited = parseActionConstraints(text).some(
+      (entry) =>
+        entry.kind === "deny_effects" &&
+        entry.domains.includes("zotero_library") &&
+        entry.effects.includes("create") &&
+        entry.effects.includes("modify"),
+    );
+    if (zoteroWritesProhibited) return "file";
+    if (
+      hasZoteroWriteDestination(text) &&
+      /\bnot\s+(?:in\s+)?(?:obsidian|a\s+file|to\s+a\s+file)\b/i.test(text)
+    )
+      return "zotero";
+
+    // Mixed destinations need an affirmative Zotero-writing clause of their
+    // own. A conjunction anywhere in a file request does not supply one.
+    const clauses = text.split(
+      /\b(?:and|also|then|plus)\b|[;\n]|(?<=[.!?])\s+/i,
+    );
+    return clauses.some(
+      (clause) =>
+        !hasFileDestinationSignal(clause, notesDirectoryNickname) &&
+        hasZoteroWriteDestination(clause),
+    )
+      ? "both"
+      : "file";
   }
-  // File first, deliberately.
-  //
-  // Reordering these looked attractive — "put this in Zotero, not Obsidian"
-  // should pick Zotero — but `hasZoteroDestinationSignal` leads with a bare
-  // \bzotero\b, which is a MENTION test, not a destination test. In a Zotero
-  // plugin users say "this Zotero paper" constantly, so Zotero-first sent
-  // explicit file requests ("save to ~/vaults/papers/x.md", "write to my
-  // Obsidian vault for this Zotero paper") to a Zotero note, and with them
-  // the whole file_io enforcement path in the runtime.
-  //
-  // An explicit filesystem cue — a path, an extension, a configured nickname,
-  // Obsidian/vault — is a far stronger signal of intent than the product
-  // name appearing somewhere in the sentence. The narrow contrast case is
-  // handled below instead.
-  if (hasExplicitZoteroOverFileSignal(text)) return "zotero";
-  if (fileDestination) return "file";
   if (hasZoteroDestinationSignal(text)) return "zotero";
   if (hasGenericNoteWriteSignal(text)) return "zotero";
   // `hasGenericNoteWriteSignal` is English-only. The multilingual note-intent

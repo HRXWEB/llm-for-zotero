@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
@@ -37,6 +38,33 @@ class CaptionWindowTests(unittest.TestCase):
             self.extractor.Rect(left, top, width, height),
             text,
         )
+
+    def test_evaluation_preserves_complete_caption_in_crop_metadata(self):
+        caption = "Figure 1. " + "This source caption describes the experimental panels. " * 9 + "Final panel provenance."
+        target = self.extractor.Target("Figure 1", 1, self.extractor.Rect(10, 80, 80, 10), caption, "pdf-text")
+        candidate = self.extractor.Candidate("caption-region", self.extractor.Rect(10, 10, 80, 60), 0.99, (), ())
+        pages = {1: {"width": 100, "height": 100, "texts": []}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case = self.extractor.PdfCase(7, "PDFKEY", "PAPERKEY", "paper.pdf", root / "paper.pdf", root / "mineru")
+            with patch.object(self.extractor, "parse_pdf_xml", return_value=pages), patch.object(self.extractor, "build_case_targets", return_value=[target]), patch.object(self.extractor, "resolve_candidate_on_page", return_value=(candidate, None)), patch.object(self.extractor, "render_page", return_value=Image.new("RGB", (100, 100), "white")):
+                result = self.extractor.evaluate_case(case, root / "output", root, 72)
+            self.assertEqual(result["cropCount"], 1)
+            self.assertEqual(result["figures"][0]["captionText"], caption)
+            saved = json.loads((root / "output" / "7_PDFKEY" / "summary.json").read_text())
+            self.assertEqual(saved["figures"][0]["captionText"], caption)
+
+    def test_uuid_named_content_list_preserves_full_caption_over_manifest_excerpt(self):
+        caption = "Fig. 1. " + "Panel details from the source. " * 20 + "Final caption sentence."
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manifest.json").write_text(json.dumps({"allFigures": [{"label": "Figure 1", "page": 2, "caption": caption[:300]}]}))
+            (root / "33ae8c62_content_list.json").write_text(json.dumps([{"type": "image", "page_idx": 2, "image_caption": [caption]}]))
+            case = self.extractor.PdfCase(7, "PDFKEY", "PAPERKEY", "paper.pdf", root / "paper.pdf", root)
+            targets = self.extractor.build_case_targets(case, {3: {"width": 100, "height": 100, "texts": []}}, use_mineru_semantics=True)
+            self.assertEqual(len(targets), 1)
+            self.assertEqual(targets[0].caption_text, caption)
+            self.assertEqual(targets[0].page_number, 3)
 
     def image(self, boxes):
         image = Image.new("RGB", (820, 1180), "white")

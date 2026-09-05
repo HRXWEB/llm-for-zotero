@@ -1,6 +1,8 @@
 import type {
+  AgentActionContract,
   AgentActionIntent,
   AgentActionObligation,
+  AgentActionProgressLedger,
   AgentRuntimeRequest,
 } from "../types";
 import type {
@@ -202,6 +204,77 @@ function resolveValidatedCandidates(params: {
   ]);
 }
 
+async function resolveExplicitTargets(
+  gateway: ActionContractGateway,
+  request: AgentRuntimeRequest,
+  intent: AgentActionIntent,
+  libraryID: number,
+): Promise<number[] | undefined> {
+  if (!intent.targetSelectors?.length) return undefined;
+  if (
+    !isLibraryMutationOperationType(intent.operation) ||
+    !libraryMutationTargetsItems(intent.operation)
+  )
+    return undefined;
+  const requirement =
+    intent.targetKind === "papers"
+      ? "regular"
+      : operationRequirement(intent.operation);
+  let libraryItems: Zotero.Item[] | undefined;
+  const ids: number[] = [];
+  for (const selector of intent.targetSelectors) {
+    const literal = String(selector.value);
+    if (
+      !(request.userText || "")
+        .toLocaleLowerCase()
+        .includes(literal.toLocaleLowerCase())
+    ) {
+      throw new Error(
+        `Explicit target ${literal} was not present in the user request.`,
+      );
+    }
+    let item: Zotero.Item | null;
+    if (selector.kind === "item_id") item = gateway.getItem(selector.value);
+    else if (selector.kind === "item_key")
+      item =
+        gateway.getItemByLibraryAndKey?.(
+          libraryID,
+          selector.value.toUpperCase(),
+        ) || null;
+    else {
+      libraryItems ||= (
+        await listCurrentLibraryTargetIds(gateway, {
+          libraryID,
+          targetKind: intent.targetKind,
+        })
+      )
+        .map((id) => gateway.getItem(id))
+        .filter((entry): entry is Zotero.Item => Boolean(entry));
+      const matches = libraryItems.filter(
+        (entry) =>
+          String(entry.getField("title") || "").trim() ===
+          selector.value.trim(),
+      );
+      if (matches.length > 1)
+        throw new Error(
+          `Explicit target title "${selector.value}" is ambiguous (${matches.length} matches).`,
+        );
+      item = matches[0] || null;
+    }
+    if (
+      !item ||
+      Number(item.libraryID) !== libraryID ||
+      !itemSatisfiesRequirement(item, requirement)
+    ) {
+      throw new Error(
+        `Explicit target ${literal} was not found in library ${libraryID} or is not valid for ${intent.operation}.`,
+      );
+    }
+    ids.push(item.id);
+  }
+  return uniqueNumbers(ids);
+}
+
 async function resolveUnscopedBoundary(
   gateway: ActionContractGateway,
   request: AgentRuntimeRequest,
@@ -215,9 +288,18 @@ async function resolveUnscopedBoundary(
   }
   const libraryID = Math.floor(Number(request.libraryID));
   if (!Number.isInteger(libraryID) || libraryID <= 0) return undefined;
+  const explicitTargets = await resolveExplicitTargets(
+    gateway,
+    request,
+    intent,
+    libraryID,
+  );
   let frozenTargetIds: number[];
   let kind: "library" | "selection";
-  if (intent.coverage === "all") {
+  if (explicitTargets) {
+    kind = "selection";
+    frozenTargetIds = explicitTargets;
+  } else if (intent.coverage === "all") {
     kind = "library";
     frozenTargetIds = await listCurrentLibraryTargetIds(gateway, {
       libraryID,
@@ -302,6 +384,7 @@ export async function resolveScope(
   gateway: ActionContractGateway,
   request: AgentRuntimeRequest,
   intent: AgentActionIntent,
+  collectionCreations: readonly AgentActionObligation[] = [],
 ): Promise<AgentActionObligation[]> {
   const collectionLifecycle =
     intent.operation === "update_collection" ||
@@ -432,6 +515,34 @@ export async function resolveScope(
         );
       }),
     );
+    if (!summaries.length && intent.scopeRole === "destination") {
+      const creations = collectionCreations.filter((creation) => {
+        const name = normalizePath(creation.parameters?.collectionName);
+        if (!name) return false;
+        const parentId = creation.parameters?.parentCollectionId;
+        const parent = parentId ? gateway.getCollectionSummary(parentId) : null;
+        const path = parent
+          ? `${normalizePath(parent.path || parent.name)}/${name}`
+          : name;
+        return requestedPath === name || requestedPath === path;
+      });
+      if (creations.length === 1) {
+        const { scope: _scope, scopeRole: _role, ...sourceIntent } = intent;
+        const sourceObligations = await resolveScope(
+          gateway,
+          request,
+          sourceIntent,
+        );
+        return sourceObligations.map((obligation) => ({
+          ...obligation,
+          scopeRole: "destination",
+          destinationCreation: {
+            obligationId: creations[0].id,
+            libraryID: Number(request.libraryID),
+          },
+        }));
+      }
+    }
     if (summaries.length !== 1) {
       throw new Error(
         summaries.length
@@ -479,13 +590,30 @@ export async function resolveScope(
       });
       continue;
     }
-    const frozenTargetIds = await listScopeTargetIds(gateway, {
+    let frozenTargetIds = await listScopeTargetIds(gateway, {
       libraryID: summary.libraryID,
       collectionId: summary.collectionId,
       collectionPath,
       targetKind: intent.targetKind,
       includeDescendants: intent.scope.includeDescendants,
     });
+    const explicitTargets =
+      intent.scopeRole !== "destination"
+        ? await resolveExplicitTargets(
+            gateway,
+            request,
+            intent,
+            summary.libraryID,
+          )
+        : undefined;
+    if (explicitTargets) {
+      if (explicitTargets.some((id) => !frozenTargetIds.includes(id))) {
+        throw new Error(
+          "An explicit target is outside the requested source collection.",
+        );
+      }
+      frozenTargetIds = explicitTargets;
+    }
     obligations.push({
       ...intent,
       id: `${intent.capability}:collection:${summary.collectionId}`,
@@ -496,7 +624,7 @@ export async function resolveScope(
         collectionPath,
       },
       targetBoundary: {
-        kind: "collection",
+        kind: explicitTargets ? "selection" : "collection",
         libraryID: summary.libraryID,
         frozenTargetIds,
         scopeDigest: [
@@ -510,4 +638,63 @@ export async function resolveScope(
     });
   }
   return obligations;
+}
+
+/** Resolve creation dependencies without changing the immutable user contract. */
+export function resolveCreatedDestinations(
+  gateway: ActionContractGateway,
+  contract: AgentActionContract,
+  progress: AgentActionProgressLedger | undefined,
+): AgentActionContract {
+  if (progress?.contractId !== contract.id) return contract;
+  return {
+    ...contract,
+    obligations: contract.obligations.map((obligation) => {
+      const dependency = obligation.destinationCreation;
+      if (!dependency) return obligation;
+      const creation = contract.obligations.find(
+        (entry) => entry.id === dependency.obligationId,
+      );
+      const proof = progress.obligations.find(
+        (entry) => entry.obligationId === dependency.obligationId,
+      );
+      if (
+        creation?.operation !== "create_collection" ||
+        !proof ||
+        !["fulfilled", "already_satisfied"].includes(proof.status) ||
+        proof.verifiedTargetIds.length !== 1
+      )
+        return obligation;
+      const collectionId = Number(
+        proof.verifiedTargetIds[0].match(/^collection:(\d+)$/)?.[1],
+      );
+      const summary = collectionId
+        ? gateway.getCollectionSummary(collectionId)
+        : null;
+      const state = collectionId
+        ? gateway.getCollectionNativeState?.(collectionId)
+        : null;
+      if (
+        summary?.libraryID !== dependency.libraryID ||
+        !state?.exists ||
+        state.deleted ||
+        state.name !== creation.parameters?.collectionName ||
+        state.parentCollectionId !==
+          (creation.parameters?.parentCollectionId ?? null)
+      )
+        return obligation;
+      const {
+        destinationCreation: _dependency,
+        scopeRole: _role,
+        ...resolved
+      } = obligation;
+      return {
+        ...resolved,
+        parameters: {
+          ...resolved.parameters,
+          destinationCollectionId: collectionId,
+        },
+      };
+    }),
+  };
 }

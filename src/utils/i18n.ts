@@ -387,8 +387,8 @@ const zhCN: Record<string, string> = {
   "Permission mode": "权限模式",
   safe: "安全",
   yolo: "全自动",
-  "Review filesystem reads outside the current context and every write, command, script, or network action.":
-    "审核当前上下文之外的文件系统读取，以及每次写入、命令、脚本或网络操作。",
+  "Create requested new notes directly. Review other writes, filesystem reads outside the current context, commands, scripts, and network actions.":
+    "直接创建用户请求的新笔记。审核其他写入、当前上下文之外的文件系统读取，以及命令、脚本和网络操作。",
   "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.":
     "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。",
   "Execute every valid in-scope Original Agent action without mode-based prompts.":

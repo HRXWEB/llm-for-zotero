@@ -1059,12 +1059,13 @@ describe("actionCommandController", function () {
     assert.equal(card.getAttribute("role"), "status");
     assert.equal(card.getAttribute("aria-live"), "polite");
     assert.exists(card.querySelector(".llm-agent-hitl-status-content"));
+    assert.include(card.className, "llm-plan-container");
     assert.equal(
-      card.querySelector(".llm-agent-hitl-header")?.textContent,
+      card.querySelector(".llm-plan-status")?.textContent,
       "Working",
     );
     assert.equal(
-      card.querySelector(".llm-agent-hitl-title")?.textContent,
+      card.querySelector(".llm-plan-title")?.textContent,
       "Rendering previous page",
     );
     assert.include(
@@ -1089,10 +1090,11 @@ describe("actionCommandController", function () {
     const card = chatBox.querySelector(".llm-action-progress-card");
 
     assert.equal(
-      card?.querySelector(".llm-action-progress-eyebrow")?.textContent,
+      card?.querySelector(".llm-plan-status")?.textContent,
       "Working",
     );
-    assert.exists(card?.querySelector(".llm-action-progress-title"));
+    assert.exists(card?.querySelector(".llm-plan-title"));
+    assert.include(card?.className || "", "llm-plan-container");
     progress.remove();
   });
 
@@ -1136,7 +1138,7 @@ describe("actionCommandController", function () {
     );
 
     assert.equal(
-      chatBox.querySelector(".llm-agent-hitl-title")?.textContent,
+      chatBox.querySelector(".llm-plan-title")?.textContent,
       "Add tags",
     );
     assert.isFunction(resolveConfirmation);
@@ -1148,7 +1150,7 @@ describe("actionCommandController", function () {
       actionId: "confirm",
     });
     assert.equal(
-      chatBox.querySelector(".llm-agent-hitl-title")?.textContent,
+      chatBox.querySelector(".llm-plan-title")?.textContent,
       "Working on approved action",
     );
     assert.include(

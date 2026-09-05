@@ -335,8 +335,77 @@ export function createSubmitDocumentTool(
           assets: {
             type: "array",
             description:
-              "Trusted extracted or already-produced generated assets. Use [] when the document has no figures.",
-            items: { type: "object", additionalProperties: true },
+              "Copy the selected figures' documentAsset objects returned by paper_read. The host renders their images, captions and provenance; do not also put Markdown image links in markdown. Use [] only when the document has no figures.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "assetId",
+                "contentHash",
+                "mimeType",
+                "byteLength",
+                "width",
+                "height",
+                "caption",
+                "durablePath",
+                "provenance",
+              ],
+              properties: {
+                assetId: { type: "string" },
+                contentHash: { type: "string" },
+                mimeType: { type: "string" },
+                byteLength: { type: "integer", minimum: 1 },
+                width: { type: "integer", minimum: 1 },
+                height: { type: "integer", minimum: 1 },
+                caption: { type: "string" },
+                durablePath: { type: "string" },
+                provenance: {
+                  anyOf: [
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: [
+                        "origin",
+                        "libraryID",
+                        "itemKey",
+                        "attachmentItemKey",
+                        "sourceFingerprint",
+                        "pageIndex",
+                        "extractionToolVersion",
+                      ],
+                      properties: {
+                        origin: { type: "string", enum: ["extracted"] },
+                        libraryID: { type: "integer", minimum: 1 },
+                        itemKey: { type: "string" },
+                        attachmentItemKey: { type: "string" },
+                        sourceFingerprint: { type: "string" },
+                        pageIndex: { type: "integer", minimum: 0 },
+                        extractionToolVersion: { type: "string" },
+                      },
+                    },
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: [
+                        "origin",
+                        "generator",
+                        "generatorVersion",
+                        "evidenceRefs",
+                      ],
+                      properties: {
+                        origin: { type: "string", enum: ["generated"] },
+                        generator: { type: "string" },
+                        generatorVersion: { type: "string" },
+                        evidenceRefs: {
+                          type: "array",
+                          items: { type: "string" },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
           },
           groundingReviewed: {
             type: "string",

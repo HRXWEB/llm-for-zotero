@@ -391,6 +391,7 @@ export type WorkflowTestCrossPaperHistoryIsolationResult = {
 
 export type WorkflowTestApi = {
   reset: () => Promise<void>;
+  enableLiveAgentSending: () => void;
   createPaperWithPdfFixture: (input: {
     title: string;
     pdfTitle: string;
@@ -442,6 +443,18 @@ export type WorkflowTestApi = {
     noteHtml: string;
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
+  exerciseBackgroundAgentPublication: (input: {
+    panelId: string;
+    paperBItemId: number;
+    invalidateConversation?: boolean;
+  }) => Promise<{
+    sourceConversationKey: number;
+    otherConversationKey: number;
+    persistedConversationKeys: number[];
+    exactMarkdown: boolean;
+    outboxStatus?: string;
+    otherPanelContainsDocument: boolean;
+  }>;
   renderStartupPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
   startNewPanelConversation: (
     panelId: string,
@@ -453,6 +466,11 @@ export type WorkflowTestApi = {
   exerciseDuplicatePanelSetup: (
     panelId: string,
   ) => Promise<WorkflowTestDuplicatePanelSetupDiagnostics>;
+  exerciseRebuiltPanelPlanApproval: (panelId: string) => Promise<{
+    sendsAfterApproval: number;
+    queuedAfterApproval: number;
+    sendsAfterDispose: number;
+  }>;
   exercisePanelDraftStateRefresh: (
     panelId: string,
     text: string,
@@ -509,6 +527,23 @@ export type WorkflowTestApi = {
       quoteCitations?: QuoteCitation[];
     },
   ) => Promise<WorkflowTestAssistantRenderResult>;
+  renderDocumentForPanel: (
+    panelId: string,
+    document: import("../../agent/documents/types").PlanDocument,
+    openLargerView: boolean,
+  ) => boolean;
+  renderToolResultForPanel: (
+    panelId: string,
+    result: import("../../agent/types").AgentToolResult,
+    options?: { documentId?: string; userText?: string },
+  ) => HTMLElement | null;
+  renderPendingActionForPanel: (
+    panelId: string,
+    pending: {
+      requestId: string;
+      action: import("../../agent/types").AgentPendingAction;
+    },
+  ) => Promise<import("../../agent/types").AgentConfirmationResolution>;
   exerciseTargetedQuoteRefresh: (
     panelId: string,
   ) => Promise<WorkflowTestTargetedQuoteRefreshResult>;
@@ -532,6 +567,8 @@ export type WorkflowTestApi = {
   }) => Promise<WorkflowTestRuntimeGeometry>;
   exerciseStandaloneComposerManualResize: () => Promise<WorkflowTestStandaloneComposerResizeDiagnostics>;
   askStandalone: (text: string) => Promise<SendQuestionOptions>;
+  startNewStandaloneConversation: () => Promise<WorkflowTestStandaloneDiagnostics>;
+  clickStandaloneReasoningOption: (label: string) => Promise<void>;
   getLastFinalRequest: () => WorkflowTestFinalRequestSnapshot | null;
   seedStandaloneUserMessage: (
     text: string,
@@ -548,6 +585,18 @@ export type WorkflowTestApi = {
     height: number,
   ) => Promise<{ innerWidth: number; innerHeight: number }>;
   captureStandaloneScreenshot: (filePath: string) => Promise<string>;
+  observeCitationNavigationFocus: (
+    button: HTMLElement,
+    options?: {
+      forceViewerFallbackForItemId?: number;
+      linkTargetItemId?: number;
+    },
+  ) => Promise<{
+    started: boolean;
+    finished: boolean;
+    focusRequests: number;
+    diagnostics: string[];
+  }>;
   notifyStandaloneItemChanged: (
     itemId: number | null,
   ) => Promise<WorkflowTestStandaloneDiagnostics>;

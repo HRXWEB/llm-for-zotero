@@ -478,12 +478,35 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
 
     // Stream path: parse SSE and deliver text deltas progressively
     if (response.body && isStreamingResponse(response)) {
-      const result = await parseOpenAIChatCompletionStream(
-        response.body,
-        params.onTextDelta,
-        params.onReasoning,
-        params.onUsage,
-      );
+      let result: Awaited<ReturnType<typeof parseOpenAIChatCompletionStream>>;
+      try {
+        result = await parseOpenAIChatCompletionStream(
+          response.body,
+          params.onTextDelta,
+          params.onReasoning,
+          params.onUsage,
+        );
+      } catch (error) {
+        // This adapter executes no tools while parsing. A broken stream can
+        // safely retry the unfinished model step, never its partial calls.
+        if (
+          params.signal?.aborted ||
+          !/^(?:Error: )?Error in input stream$/.test(String(error))
+        )
+          throw error;
+        const assistantMessage = { role: "assistant" as const, content: "" };
+        this.conversationMessages = [...resolvedMessages, assistantMessage];
+        return {
+          kind: "incomplete",
+          reason: "stream_interrupted",
+          text: "",
+          recoveryInstruction: buildAgentRecoveryInstruction(
+            "stream_interrupted",
+            "tool call",
+          ),
+          assistantMessage,
+        };
+      }
       const completion = normalizeProviderCompletion(result.finishReason);
       const recoveryReason = resolveAgentRecoverableCompletion(completion);
       this.conversationMessages = [

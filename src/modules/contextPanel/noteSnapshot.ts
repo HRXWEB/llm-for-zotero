@@ -1,4 +1,10 @@
 import { resolveNoteParentItem, resolveNoteTitle } from "./portalScope";
+import { stripNoteHtml } from "../../utils/noteText";
+export {
+  decodeNoteHtmlEntities,
+  stripNoteMarkup,
+  stripNoteHtml,
+} from "../../utils/noteText";
 
 export type NoteSnapshot = {
   noteId: number;
@@ -11,22 +17,6 @@ export type NoteSnapshot = {
   parentItemKey?: string;
   noteKind: "item" | "standalone";
 };
-
-export function stripNoteHtml(html: string): string {
-  if (!html) return "";
-  let text = html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "");
-  text = text.replace(/<\/(p|div|h[1-6]|li|tr|blockquote)>/gi, "\n");
-  text = text.replace(/<br\s*\/?>/gi, "\n");
-  text = text.replace(/<[^>]+>/g, "");
-  text = text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-  return text.replace(/\n{3,}/g, "\n\n").trim();
-}
 
 export function readNoteSnapshot(
   item: Zotero.Item | null | undefined,

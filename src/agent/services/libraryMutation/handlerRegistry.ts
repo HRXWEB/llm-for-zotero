@@ -1,5 +1,7 @@
 import type { LibraryMutationOperation } from "./contracts";
 import { canonicalJsonEqual } from "./canonicalJson";
+import { renderMarkdownForNote } from "../../../utils/markdown";
+import { stripNoteHtml } from "../../../utils/noteText";
 import {
   defineHandler,
   type LibraryMutationHandlerRegistry,
@@ -228,7 +230,11 @@ export const libraryMutationHandlers = {
     }),
     stateSections: ["collections"],
     deferredInverse: () => true,
-    createdCollectionIds: (result) => resultId(result, "collectionId"),
+    createdCollectionIds: (result) =>
+      resultId(
+        (result as { collection?: unknown } | null)?.collection,
+        "collectionId",
+      ),
     executionDomain: "collection-search-structure",
     postconditionSatisfied: (operation, state) =>
       Boolean(
@@ -663,7 +669,7 @@ export const libraryMutationHandlers = {
     actionParameters: (operation) => ({
       noteMode: "create",
       targetItemId: operation.targetItemId,
-      expectedText: operation.content,
+      expectedText: stripNoteHtml(renderMarkdownForNote(operation.content)),
     }),
     stateSections: ["items"],
     deferredInverse: () => true,

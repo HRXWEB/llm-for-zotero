@@ -22,6 +22,10 @@ export type ActionConstraint = Readonly<
       kind: "deny_effects";
       effects: ActionEffect[];
       domains: ActionDomain[];
+      /** Narrow native operations explicitly permitted by a qualified prohibition. */
+      exceptOperations?: string[];
+      /** Restrict this denial to named native operations; opaque effects remain denied. */
+      operations?: string[];
       description: string;
     }
   | {
@@ -68,7 +72,12 @@ export type ActionProposal = {
 export type AuthorizationDecision =
   | {
       kind: "execute";
-      authority: "safe_read" | "auto_policy" | "yolo" | "plan_approval";
+      authority:
+        | "safe_read"
+        | "requested_note"
+        | "auto_policy"
+        | "yolo"
+        | "plan_approval";
     }
   | { kind: "confirm"; reason: string }
   | { kind: "block"; reason: string };
@@ -79,6 +88,8 @@ export type OriginalAuthorizationContext = {
   constraints?: readonly ActionConstraint[];
   /** The exact typed proposal passed the current turn's Action Contract. */
   hasMatchingActionIntent?: boolean;
+  /** Host-verified approved-plan scope; never supplied by model tool input. */
+  hasApprovedPlanAuthority?: boolean;
   /** Legacy caller compatibility; new persisted contracts use constraints. */
   hasExplicitNoWrite?: boolean;
 };

@@ -361,23 +361,18 @@ import {
   mergeToolActivityPayload,
 } from "./agentTrace/toolActivityDedupe";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
-import {
-  getWebSourceAnchorsFromTrace,
-  stripWebSourceMarkersForDisplay,
-} from "../../webAccess/attribution";
+import { getWebSourceAnchorsFromTrace } from "../../webAccess/attribution";
 import type { WebSourceAnchor } from "../../webAccess/types";
-import {
-  decorateWebSourceIndicators,
-  injectWebSourceAnchorTokens,
-} from "./webSourceIndicators";
+import { decorateWebSourceIndicators } from "./webSourceIndicators";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
 import { getWebChatTargetByModelName } from "../../webchat/types";
 import {
-  decorateAssistantCitationLinks,
-  renderQuoteCitationPlaceholders,
-} from "./assistantCitationLinks";
+  buildAssistantDisplayMarkdownForRender,
+  decorateCompletedAssistantCitationLinks,
+} from "./assistantRichText";
+export { buildAssistantDisplayMarkdownForRender } from "./assistantRichText";
 import {
   getCachedPageTextForAttachment,
   hasCompleteSearchablePageTextForAttachment,
@@ -400,7 +395,6 @@ import {
   type QuoteSourceText,
 } from "./quoteCitations";
 import {
-  buildQuoteDisplayMarkdown,
   buildQuoteExpandedMarkdown,
   getMessageQuoteDisplay,
   QUOTE_RENDER_OCCURRENCE_PATTERN,
@@ -1177,58 +1171,6 @@ export function shouldDecorateInterleavedAgentTraceCitations(params: {
   return Boolean(
     params.agentTraceEl && params.agentUsesInterleavedText && !params.streaming,
   );
-}
-
-function decorateCompletedAssistantCitationLinks(params: {
-  body: Element;
-  panelItem: Zotero.Item;
-  bubble: HTMLDivElement;
-  assistantMessage: Message;
-  pairedUserMessage: Message | null;
-  webSourceAnchors?: readonly WebSourceAnchor[];
-}): void {
-  const {
-    body,
-    panelItem,
-    bubble,
-    assistantMessage,
-    pairedUserMessage,
-    webSourceAnchors = [],
-  } = params;
-  if (assistantMessage.streaming || assistantMessage.compactMarker) return;
-  if (!sanitizeText(bubble.textContent || assistantMessage.text || "").trim()) {
-    return;
-  }
-  try {
-    ztoolkit.log(
-      "LLM: calling decorateAssistantCitationLinks",
-      "msgLen =",
-      assistantMessage.text.length,
-      "bubbleHTML =",
-      String(bubble.innerHTML || "").length,
-      "hasPairedUser =",
-      Boolean(pairedUserMessage),
-      "pairedPaperContexts =",
-      pairedUserMessage?.paperContexts?.length ?? "none",
-    );
-    renderQuoteCitationPlaceholders({
-      body,
-      panelItem,
-      bubble,
-      assistantMessage,
-      pairedUserMessage,
-    });
-    if (webSourceAnchors.length) return;
-    decorateAssistantCitationLinks({
-      body,
-      panelItem,
-      bubble,
-      assistantMessage,
-      pairedUserMessage,
-    });
-  } catch (decorateErr) {
-    ztoolkit.log("LLM citation decoration error:", decorateErr);
-  }
 }
 
 function attachAssistantResponseContextMenu(params: {
@@ -2739,27 +2681,6 @@ export function getReasoningOptions(
     enabled: option.enabled,
     label: option.label,
   }));
-}
-
-export function buildAssistantDisplayMarkdownForRender(
-  message: Pick<Message, "text" | "quoteCitations" | "quoteDisplayOverride">,
-  webSourceAnchors: readonly WebSourceAnchor[] = [],
-): string {
-  const hasWebSources = webSourceAnchors.length > 0;
-  const display = hasWebSources
-    ? {
-        markdown: message.text || "",
-        quoteCitations: message.quoteCitations,
-      }
-    : getMessageQuoteDisplay(message);
-  return buildQuoteDisplayMarkdown({
-    markdown: injectWebSourceAnchorTokens(
-      stripWebSourceMarkersForDisplay(sanitizeText(display.markdown)),
-      webSourceAnchors,
-    ),
-    quoteCitations: display.quoteCitations,
-    allowLegacyInference: !hasWebSources,
-  });
 }
 
 export { QUOTE_RENDER_OCCURRENCE_PATTERN };
@@ -10254,6 +10175,12 @@ async function buildAgentRuntimeRequest(
     enrichPaperContextsWithMineruCache(params.fullTextPaperContexts),
   ]);
   const requestLibraryID = Math.floor(Number(params.item.libraryID)) || 0;
+  const baseItem = resolveConversationBaseItem(params.item);
+  const activeNoteSession = resolveActiveNoteSession(params.item);
+  const conversationKind =
+    activeNoteSession?.conversationKind ||
+    resolveDisplayConversationKind(params.item) ||
+    undefined;
   const completePaperKey = (paper: PaperContextRef) =>
     `${Math.floor(Number(paper.libraryID || requestLibraryID))}:${Math.floor(
       Number(paper.itemId),
@@ -10268,17 +10195,14 @@ async function buildAgentRuntimeRequest(
           completePaperKey(paper) ===
           completePaperKey(params.activePaperContext!),
       ) || params.activePaperContext
-    : undefined;
+    : conversationKind === "paper"
+      ? resolvePaperContextRefFromItem(baseItem) || undefined
+      : undefined;
   const attachmentResourcePool = buildAgentAttachmentResourcePool({
     paperContexts: enrichedPaperContexts,
     fullTextPaperContexts: enrichedFullTextPapers,
     selectedCollectionContexts: params.selectedCollectionContexts,
   });
-  const activeNoteSession = resolveActiveNoteSession(params.item);
-  const conversationKind =
-    activeNoteSession?.conversationKind ||
-    resolveDisplayConversationKind(params.item) ||
-    undefined;
   let registeredConversation: Awaited<
     ReturnType<typeof getRegisteredConversationScope>
   > = null;
@@ -10326,7 +10250,7 @@ async function buildAgentRuntimeRequest(
     planContext: params.planContext,
     actionContract: executingPlan?.artifact.actionContract,
     conversationKind,
-    activeItemId: activeNoteSession?.noteId || params.item.id,
+    activeItemId: activeNoteSession?.noteId || baseItem?.id,
     activePaperContext: activePaperContext
       ? {
           ...activePaperContext,
@@ -10416,12 +10340,13 @@ function buildAgentEngineDeps(
   panelBody?: Element,
   ownershipLease?: PanelOperationLease | null,
 ): AgentEngineDeps {
-  const getEffectiveConversationSystem = (): ConversationSystem =>
+  const effectiveConversationSystem: ConversationSystem =
     conversationSystem ||
     (currentItem
       ? resolveEffectiveConversationSystem({ item: currentItem })
       : "upstream");
-  const canCommitAgentEffect = (operation: string): boolean =>
+  const getEffectiveConversationSystem = () => effectiveConversationSystem;
+  const canUpdateCapturedPanel = (operation: string): boolean =>
     !currentItem ||
     !panelBody ||
     (Boolean(ownershipLease) &&
@@ -10437,7 +10362,11 @@ function buildAgentEngineDeps(
     nextRequestId,
     tryBeginRequest,
     isRequestOwner,
-    finishRequest,
+    finishRequest: (conversationKey, requestId) => {
+      const finished = finishRequest(conversationKey, requestId);
+      if (finished) syncRequestUIForConversation(conversationKey);
+      return finished;
+    },
     transferRequest: (fromConversationKey, toConversationKey, requestId) => {
       if (
         !transferPanelRequest(
@@ -10456,11 +10385,11 @@ function buildAgentEngineDeps(
     getPanelRequestUI,
     setRequestUIBusy,
     restoreRequestUIIdle: (body, conversationKey, requestId) => {
-      if (!canCommitAgentEffect("agent-request-finish")) return;
+      if (!canUpdateCapturedPanel("agent-request-finish")) return;
       restoreRequestUIIdle(body, conversationKey, requestId);
     },
     scheduleQueuedInputDrain: (body, scope) => {
-      if (!canCommitAgentEffect("agent-queue-drain")) return;
+      if (!canUpdateCapturedPanel("agent-queue-drain")) return;
       scheduleQueuedInputDrain(body, scope);
     },
     createPanelUpdateHelpers,
@@ -10519,7 +10448,10 @@ function buildAgentEngineDeps(
     },
     appendReasoningPart,
     persistConversationMessage: async (conversationKey, message) => {
-      if (!canCommitAgentEffect("agent-persistence")) return;
+      // A dispatched turn owns its captured conversation, not the panel that
+      // happened to start it. Navigation may retire that panel while work
+      // continues. Scope validation and the generation-fenced store below
+      // prevent cross-conversation writes and resurrection after deletion.
       const guardedMessage = {
         ...message,
         conversationGeneration:
@@ -10549,7 +10481,6 @@ function buildAgentEngineDeps(
       );
     },
     updateStoredLatestUserMessage: async (conversationKey, data) => {
-      if (!canCommitAgentEffect("agent-user-persistence")) return;
       const guardedData = {
         ...data,
         conversationGeneration:
@@ -10581,7 +10512,6 @@ function buildAgentEngineDeps(
       );
     },
     updateStoredLatestAssistantMessage: async (conversationKey, data) => {
-      if (!canCommitAgentEffect("agent-assistant-persistence")) return;
       const guardedData = {
         ...data,
         conversationGeneration:
@@ -10622,6 +10552,8 @@ function buildAgentEngineDeps(
     maxSelectedImages: MAX_SELECTED_IMAGES,
   };
 }
+
+export const buildAgentEngineDepsForTests = buildAgentEngineDeps;
 
 /**
  * Re-runs the latest user→assistant pair in agent mode.
@@ -13409,6 +13341,7 @@ export function refreshChat(
         msg.runMode === "agent" && !msg.compactMarker
           ? renderAgentTrace({
               doc,
+              panelItem: item,
               message: msg,
               userMessage: previousUserMessage,
               events: traceEvents,

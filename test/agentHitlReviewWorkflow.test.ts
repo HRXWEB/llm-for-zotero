@@ -1,6 +1,9 @@
 import { assert } from "chai";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
+import { createRenamedTool } from "../src/agent/tools/facade";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
@@ -221,8 +224,9 @@ function createStubFacadeTool(
       ],
     }),
     acceptInheritedApproval: (_input, approval) =>
-      approval.sourceToolName === "literature_search" &&
-      acceptActionIds.includes(approval.sourceActionId),
+      ["literature_search", "literature_review"].includes(
+        approval.sourceToolName,
+      ) && acceptActionIds.includes(approval.sourceActionId),
     applyConfirmation: (input) => ({ ok: true, value: input }),
     execute: async (input) => ({
       content: await execute(input),
@@ -383,399 +387,160 @@ describe("AgentRuntime HITL review workflow", function () {
     }
   });
 
-  it("can import selected reviewed papers through library_import", async function () {
-    const restoreDb = installMockDb();
-    try {
-      await initAgentChangeJournal();
-      const registry = new AgentToolRegistry();
-      registry.register(
-        createStubSearchTool(async () => ({
-          mode: "search",
-          source: "OpenAlex",
-          query: "plasticity",
-          results: [
-            {
-              title: "Importable Paper",
-              authors: ["Alice Example"],
-              year: 2024,
-              doi: "10.1000/importable",
-            },
-          ],
-        })),
-      );
-      registry.register(
-        createStubFacadeTool(
-          "library_import",
-          async (input) => {
-            assert.deepEqual(input.identifiers, ["10.1000/importable"]);
-            return {
-              appliedCount: 1,
-              result: { succeeded: 1, failed: 0 },
-              warnings: [],
-            };
-          },
-          ["import"],
-        ),
-      );
-      const adapter = new StepAdapter([
-        {
-          kind: "tool_calls",
-          calls: [
-            {
-              id: "call-search",
-              name: "literature_search",
-              arguments: {
-                workflow: "review",
-                mode: "search",
-                query: "plasticity",
-              },
-            },
-          ],
-          assistantMessage: {
-            role: "assistant",
-            content: "",
-            tool_calls: [
-              {
-                id: "call-search",
-                name: "literature_search",
-                arguments: {
-                  workflow: "review",
-                  mode: "search",
-                  query: "plasticity",
-                },
-              },
-            ],
-          },
-        },
-      ]);
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => adapter,
-      });
-
-      let sawFacadeConfirmation = false;
-      const outcome = await runtime.runTurn({
-        request: makeRequest(),
-        onEvent: async (event) => {
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "literature_search"
-          ) {
-            assert.deepEqual(
-              event.action.actions?.map((action) => action.id),
-              ["import", "save_note", "new_search", "cancel"],
-            );
-            runtime.resolveConfirmation(event.requestId, {
-              approved: true,
-              actionId: "import",
-              data: { selectedPaperIds: ["paper-1"] },
-            });
-            return;
-          }
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "library_import"
-          ) {
-            sawFacadeConfirmation = true;
-          }
-        },
-      });
-
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "Imported the selected papers into Zotero.");
-      assert.equal(adapter.stepIndex, 1);
-      assert.isFalse(sawFacadeConfirmation);
-    } finally {
-      restoreDb();
-    }
-  });
-
-  it("can save reviewed papers into a note through note_write", async function () {
-    const restoreDb = installMockDb();
-    try {
-      await initAgentChangeJournal();
-      const registry = new AgentToolRegistry();
-      registry.register(
-        createStubSearchTool(async () => ({
-          mode: "recommendations",
-          source: "OpenAlex",
-          results: [
-            {
-              title: "Paper For Note",
-              authors: ["Dana Example"],
-              year: 2025,
-              doi: "10.1000/note",
-            },
-          ],
-        })),
-      );
-      registry.register(
-        createStubFacadeTool(
-          "note_write",
-          async (input) => {
-            assert.equal(input.mode, "create");
-            assert.include(String(input.content || ""), "Custom reviewed note");
-            return {
-              appliedCount: 1,
-              result: { status: "created" },
-              warnings: [],
-            };
-          },
-          ["save_paper_note", "save_metadata_note"],
-        ),
-      );
-      const adapter = new StepAdapter([
-        {
-          kind: "tool_calls",
-          calls: [
-            {
-              id: "call-search",
-              name: "literature_search",
-              arguments: { workflow: "review", mode: "recommendations" },
-            },
-          ],
-          assistantMessage: {
-            role: "assistant",
-            content: "",
-            tool_calls: [
-              {
-                id: "call-search",
-                name: "literature_search",
-                arguments: { workflow: "review", mode: "recommendations" },
-              },
-            ],
-          },
-        },
-      ]);
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => adapter,
-      });
-
-      let sawFacadeConfirmation = false;
-      const outcome = await runtime.runTurn({
-        request: makeRequest(),
-        onEvent: async (event) => {
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "literature_search"
-          ) {
-            runtime.resolveConfirmation(event.requestId, {
-              approved: true,
-              actionId: "save_note",
-              data: {
-                selectedPaperIds: ["paper-1"],
-                noteContent: "## Custom reviewed note",
-              },
-            });
-            return;
-          }
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "note_write"
-          ) {
-            sawFacadeConfirmation = true;
-          }
-        },
-      });
-
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "Saved the selected papers to a note.");
-      assert.equal(adapter.stepIndex, 1);
-      assert.isFalse(sawFacadeConfirmation);
-    } finally {
-      restoreDb();
-    }
-  });
-
-  it("can rerun the online search from the review card without resuming model reasoning", async function () {
-    const restoreDb = installMockDb();
-    try {
-      await initAgentChangeJournal();
-      const searchQueries: string[] = [];
-      const searchWorkflows: unknown[] = [];
-      const registry = new AgentToolRegistry();
-      registry.register(
-        createStubSearchTool(async (input) => {
-          const query = String(input.query || "initial");
-          searchQueries.push(query);
-          searchWorkflows.push(input.workflow);
-          return {
-            mode: "search",
-            source: "OpenAlex",
-            query,
-            results: [
-              {
-                title:
-                  query === "refined search"
-                    ? "Refined Paper"
-                    : "Initial Paper",
-                authors: ["Elliot Example"],
-                year: 2026,
-                doi:
-                  query === "refined search"
-                    ? "10.1000/refined"
-                    : "10.1000/initial",
-              },
-            ],
+  for (const mode of ["safe", "auto", "yolo"]) {
+    for (const approve of [true, false]) {
+      it(`searches, ranks, then ${approve ? "imports only checked papers" : "cancels without writes"} in ${mode}`, async function () {
+        const restoreDb = installMockDb();
+        const originalFetch = globalThis.fetch;
+        let imported: unknown = null;
+        let candidateSetId = "";
+        try {
+          await initAgentChangeJournal();
+          globalThis.fetch = (async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              results: Array.from({ length: 12 }, (_, index) => ({
+                id: `https://openalex.org/W${index + 1}`,
+                display_name: `Candidate ${index + 1}`,
+                doi: `https://doi.org/10.1000/paper-${index + 1}`,
+                publication_year: 2024,
+              })),
+            }),
+          })) as typeof fetch;
+          const registry = new AgentToolRegistry();
+          const gateway = {
+            resolveMetadataItem: () => null,
+            getEditableArticleMetadata: () => null,
+            getCollectionSummary: () => ({
+              collectionId: 79,
+              libraryID: 1,
+              name: "Test collection",
+            }),
           };
-        }),
-      );
-      const adapter = new StepAdapter([
-        {
-          kind: "tool_calls",
-          calls: [
-            {
-              id: "call-search",
+          const search = createSearchLiteratureOnlineTool(gateway as never);
+          const executeSearch = search.execute;
+          search.execute = async (input, context) => {
+            const result = (await executeSearch(input, context)) as any;
+            candidateSetId = result.candidateSetId;
+            return result;
+          };
+          registry.register(
+            createRenamedTool({
+              tool: search,
               name: "literature_search",
-              arguments: {
-                workflow: "review",
-                mode: "search",
-                query: "initial search",
+              label: "Search",
+            }),
+          );
+          registry.register(createLiteratureReviewTool(gateway as never));
+          registry.register(
+            createStubFacadeTool(
+              "library_import",
+              async (input) => {
+                imported = input;
+                return { appliedCount: 4, result: { succeeded: 4, failed: 0 } };
               },
-            },
-          ],
-          assistantMessage: {
-            role: "assistant",
-            content: "",
-            tool_calls: [
-              {
-                id: "call-search",
-                name: "literature_search",
-                arguments: {
-                  workflow: "review",
-                  mode: "search",
-                  query: "initial search",
-                },
+              ["import"],
+            ),
+          );
+          const callStep = (name: string, args: unknown): AgentModelStep => {
+            const calls = [{ id: `call-${name}`, name, arguments: args }];
+            return {
+              kind: "tool_calls",
+              calls,
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: calls,
               },
-            ],
-          },
-        },
-      ]);
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => adapter,
-      });
-
-      let searchReviewCount = 0;
-      const outcome = await runtime.runTurn({
-        request: makeRequest(),
-        onEvent: async (event) => {
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "literature_search"
-          ) {
-            searchReviewCount += 1;
-            if (searchReviewCount === 1) {
+            };
+          };
+          const bypassProse = mode === "auto" && !approve;
+          const adapter = new StepAdapter([
+            callStep("literature_search", {
+              mode: "search",
+              workflow: "review",
+              query: "population coding",
+              limit: 12,
+            }),
+            ...(bypassProse
+              ? [
+                  {
+                    kind: "final",
+                    text: "Here are my recommendations.",
+                  } as AgentModelStep,
+                ]
+              : []),
+            () =>
+              callStep("literature_review", {
+                selections: [8, 2, 10, 4, 1].map((candidateIndex) => ({
+                  candidateSetId,
+                  candidateIndex,
+                  reason: "Relevant decoding evidence.",
+                })),
+                targetCollectionId: 79,
+              }),
+          ]);
+          const runtime = new AgentRuntime({
+            registry,
+            adapterFactory: () => adapter,
+          });
+          const cards: string[] = [];
+          const outcome = await runtime.runTurn({
+            request: makeRequest({
+              userText: "Find five papers relevant to this paper.",
+              metadata: { permissionMode: mode },
+            }),
+            onEvent: async (event) => {
+              if (event.type !== "confirmation_required") return;
+              cards.push(event.action.toolName);
+              assert.equal(event.action.toolName, "literature_review");
+              assert.isNull(imported, "no imports before shortlist approval");
+              assert.equal(
+                adapter.stepIndex,
+                bypassProse ? 3 : 2,
+                "the model ranks after reading candidates",
+              );
+              const list = event.action.fields[0];
+              if (list.type !== "paper_result_list")
+                throw new Error("Not a paper card");
+              assert.deepEqual(
+                list.rows.map((row) => row.title),
+                [8, 2, 10, 4, 1].map((i) => `Candidate ${i}`),
+              );
               runtime.resolveConfirmation(event.requestId, {
-                approved: true,
-                actionId: "new_search",
+                approved: approve,
+                actionId: approve ? "import" : "cancel",
                 data: {
-                  nextQuery: "refined search",
-                  nextSource: "openalex",
-                  nextLimit: "5",
+                  selectedPaperIds: [
+                    "paper-1",
+                    "paper-3",
+                    "paper-4",
+                    "paper-5",
+                  ],
                 },
               });
-              return;
-            }
-            runtime.resolveConfirmation(event.requestId, {
-              approved: false,
-              actionId: "cancel",
-            });
-          }
-        },
-      });
-
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "Stopped after review.");
-      assert.deepEqual(searchQueries, ["initial search", "refined search"]);
-      assert.deepEqual(searchWorkflows, ["review", "review"]);
-      assert.equal(adapter.stepIndex, 1);
-    } finally {
-      restoreDb();
-    }
-  });
-
-  it("stops immediately when the user cancels the review card", async function () {
-    const restoreDb = installMockDb();
-    try {
-      await initAgentChangeJournal();
-      const registry = new AgentToolRegistry();
-      registry.register(
-        createStubSearchTool(async () => ({
-          mode: "search",
-          source: "OpenAlex",
-          query: "cancel flow",
-          results: [
-            {
-              title: "Cancelled Paper",
-              authors: ["Zoe Example"],
-              year: 2025,
-              doi: "10.1000/cancel",
             },
-          ],
-        })),
-      );
-      const adapter = new StepAdapter([
-        {
-          kind: "tool_calls",
-          calls: [
-            {
-              id: "call-search",
-              name: "literature_search",
-              arguments: {
-                workflow: "review",
-                mode: "search",
-                query: "cancel flow",
-              },
-            },
-          ],
-          assistantMessage: {
-            role: "assistant",
-            content: "",
-            tool_calls: [
-              {
-                id: "call-search",
-                name: "literature_search",
-                arguments: {
-                  workflow: "review",
-                  mode: "search",
-                  query: "cancel flow",
-                },
-              },
-            ],
-          },
-        },
-      ]);
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => adapter,
-      });
-
-      const outcome = await runtime.runTurn({
-        request: makeRequest(),
-        onEvent: async (event) => {
-          if (
-            event.type === "confirmation_required" &&
-            event.action.toolName === "literature_search"
-          ) {
-            runtime.resolveConfirmation(event.requestId, {
-              approved: false,
-              actionId: "cancel",
+          });
+          assert.equal(outcome.kind, "completed");
+          assert.deepEqual(cards, ["literature_review"]);
+          if (approve)
+            assert.deepInclude(imported, {
+              identifiers: [
+                "10.1000/paper-8",
+                "10.1000/paper-10",
+                "10.1000/paper-4",
+                "10.1000/paper-1",
+              ],
+              libraryID: 1,
+              targetCollectionId: 79,
             });
-          }
-        },
+          else assert.isNull(imported);
+        } finally {
+          globalThis.fetch = originalFetch;
+          restoreDb();
+        }
       });
-
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "Stopped after review.");
-      assert.equal(adapter.stepIndex, 1);
-    } finally {
-      restoreDb();
     }
-  });
+  }
 });

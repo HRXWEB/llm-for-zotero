@@ -17,7 +17,10 @@ import { getAllSkills } from "../skills";
 import type { AgentSkill } from "../skills";
 import { getSkillCustomizationNotice } from "../skills/managedBlock";
 import { classifyWriteNoteDestination } from "../writeNoteDestination";
-import { WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
+import {
+  WRITE_NOTE_SKILL_ID,
+  isConversationOnlyMemoryRequest,
+} from "../skills/noteIntent";
 
 import { resolveProviderCapabilities } from "../../providers";
 import type { ProviderCapabilities } from "../../providers";
@@ -156,6 +159,11 @@ function buildFullUserMessage(
   } = {},
 ): AgentUserMessage {
   const contextLines: string[] = [];
+  if (isConversationOnlyMemoryRequest(request.userText || "")) {
+    contextLines.push(
+      "The user wants conversational memory, not persistence. Keep these facts and discussion-only proposals in this chat; do not create or edit a note or file. Use the conversation history in later turns.",
+    );
+  }
   // Volatile by nature (collection ids and counts change as the agent works),
   // so it lives here rather than in the cached system prefix.
   const libraryOverview = renderLibraryOverviewSection(request.libraryID);

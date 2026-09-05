@@ -100,6 +100,278 @@ const shellRead = () =>
   });
 
 describe("Original Agent unified authorization", function () {
+  it("keeps compound paper and note creation prohibitions separate from requested collection work", function () {
+    const creation = proposal("collection_update", {}, noteWrite());
+    const userText =
+      'Create collections "geometry" and "memory", adding the exact existing papers. Preserve their metadata. Do not merge them yet and do not create any papers or notes.';
+    for (const mode of ["safe", "auto", "yolo"] as const) {
+      const context = {
+        mode,
+        userText,
+        constraints: parseActionConstraints(userText),
+        hasMatchingActionIntent: true,
+      };
+      assert.equal(
+        decide({ ...creation, operation: "create_collection" }, context).kind,
+        mode === "safe" ? "confirm" : "execute",
+      );
+      for (const operation of [
+        "create_items",
+        "import_identifiers",
+        "import_local_files",
+        "note_create",
+        "save_note",
+        "save_notes_batch",
+        "create_collection+note_create",
+      ]) {
+        assert.equal(
+          decide({ ...creation, operation }, context).kind,
+          "block",
+          operation,
+        );
+      }
+      assert.equal(
+        decide(
+          {
+            ...creation,
+            operation: "zotero_script_execute",
+            invocationPlan: {
+              ...creation.invocationPlan,
+              mechanism: "zotero_script",
+              assurance: "unknown",
+            },
+          },
+          context,
+        ).kind,
+        "block",
+        "opaque scripts cannot bypass the restricted target types",
+      );
+      assert.equal(
+        decide(
+          { ...creation, operation: "create_collection" },
+          {
+            ...context,
+            constraints: parseActionConstraints(
+              `${userText} Do not change anything in Zotero.`,
+            ),
+          },
+        ).kind,
+        "block",
+        "independent blanket prohibitions are preserved",
+      );
+    }
+  });
+  it("uses plan approval without bypassing explicit constraints or protected targets in any mode", function () {
+    for (const mode of ["safe", "auto", "yolo"] as const) {
+      const context = { mode, hasApprovedPlanAuthority: true };
+      assert.deepEqual(decide(proposal("file_io", {}, fileWrite()), context), {
+        kind: "execute",
+        authority: "plan_approval",
+      });
+      assert.equal(
+        decide(
+          proposal("file_io", {}, fileWrite(["protected_target"])),
+          context,
+        ).kind,
+        "block",
+      );
+      assert.equal(
+        decide(proposal("file_io", {}, fileWrite()), {
+          ...context,
+          constraints: parseActionConstraints("Do not write files."),
+        }).kind,
+        "block",
+      );
+    }
+  });
+  it("keeps a no-new-note constraint scoped to creation while permitting an existing-note edit", function () {
+    const userText =
+      "Replace the content of existing note 3961. Do not create a new note.";
+    const edit = proposal(
+      "note_write",
+      {},
+      stateChangeInvocationPlan({
+        domains: ["zotero_library"],
+        effects: ["modify"],
+        reversibility: "full",
+        reason: "Edit the exact note.",
+      }),
+    );
+    edit.operation = "note_edit";
+    const create = proposal("note_write", {}, noteWrite());
+    create.operation = "note_create";
+    for (const mode of ["safe", "auto", "yolo"] as const) {
+      const context = {
+        mode,
+        userText,
+        constraints: parseActionConstraints(userText),
+        hasMatchingActionIntent: true,
+      };
+      assert.equal(
+        decide(edit, context).kind,
+        mode === "safe" ? "confirm" : "execute",
+      );
+      assert.equal(decide(create, context).kind, "block");
+      for (const operation of ["save_note", "save_notes_batch"]) {
+        assert.equal(
+          decide({ ...create, operation }, context).kind,
+          "block",
+          `the no-new-note constraint also covers native ${operation}`,
+        );
+      }
+      assert.equal(
+        decide({ ...create, operation: "note_create+update_metadata" }, context)
+          .kind,
+        "block",
+      );
+      assert.equal(
+        decide({ ...create, operation: "create_collection" }, context).kind,
+        mode === "safe" ? "confirm" : "execute",
+        "a no-note-creation clause is not a ban on unrelated native operations",
+      );
+      const opaque = {
+        ...create,
+        operation: "run_zotero_script",
+        invocationPlan: {
+          ...create.invocationPlan,
+          mechanism: "zotero_script" as const,
+          assurance: "unknown" as const,
+        },
+      };
+      assert.equal(
+        decide(opaque, context).kind,
+        "block",
+        "opaque execution cannot evade the note-creation restriction",
+      );
+      assert.equal(
+        decide(edit, {
+          ...context,
+          constraints: parseActionConstraints(
+            `${userText} Do not change anything in Zotero.`,
+          ),
+        }).kind,
+        "block",
+        "an independent global prohibition is retained",
+      );
+    }
+  });
+
+  it("allows requested trash but blocks permanent deletion in every mode", function () {
+    const userText =
+      "Move to trash (do not permanently delete) only the paper with item key JBU4RMQ9.";
+    const action = proposal(
+      "library_delete",
+      {},
+      stateChangeInvocationPlan({
+        effects: ["delete"],
+        reversibility: "full",
+        reason: "Move an exact item to recoverable trash.",
+      }),
+    );
+    action.operation = "trash_items";
+    for (const mode of ["safe", "auto", "yolo"] as const) {
+      const context = {
+        mode,
+        userText,
+        constraints: parseActionConstraints(userText),
+        hasMatchingActionIntent: true,
+      };
+      assert.equal(
+        decide(action, context).kind,
+        mode === "safe" ? "confirm" : "execute",
+      );
+      assert.equal(
+        decide({ ...action, operation: "delete_attachment" }, context).kind,
+        "block",
+      );
+      assert.equal(
+        decide(
+          { ...action, operation: "trash_items+delete_attachment" },
+          context,
+        ).kind,
+        "block",
+      );
+    }
+    assert.equal(
+      decide(action, {
+        userText: "Do not change the Zotero library.",
+        constraints: parseActionConstraints(
+          "Do not change the Zotero library.",
+        ),
+        hasMatchingActionIntent: true,
+      }).kind,
+      "block",
+    );
+  });
+
+  it("does not turn conversational remembering into unsolicited persistence", function () {
+    const action = proposal("note_write", {}, noteWrite());
+    action.operation = "note_create";
+    action.capabilities = ["zotero.notes"];
+    for (const mode of ["safe", "auto", "yolo"] as const) {
+      assert.equal(
+        decide(action, {
+          mode,
+          userText:
+            "Read this synthetic test paper. What is its hypothesis? Explain amber-readout and remember it for our discussion.",
+        }).kind,
+        "block",
+      );
+      assert.equal(
+        decide(action, {
+          mode,
+          userText:
+            "Remember this for our discussion and create a Zotero note.",
+          hasMatchingActionIntent: true,
+        }).kind,
+        "execute",
+      );
+    }
+  });
+  it("only exempts a contract-matched native note creation, never edits or extra effects", function () {
+    const creation = proposal("note_write", { mode: "create" }, noteWrite(), [
+      {
+        id: "note:create",
+        proofDomain: "zotero_state",
+        capability: "zotero.notes",
+        operation: "note_create",
+        source: "zotero_native",
+        requestedTargets: [],
+        destinationCollectionIds: [],
+      },
+    ]);
+    const context = {
+      mode: "safe" as const,
+      userText: "Create a note",
+      hasMatchingActionIntent: true,
+    };
+    assert.equal(decide(creation, context).kind, "execute");
+    assert.equal(
+      decide(creation, { ...context, hasMatchingActionIntent: false }).kind,
+      "confirm",
+    );
+    for (const override of [
+      { operation: "note_edit", effects: ["modify"] },
+      { operation: "note_append", effects: ["modify"] },
+      {
+        operation: "note_create+file_write",
+        domains: ["zotero_library", "filesystem"],
+      },
+      { effects: ["create", "delete"] },
+      { riskSignals: ["ambiguous_target"] },
+    ])
+      assert.equal(
+        decide({ ...creation, ...override } as ActionProposal, context).kind,
+        "confirm",
+      );
+    assert.equal(
+      decide(creation, {
+        ...context,
+        constraints: parseActionConstraints("Do not create notes."),
+      }).kind,
+      "block",
+    );
+  });
   it("binds the complete invocation plan and every input to the digest", function () {
     const input = {
       action: "write",

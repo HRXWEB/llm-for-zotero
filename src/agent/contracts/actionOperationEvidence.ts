@@ -11,6 +11,7 @@ import {
 } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult } from "./toolResultEnvelope";
 import { operationAuthorityIsConsistent } from "./operationCatalog";
+import { normalizeNotePlainText, stripNoteHtml } from "../../utils/noteText";
 
 export type CollectionSummary = {
   collectionId: number;
@@ -57,6 +58,7 @@ export type ActionContractGateway = {
     libraryID: number;
   }): Promise<{ items: Array<{ itemId: number }> }>;
   getItem(itemId: number): Zotero.Item | null;
+  getItemByLibraryAndKey?(libraryID: number, key: string): Zotero.Item | null;
   getEditableArticleMetadata(
     item: Zotero.Item | null | undefined,
   ): { fields: Record<string, string>; creators: unknown[] } | null;
@@ -180,27 +182,6 @@ function itemCollections(item: Zotero.Item | null): number[] {
   );
 }
 
-function normalizeNoteText(value: string): string {
-  return value
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote)\s*>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/(^|\s)#{1,6}\s+/g, "$1")
-    .replace(/(^|\s)>\s?/g, "$1")
-    .replace(/(^|\s)[+-]\s+/g, "$1")
-    .replace(/[*_~`]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 export type NoteWriteVerification =
   | { targets: string[]; reason?: never }
   | { targets: null; reason: string };
@@ -277,8 +258,10 @@ export function verifyNoteWriteTarget(
     };
   }
   if (proposal.parameters?.expectedText?.trim()) {
-    const actual = normalizeNoteText(String(note.getNote?.() || ""));
-    const expected = normalizeNoteText(proposal.parameters.expectedText);
+    const actual = normalizeNotePlainText(
+      stripNoteHtml(String(note.getNote?.() || "")),
+    );
+    const expected = normalizeNotePlainText(proposal.parameters.expectedText);
     const textMatches =
       mode === "edit" ? actual === expected : actual.includes(expected);
     if (!textMatches) {

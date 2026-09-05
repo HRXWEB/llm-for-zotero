@@ -226,9 +226,19 @@ export function createSetItemTagsTool(
       }
       const assignments: SetItemTagsOperation["assignments"] = [];
       for (const raw of args.assignments) {
-        if (!validateObject<Record<string, unknown>>(raw)) continue;
+        if (!validateObject<Record<string, unknown>>(raw))
+          return fail(
+            "Every assignment must contain an itemId and tags array.",
+          );
         const itemId = normalizePositiveInt(raw.itemId);
-        if (!itemId || !Array.isArray(raw.tags)) continue;
+        if (
+          !itemId ||
+          !Array.isArray(raw.tags) ||
+          raw.tags.some((tag) => typeof tag !== "string")
+        )
+          return fail(
+            "Every assignment must have a valid itemId and an array of tag strings; no targets were changed.",
+          );
         assignments.push({
           itemId,
           tags: raw.tags

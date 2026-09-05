@@ -65,6 +65,7 @@ export type AgentActionParameters = {
   targetItemId?: number;
   pageIndex?: number;
   revertCount?: number;
+  /** Visible plain text from the prepared native payload, already decoded once. */
   expectedText?: string;
   newName?: string;
   newPath?: string;
@@ -87,6 +88,11 @@ export type AgentActionIntent = {
   coverage: "one" | "some" | "all";
   targetKind: "papers" | "items";
   parameters?: AgentActionParameters;
+  /** Literal native identities, resolved and frozen by the host before execution. */
+  targetSelectors?: Array<
+    | { kind: "item_id"; value: number }
+    | { kind: "item_key" | "title"; value: string }
+  >;
   scope?: {
     kind: "collection";
     path?: string;
@@ -102,6 +108,8 @@ export type AgentActionIntent = {
 
 export type AgentActionObligation = AgentActionIntent & {
   id: string;
+  /** The destination must be created and natively verified by this same contract. */
+  destinationCreation?: { obligationId: string; libraryID: number };
   scope?: AgentActionIntent["scope"] & {
     libraryID: number;
     collectionId: number;

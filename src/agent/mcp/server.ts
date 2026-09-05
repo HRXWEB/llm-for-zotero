@@ -118,6 +118,8 @@ export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
  * silently diverged before.
  */
 export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
+  literature_review:
+    "Ranked discovery review uses the Original Agent's conversation-scoped candidate store and interactive review channel; external MCP clients receive scholarly search results directly.",
   run_command:
     "External runtimes must use their native command tool so their selected permission profile and sandbox remain authoritative.",
   file_io:

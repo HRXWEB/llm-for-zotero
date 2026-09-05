@@ -10,7 +10,7 @@ const NO_DOCUMENT: DocumentOutcomePolicy = {
   trigger: "none",
 };
 
-function inferExplicitDocumentKind(
+export function inferExplicitDocumentKind(
   userText: string,
 ): DocumentSpec["kind"] | null {
   const text = userText.trim().toLowerCase();
@@ -38,11 +38,25 @@ function inferExplicitDocumentKind(
       /\bwould\s+like\b/u.test(text));
   if (asksForLiteratureReview) return "literature_review";
   if (!asksToAuthor) return null;
-  if (/\bmanuscript\b/u.test(text)) return "custom";
-  if (/\bresearch[ -]brief\b/u.test(text)) return "research_brief";
-  if (/\bguide\b/u.test(text)) return "guide";
-  if (/\breport\b/u.test(text)) return "report";
-  if (/\b(?:document|article|paper|essay|whitepaper)\b/u.test(text)) {
+  // Inspect what is being authored, not a source or destination mentioned
+  // later: "create a note on this paper" does not ask us to create a paper.
+  const authoredObjects = [
+    ...text.matchAll(
+      /\b(?:write|draft|author|prepare|create|produce|compose|develop)\b([^.!?;]*?)(?=\b(?:write|draft|author|prepare|create|produce|compose|develop)\b|[.!?;]|$)/gu,
+    ),
+  ]
+    .map(
+      (match) =>
+        match[1].split(/\b(?:on|about|from|for|with|in|into|to|as|of)\b/u)[0],
+    )
+    .join(" ");
+  if (/\bmanuscript\b/u.test(authoredObjects)) return "custom";
+  if (/\bresearch[ -]brief\b/u.test(authoredObjects)) return "research_brief";
+  if (/\bguide\b/u.test(authoredObjects)) return "guide";
+  if (/\breport\b/u.test(authoredObjects)) return "report";
+  if (
+    /\b(?:document|article|paper|essay|whitepaper)\b/u.test(authoredObjects)
+  ) {
     return "custom";
   }
   return null;

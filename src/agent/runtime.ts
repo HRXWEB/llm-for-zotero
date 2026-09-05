@@ -1611,7 +1611,7 @@ export class AgentRuntime {
         await emit({ type: "status", text: `Skill activated: ${skillId}` });
       }
 
-      let consecutiveToolErrors = 0;
+      let consecutiveToolErrorRounds = 0;
       const intent = requestIntent;
       const { maxRounds, maxToolCallsPerRound } = resolveAgentLimits(
         intent.isBulkOperation,
@@ -2196,7 +2196,7 @@ export class AgentRuntime {
           !cachedPaperEvidence &&
           toolResult.ok &&
           executedCall.toolDefinition?.spec.executionClass === "read" &&
-          request.documentOutcomePolicy?.integrityPolicy === "research_grounded"
+          request.documentOutcomePolicy?.required
         ) {
           const observations = await createTrustedReadObservations({
             toolName: toolResult.name,
@@ -2282,7 +2282,6 @@ export class AgentRuntime {
           content: toolResult.content,
         });
         if (toolResult.ok) {
-          consecutiveToolErrors = 0;
           if (paperEvidenceFrontierState !== "unchanged") {
             pendingReadActivities.push({
               toolName: toolResult.name,
@@ -2306,9 +2305,6 @@ export class AgentRuntime {
           // meant three careful "Cancel" clicks failed the run outright and
           // -- because persistence is gated on completion -- discarded its
           // memory along with it.
-          if (!userDenied) {
-            consecutiveToolErrors += 1;
-          }
           if (rawError && !userDenied) {
             await emit({
               type: "tool_error",
@@ -2609,6 +2605,7 @@ export class AgentRuntime {
       };
       let round = 0;
       let segment = 1;
+      let streamRecoveryUsed = false;
       const seenProgressFingerprints = new Set<string>();
       while (true) {
         const segmentRecordStart = toolExecutionRecords.length;
@@ -2644,6 +2641,20 @@ export class AgentRuntime {
             );
           }
           if (step.kind === "incomplete") {
+            if (step.reason === "stream_interrupted") {
+              if (streamRecoveryUsed) {
+                await rollbackCommittedStreamedText(stepStreamedText);
+                return completeRun(
+                  "The response stream failed again after one automatic retry. Durable Plan progress was preserved; continue when the connection is available.",
+                  "failed",
+                );
+              }
+              streamRecoveryUsed = true;
+              await emit({
+                type: "status",
+                text: "Response stream interrupted; retrying the unfinished step once",
+              });
+            }
             (
               globalThis as typeof globalThis & {
                 ztoolkit?: { log?: (...args: unknown[]) => void };
@@ -2658,11 +2669,13 @@ export class AgentRuntime {
             if (segmentRound >= maxRounds) {
               const customLimit = request.advanced?.outputTokenLimit;
               const exhaustionMessage =
-                step.reason === "provider_pause"
-                  ? "The provider repeatedly paused before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit."
-                  : customLimit?.mode === "custom"
-                    ? `The custom per-response output limit (${customLimit.tokens} tokens) repeatedly prevented the model from completing the required structured step. Raise the limit in Advanced settings, then continue; durable Plan progress was preserved.`
-                    : "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.";
+                step.reason === "stream_interrupted"
+                  ? "The response stream was interrupted at the model-step limit. Durable Plan progress was preserved; continue to resume the unfinished step."
+                  : step.reason === "provider_pause"
+                    ? "The provider repeatedly paused before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit."
+                    : customLimit?.mode === "custom"
+                      ? `The custom per-response output limit (${customLimit.tokens} tokens) repeatedly prevented the model from completing the required structured step. Raise the limit in Advanced settings, then continue; durable Plan progress was preserved.`
+                      : "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.";
               return completeRun(exhaustionMessage, "failed");
             }
             const assistantMessage: AgentAssistantMessage =
@@ -2795,10 +2808,18 @@ export class AgentRuntime {
             });
             newTranscriptMessages.push(...delta);
           };
+          let roundHadSuccessfulToolResult = false;
+          let roundHadToolFailure = false;
           for (const call of calls) {
             const outcome = await executeToolWorkflow(call, round, {
               modelCallId: call.id,
             });
+            if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;
+            else if (
+              readToolError(outcome.toolResult)?.toLowerCase() !==
+              "user denied action"
+            )
+              roundHadToolFailure = true;
             if (
               outcome.toolResult.ok &&
               outcome.toolResult.continuationCheckpoint
@@ -2836,16 +2857,19 @@ export class AgentRuntime {
                 documentId: outcome.documentId,
               });
             }
-            if (consecutiveToolErrors >= 3) {
-              appendRoundContinuation();
-              await persistTranscriptCheckpoint();
-              const finalText =
-                currentAnswerText ||
-                "Agent stopped after repeated tool errors. Please adjust the request and try again.";
-              return completeRun(finalText, "failed");
-            }
           }
           appendRoundContinuation();
+          // Sibling calls are one attempt: deliver every result before judging
+          // repeated failure, so the next model round can repair their inputs.
+          if (roundHadSuccessfulToolResult) consecutiveToolErrorRounds = 0;
+          else if (roundHadToolFailure) consecutiveToolErrorRounds += 1;
+          if (consecutiveToolErrorRounds >= 3) {
+            await persistTranscriptCheckpoint();
+            const finalText =
+              currentAnswerText ||
+              "Agent stopped after repeated tool errors. Please adjust the request and try again.";
+            return completeRun(finalText, "failed");
+          }
           if (continuationCheckpoint) {
             await restartFromSemanticCheckpoint({
               sourceMessages: messages,
@@ -2895,11 +2919,13 @@ export class AgentRuntime {
         segment += 1;
       }
     } catch (error) {
-      if (params.signal?.aborted) {
-        await planSession
-          ?.interrupt("The user stopped the approved plan execution")
-          .catch(() => undefined);
-      }
+      await planSession
+        ?.interrupt(
+          params.signal?.aborted
+            ? "The user stopped the approved plan execution"
+            : "The provider or runtime failed before the approved plan completed",
+        )
+        .catch(() => undefined);
       if (webSourceRunId && !runTerminalized) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),

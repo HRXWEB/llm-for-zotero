@@ -820,6 +820,14 @@ export function decodeActionContract(value: unknown): AgentActionContract {
               kind: "deny_effects",
               effects,
               domains,
+              ...(constraint.exceptOperations !== undefined
+                ? {
+                    exceptOperations: stringArray(
+                      constraint.exceptOperations,
+                      `effects.libraryMutation.contract.hardConstraints[${index}].exceptOperations`,
+                    ),
+                  }
+                : {}),
               description,
             } satisfies ActionConstraint;
           });

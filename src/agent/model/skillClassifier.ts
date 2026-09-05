@@ -41,6 +41,7 @@ import {
   inferActionIntentsFromRequest,
   parseActionIntents,
 } from "./actionIntent";
+import { OPERATION_CATALOG } from "../contracts/operationCatalog";
 export { inferActionIntentsFromRequest } from "./actionIntent";
 
 /**
@@ -679,8 +680,15 @@ async function classifyActionIntent(
     prompt: [
       "Classify only the exact mutation obligations in this Zotero request.",
       "Questions, advice, negation, hypotheticals, and reads have no mutation actions.",
-      "Tag verbs are literal: add is apply_tags, remove is remove_tags, replace is set_item_tags.",
-      "Available external operations include note_create, note_edit, note_append, annotation_write, settings_update, undo, revert, file_write, command_execute, zotero_script_execute, and read_full.",
+      "Tag effects are literal: add while preserving old tags is apply_tags, remove specified tags is remove_tags, and replace the old tags with an exact set is set_item_tags. Interpret the complete instruction, including a later clause clarifying replacement.",
+      `Available operations: ${Object.keys(OPERATION_CATALOG).join(", ")}.`,
+      'A collection move is one atomic move_to_collection obligation with constraints:{"collectionMode":"move"}; it both adds the destination and removes the named source. Do not add a separate remove_from_collection obligation for the same move. Add-only collection filing is move_to_collection without that constraint.',
+      "A collection merge requires the full union, not create_collection alone and never merge_items (which merges bibliographic records). Unless the user specifies a different surviving identity, retain the first named existing collection: authorize update_collection with its collectionId and requested collectionName, add-only move_to_collection from each other named source into that existing destinationCollectionId, and delete_collection for those other source collections with deleteItems:false after filing succeeds. Scope each filing to all direct papers of its exact source collection; preserve every other membership. Include every required operation, even when the user summarizes the workflow with one verb.",
+      'Each action requires operation, coverage ("one", "some", or "all"), and targetKind ("papers" or "items"). Coverage "all" means all members of the stated scope, not all library items merely because the user says "each" of a named list.',
+      'Use targetSelectors for explicitly identified existing items: [{"kind":"item_key","value":"EXACTKEY"}], [{"kind":"title","value":"exact title copied from the user"}], or [{"kind":"item_id","value":123}]. Include every named target. Never invent numeric IDs for titles or keys. Omit selectors for this/current/selected papers; the host already knows those identities. Do not include destination collections or new titles as target selectors.',
+      'For a named source collection use scope:{"kind":"collection","path":"exact collection name or path","includeDescendants":false} with scopeRole:"source". For collection filing without a named source, use scopeRole:"destination" and scope.path for the destination, retaining the exact existing papers in targetSelectors. Imports and standalone notes also use destination scope. Other actions use source scope.',
+      "For create_collection, put the new name in parameters.collectionName and an explicitly supplied parent ID in parameters.parentCollectionId; if only the parent name is given, scope.path identifies that existing parent, never the new collection. A later filing may name that newly requested destination: the host binds it to the verified creation receipt. Never invent the future collection ID.",
+      'Use parameters only for requested values: tags:string[], metadataFields:string[], targetNoteId:number, targetItemId:number, noteMode:"create|edit|append", destinationCollectionId:number, sourceCollectionId:number, collectionId:number, collectionName:string, parentCollectionId:number|null, deleteItems:boolean, filePath:string. Tags are only the desired tag values, never quoted paper titles or collection names. Omit unspecified values.',
       `Router task kind: ${router.taskKind}`,
       "User message:",
       request.userText || "",
@@ -692,7 +700,7 @@ async function classifyActionIntent(
     authMode: request.authMode,
     providerProtocol: request.providerProtocol,
     profileOverride: request.advanced?.profileOverride,
-    jsonBudget: 350,
+    jsonBudget: 1800,
     temperature: 0,
     signal: options.signal,
     timeoutMs: options.timeoutMs || TURN_INTENT_TIMEOUT_MS,
@@ -702,17 +710,17 @@ async function classifyActionIntent(
   const classified = parseClassifiedTurnIntent(result.text)?.actionIntents;
   if (!classified) return null;
   const deterministic = inferActionIntentsFromRequest(request);
-  if (deterministic.length) {
-    const expected = deterministic
-      .map((intent) => intent.operation)
-      .sort()
-      .join("|");
-    const actual = classified
-      .map((intent) => intent.operation)
-      .sort()
-      .join("|");
-    if (expected !== actual) return null;
-  }
+  // The fallback recognizes high-confidence operations, not an exhaustive
+  // decomposition of compound requests. Reject contradictory replacements
+  // (for example, setting tags instead of removing them), but do not discard
+  // additional classified obligations or distinct targets of the same verb.
+  const classifiedOperations = new Set(
+    classified.map((intent) => intent.operation),
+  );
+  if (
+    deterministic.some((intent) => !classifiedOperations.has(intent.operation))
+  )
+    return null;
   return classified;
 }
 

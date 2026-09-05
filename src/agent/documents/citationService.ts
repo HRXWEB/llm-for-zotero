@@ -19,8 +19,16 @@ export type DocumentCitationEvidence = Pick<
   | "libraryID"
   | "itemKey"
   | "sourceKind"
-  | "locator"
->;
+> & {
+  locator?:
+    | ResearchEvidenceRecord["locator"]
+    | Readonly<{
+        kind: "attachment_text";
+        attachmentItemKey: string;
+        pageIndex?: number;
+        sourceFingerprint?: string;
+      }>;
+};
 
 export type DocumentCitationCorpusItem = Pick<
   ResearchScopeSnapshotItem,
@@ -69,6 +77,109 @@ function escapeMarkdownLabel(value: string): string {
 
 function normalizeOutput(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function numberedCitationSources(
+  cluster: FormattedCitationBundle["clusters"][number],
+): string {
+  return cluster.sources
+    .map(
+      (source, index) =>
+        `[${index + 1}](${buildPlanCitationSourceUri(source)})`,
+    )
+    .join(" ");
+}
+
+/** Bind author-year group labels by CSL identity, never by input/source order. */
+function linkedCitationGroups(
+  gateway: ZoteroGateway,
+  bundle: Pick<FormattedCitationBundle, "clusters" | "style" | "locale">,
+): Map<string, string> {
+  const groups = bundle.clusters.filter(
+    (cluster) =>
+      cluster.sources.length > 1 && /^\([^()]+\)$/.test(cluster.text),
+  );
+  const result = new Map<string, string>();
+  if (!groups.length) return result;
+  const inputs = groups.flatMap((cluster, groupIndex) =>
+    cluster.sources.map((source, sourceIndex) => ({
+      citationId: `source-${groupIndex}-${sourceIndex}`,
+      source,
+      group: cluster.citationId,
+      item: itemByLibraryAndKey(source.libraryID, source.itemKey),
+    })),
+  );
+  // Missing sources or unavailable styles leave the original exact links intact.
+  if (inputs.some((input) => !input.item)) return result;
+  const formatted = gateway.formatStructuredCitations({
+    clusters: inputs.map((input) => ({
+      citationId: input.citationId,
+      items: [
+        {
+          itemId: Number(input.item!.id),
+          pageIndex: input.source.locator?.pageIndex,
+        },
+      ],
+    })),
+    styleId: bundle.style.id,
+    locale: bundle.locale,
+  });
+  const labels = new Map(
+    formatted.clusters.map((cluster) => [
+      cluster.citationId,
+      normalizeOutput(cluster.text).replace(/^\(|\)$/g, ""),
+    ]),
+  );
+  for (const cluster of groups) {
+    const members = inputs.filter(
+      (input) => input.group === cluster.citationId,
+    );
+    const byLabel = new Map(
+      members.map((input) => [labels.get(input.citationId), input.source]),
+    );
+    const parts = cluster.text.slice(1, -1).split("; ");
+    // Collapsed/numeric styles and ambiguous labels cannot be split by guesswork.
+    if (
+      byLabel.size !== members.length ||
+      parts.length !== members.length ||
+      parts.some((part) => !byLabel.has(part))
+    )
+      continue;
+    result.set(
+      cluster.citationId,
+      `(${parts.map((part) => `[${escapeMarkdownLabel(part)}](${buildPlanCitationSourceUri(byLabel.get(part)!)})`).join("; ")})`,
+    );
+  }
+  return result;
+}
+
+/** Presentation-only binding for previously saved grouped citations. */
+export function bindDocumentCitationGroupsForDisplay(params: {
+  markdown: string;
+  bundle: FormattedCitationBundle;
+  gateway: ZoteroGateway;
+}): string {
+  const candidates = params.bundle.clusters.filter(
+    (cluster) =>
+      cluster.sources.length > 1 &&
+      params.markdown.includes(
+        `${cluster.text} ${numberedCitationSources(cluster)}`,
+      ),
+  );
+  if (!candidates.length) return params.markdown;
+  const links = linkedCitationGroups(params.gateway, {
+    ...params.bundle,
+    clusters: candidates,
+  });
+  let markdown = params.markdown;
+  for (const cluster of candidates) {
+    const linked = links.get(cluster.citationId);
+    if (linked)
+      markdown = markdown
+        .split(`${cluster.text} ${numberedCitationSources(cluster)}`)
+        .join(linked);
+  }
+  return markdown;
 }
 
 function validateLocator(params: {
@@ -274,21 +385,81 @@ export function formatDocumentCitations(params: {
   const clusterById = new Map(
     formattedClusters.map((cluster) => [cluster.citationId, cluster]),
   );
-  let visibleMarkdown = draftMarkdown.replace(
-    CITATION_TOKEN,
-    (_token, citationId: string) => {
-      const cluster = clusterById.get(citationId);
-      if (!cluster) throw new Error(`Citation ${citationId} was not formatted`);
-      if (cluster.sources.length !== 1) {
-        const sourceLinks = cluster.sources
-          .map(
-            (source, index) =>
-              `[${index + 1}](${buildPlanCitationSourceUri(source)})`,
-          )
-          .join(" ");
-        return `${cluster.text} ${sourceLinks}`;
+  const groupLinks = linkedCitationGroups(params.gateway, {
+    clusters: formattedClusters,
+    style: {
+      id: params.spec.citationStyle.styleId,
+      title: params.spec.citationStyle.styleTitle,
+    },
+    locale: params.spec.citationStyle.locale,
+  });
+  const renderCluster = (
+    cluster: FormattedCitationBundle["clusters"][number],
+    label = cluster.text,
+  ) => {
+    if (cluster.sources.length !== 1) {
+      const linked = groupLinks.get(cluster.citationId);
+      if (linked) return label === cluster.text ? linked : linked.slice(1, -1);
+      return `${label} ${numberedCitationSources(cluster)}`;
+    }
+    return `[${escapeMarkdownLabel(label)}](${buildPlanCitationSourceUri(cluster.sources[0])})`;
+  };
+  // Tokens inside a parenthetical reference can stand in for the year in
+  // model-authored text, e.g. (Alpha [[cite:a]]; Beta [[cite:b]]). Bind the
+  // whole reference only when every literal label exactly matches its CSL
+  // author or full label. Unrelated parenthetical prose is left untouched.
+  const boundParentheses = draftMarkdown.replace(
+    /\(([^()\r\n]*\[\[cite:[A-Za-z0-9._:-]+\]\][^()\r\n]*)\)/g,
+    (original, body: string) => {
+      const rendered: string[] = [];
+      for (const part of body.split(/;\s*/)) {
+        const slot = part
+          .trim()
+          .match(/^(.*?)\s*\[\[cite:([A-Za-z0-9._:-]+)\]\]$/);
+        const cluster = slot && clusterById.get(slot[2]);
+        if (!slot || !cluster || !/^\([^()]+\)$/.test(cluster.text))
+          return original;
+        const label = cluster.text.slice(1, -1);
+        const author = label.replace(/, (?:\d{4}[a-z]?|n\.d\.)(?:, .+)?$/, "");
+        if (slot[1] && slot[1] !== label && slot[1] !== author) return original;
+        rendered.push(renderCluster(cluster, label));
       }
-      return `[${escapeMarkdownLabel(cluster.text)}](${buildPlanCitationSourceUri(cluster.sources[0])})`;
+      return `(${rendered.join("; ")})`;
+    },
+  );
+  let visibleMarkdown = boundParentheses.replace(
+    /(\([^()\r\n]*\)[\t ]*)?(\[\[cite:[A-Za-z0-9._:-]+\]\](?:[\t ]*\[\[cite:[A-Za-z0-9._:-]+\]\])*)/g,
+    (_token, literalLabel: string | undefined, tokens: string) => {
+      const group = [...tokens.matchAll(CITATION_TOKEN)].map((match) => {
+        const cluster = clusterById.get(match[1]);
+        if (!cluster) throw new Error(`Citation ${match[1]} was not formatted`);
+        return cluster;
+      });
+      const combinedLabel =
+        group.length === 1
+          ? group[0].text
+          : `(${group.map((cluster) => cluster.text.replace(/^\(|\)$/g, "")).join("; ")})`;
+      // A parenthesis may also contain an introductory qualifier ("e.g.,"
+      // or a claim ending in a colon). Preserve that prose, replacing only
+      // the exact ordered CSL citation suffix with links inside the group.
+      const literal = literalLabel?.trim() || "";
+      const labels = group.map((cluster) => cluster.text.slice(1, -1));
+      const suffix = labels.join("; ");
+      if (
+        group.every((cluster) => /^\([^()]+\)$/.test(cluster.text)) &&
+        literal.startsWith("(") &&
+        literal.endsWith(`${suffix})`)
+      ) {
+        const introduction = literal.slice(1, -suffix.length - 1);
+        if (/[,;:]\s+$/.test(introduction)) {
+          return `(${introduction}${group.map((cluster, index) => renderCluster(cluster, labels[index])).join("; ")})`;
+        }
+      }
+      // Bind only an exact host-formatted label to its adjacent token group.
+      // Neither unrelated parentheses nor separate occurrences are removed.
+      const prefix =
+        literalLabel?.trim() === combinedLabel ? "" : literalLabel || "";
+      return prefix + group.map((cluster) => renderCluster(cluster)).join(" ");
     },
   );
   CITATION_TOKEN.lastIndex = 0;

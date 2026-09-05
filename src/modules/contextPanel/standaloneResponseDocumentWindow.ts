@@ -1,21 +1,8 @@
 import { HTML_NS } from "../../utils/domHelpers";
-import { stripWebSourceMarkersForDisplay } from "../../webAccess/attribution";
 import type { Message } from "./types";
 import type { ResponseActionTarget } from "./state";
 import { sanitizeText, setStatus } from "./textUtils";
-import {
-  buildQuoteDisplayMarkdown,
-  getMessageQuoteDisplay,
-} from "./quoteRenderPlan";
-import { renderRenderedMarkdownInto } from "./renderedMarkdown";
-import {
-  decorateAssistantCitationLinks,
-  renderQuoteCitationPlaceholders,
-} from "./assistantCitationLinks";
-import {
-  decorateWebSourceIndicators,
-  injectWebSourceAnchorTokens,
-} from "./webSourceIndicators";
+import { renderAssistantRichText } from "./assistantRichText";
 import { renderAssistantGeneratedImagesInto } from "./generatedImageRender";
 import { openStandaloneDocumentWindow } from "./standaloneDocumentWindow";
 
@@ -72,14 +59,6 @@ function renderResponseDocument(
   const assistantMessage = buildAssistantMessage(target);
   const pairedUserMessage = buildPairedUserMessage(target);
   const webSourceAnchors = target.webSourceAnchors || [];
-  const sourceMarkdown = stripWebSourceMarkersForDisplay(
-    sanitizeText(getMessageQuoteDisplay(assistantMessage).markdown),
-  );
-  const displayMarkdown = buildQuoteDisplayMarkdown({
-    markdown: injectWebSourceAnchorTokens(sourceMarkdown, webSourceAnchors),
-    quoteCitations: target.quoteCitations,
-    allowLegacyInference: webSourceAnchors.length === 0,
-  });
 
   root.className =
     "llm-plan-document-window-root llm-response-document-window-root";
@@ -92,28 +71,17 @@ function renderResponseDocument(
   title.textContent = titleText;
   article.appendChild(title);
 
-  if (displayMarkdown.trim()) {
+  if (target.contentText.trim()) {
     const content = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
     content.className = "llm-response-document-markdown";
-    renderRenderedMarkdownInto(content, displayMarkdown, doc);
-    renderQuoteCitationPlaceholders({
+    renderAssistantRichText({
       body: root,
       panelItem: target.item,
       bubble: content,
       assistantMessage,
       pairedUserMessage,
+      webSourceAnchors,
     });
-    if (webSourceAnchors.length) {
-      decorateWebSourceIndicators(content, doc, webSourceAnchors);
-    } else {
-      decorateAssistantCitationLinks({
-        body: root,
-        panelItem: target.item,
-        bubble: content,
-        assistantMessage,
-        pairedUserMessage,
-      });
-    }
     article.appendChild(content);
   }
 

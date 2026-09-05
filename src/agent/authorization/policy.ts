@@ -7,6 +7,8 @@ import type {
   AuthorizationDecision,
   OriginalAuthorizationContext,
 } from "./types";
+import { isConversationOnlyMemoryRequest } from "../skills/noteIntent";
+import { isLiteratureDiscovery } from "../model/literatureIntent";
 
 const PROHIBITION = String.raw`(?:do\s+not|don't|dont|never|must\s+not|no)`;
 const LIBRARY_MUTATION = [
@@ -77,7 +79,7 @@ function constraint(
   effects: ActionEffect[],
   domains: ActionDomain[],
   description: string,
-): ActionConstraint {
+): Extract<ActionConstraint, { kind: "deny_effects" }> {
   return { kind: "deny_effects", effects, domains, description };
 }
 
@@ -88,9 +90,59 @@ function mechanismConstraint(
   return { kind: "deny_mechanisms", mechanisms, description };
 }
 
-export function parseActionConstraints(userText: string): ActionConstraint[] {
+/** Qualified prohibitions constrain operations; their verbs are not affirmative intent. */
+function separateQualifiedActionProhibitions(userText: string): {
+  text: string;
+  constraints: ActionConstraint[];
+} {
   const constraints: ActionConstraint[] = [];
-  const globalMutationText = withoutRelativeMutationExclusions(userText);
+  let text = userText.replace(
+    /\b(?:do\s+not|don't|dont|never|must\s+not)\s+(?:permanently\s+delete|delete\s+permanently)\b/gi,
+    () => {
+      constraints.push({
+        ...constraint(
+          ["delete"],
+          ["zotero_library", "privileged_zotero", "filesystem"],
+          "The user prohibited permanent deletion; recoverable Zotero trash is allowed.",
+        ),
+        exceptOperations: ["trash_items"],
+      });
+      return "";
+    },
+  );
+  text = text.replace(
+    /\b(?:do\s+not|don't|dont|never|must\s+not)\s+create\s+((?:(?:a|an|any|new)\s+)*(?:notes?|papers?)(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)(?:(?:a|an|any|new)\s+)*(?:notes?|papers?))*)\b(?=\s*(?:[.!?;\n]|$|\b(?:in|for|on|under)\b))/gi,
+    (_match, targets: string) => {
+      const operations = [
+        ...(/\bnotes?\b/i.test(targets)
+          ? ["note_create", "save_note", "save_notes_batch"]
+          : []),
+        ...(/\bpapers?\b/i.test(targets)
+          ? ["create_items", "import_identifiers", "import_local_files"]
+          : []),
+      ];
+      constraints.push({
+        ...constraint(
+          ["create"],
+          ["zotero_library", "privileged_zotero"],
+          `The user prohibited creating Zotero ${/\bnotes?\b/i.test(targets) ? "notes" : "papers"}${/\bnotes?\b/i.test(targets) && /\bpapers?\b/i.test(targets) ? " or papers" : ""}.`,
+        ),
+        operations,
+      });
+      return "";
+    },
+  );
+  return { text, constraints };
+}
+
+export function withoutQualifiedActionProhibitions(text: string): string {
+  return separateQualifiedActionProhibitions(text).text;
+}
+
+export function parseActionConstraints(userText: string): ActionConstraint[] {
+  const qualified = separateQualifiedActionProhibitions(userText);
+  const constraints = qualified.constraints;
+  const globalMutationText = withoutRelativeMutationExclusions(qualified.text);
   if (matchesAny(globalMutationText, LIBRARY_MUTATION)) {
     constraints.push(
       constraint(
@@ -132,6 +184,8 @@ export function hasExplicitNoWriteConstraint(userText: string): boolean {
   return parseActionConstraints(userText).some(
     (entry) =>
       entry.kind === "deny_effects" &&
+      !entry.exceptOperations?.length &&
+      !entry.operations?.length &&
       entry.effects.some((effect) =>
         ["create", "modify", "delete"].includes(effect),
       ),
@@ -139,7 +193,10 @@ export function hasExplicitNoWriteConstraint(userText: string): boolean {
 }
 
 export function proposalViolatesConstraints(
-  proposal: Pick<ActionProposal, "domains" | "effects" | "invocationPlan">,
+  proposal: Pick<
+    ActionProposal,
+    "operation" | "domains" | "effects" | "invocationPlan"
+  >,
   constraints: readonly ActionConstraint[],
 ): ActionConstraint | null {
   return (
@@ -150,6 +207,21 @@ export function proposalViolatesConstraints(
           constraint.mechanisms.includes(proposal.invocationPlan.mechanism)
         );
       }
+      if (
+        constraint.operations?.length &&
+        proposal.invocationPlan.mechanism === "none" &&
+        proposal.invocationPlan.assurance === "runtime_enforced" &&
+        !proposal.operation
+          .split("+")
+          .some((operation) => constraint.operations!.includes(operation))
+      )
+        return false;
+      if (
+        constraint.exceptOperations?.includes(proposal.operation) &&
+        proposal.invocationPlan.mechanism === "none" &&
+        proposal.invocationPlan.assurance === "runtime_enforced"
+      )
+        return false;
       return (
         proposal.domains.some((domain) =>
           constraint.domains.includes(domain),
@@ -223,6 +295,17 @@ export function authorizeOriginalAction(
     };
   }
   if (
+    isConversationOnlyMemoryRequest(context.userText) &&
+    (proposal.capabilities.includes("zotero.notes") ||
+      proposal.capabilities.includes("file.write"))
+  ) {
+    return {
+      kind: "block",
+      reason:
+        "Remember this within the conversation only. The user did not request a saved note or file; answer from the paper and retain the discussion in chat.",
+    };
+  }
+  if (
     proposal.invocationPlan.impact === "prohibited" ||
     proposal.riskSignals.includes("protected_target") ||
     proposal.riskSignals.includes("raw_database") ||
@@ -238,6 +321,39 @@ export function authorizeOriginalAction(
     proposal.invocationPlan.assurance !== "unknown";
   if (trustedRead) {
     return { kind: "execute", authority: "safe_read" };
+  }
+  if (
+    proposal.capabilities.includes("zotero.import") &&
+    isLiteratureDiscovery(context.userText)
+  ) {
+    return {
+      kind: "block",
+      reason:
+        "Paper discovery requires user selection in every permission mode. Call literature_review with the ranked candidates; only its approved selection may initiate the import.",
+    };
+  }
+  if (context.hasApprovedPlanAuthority) {
+    return { kind: "execute", authority: "plan_approval" };
+  }
+  // Creating requested research material is not a review step. This exemption
+  // applies only after the exact native note action matched the turn contract;
+  // edits, scripts, extra effects, ambiguity and explicit prohibitions retain
+  // their normal authorization path.
+  if (
+    context.hasMatchingActionIntent &&
+    proposal.operation === "note_create" &&
+    proposal.capabilities.length === 1 &&
+    proposal.capabilities[0] === "zotero.notes" &&
+    proposal.invocationPlan.mechanism === "none" &&
+    proposal.invocationPlan.impact === "state_change" &&
+    proposal.invocationPlan.assurance === "runtime_enforced" &&
+    proposal.domains.length === 1 &&
+    proposal.domains[0] === "zotero_library" &&
+    proposal.effects.length === 1 &&
+    proposal.effects[0] === "create" &&
+    !proposal.riskSignals.length
+  ) {
+    return { kind: "execute", authority: "requested_note" };
   }
   if (context.mode === "safe") {
     return {

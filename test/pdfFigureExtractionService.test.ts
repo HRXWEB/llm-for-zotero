@@ -7,6 +7,8 @@ import {
   buildPdfFigureCropPdfFingerprint,
 } from "../src/modules/contextPanel/pdfFigureCropCache";
 import type { AgentToolContext } from "../src/agent/types";
+import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
 
 describe("PdfFigureExtractionService", function () {
   const encoder = new TextEncoder();
@@ -161,6 +163,92 @@ describe("PdfFigureExtractionService", function () {
       captionText: `${label}. Cached precise result.`,
     };
   }
+
+  it("returns submission-ready document assets and page evidence from the real figure result shape", async function () {
+    const cropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
+    const bytes = Uint8Array.from(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+        "base64",
+      ),
+    );
+    files.set(cropPath, bytes);
+    files.set("/tmp/paper.pdf", encoder.encode("source PDF bytes"));
+    const items = new Map([
+      [11, { id: 11, key: "PAPER001", libraryID: 1 }],
+      [
+        22,
+        {
+          id: 22,
+          key: "PDF00001",
+          libraryID: 1,
+          parentID: 11,
+          getFilePathAsync: async () => "/tmp/paper.pdf",
+        },
+      ],
+    ]);
+    globalScope.Zotero = {
+      DataDirectory: { dir: "/tmp/zotero" },
+      Items: { get: (id: number) => items.get(id) },
+    };
+    const result = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => [cachedFigure(cropPath)],
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      context: {
+        ...context,
+        request: {
+          ...context.request,
+          documentOutcomePolicy: {
+            required: true,
+            documentKind: "report",
+            integrityPolicy: "research_grounded",
+            trigger: "document_intent",
+          },
+        },
+      },
+      paperContexts: [paperContext],
+    });
+    const asset = result.figures?.[0].documentAsset as Record<string, unknown>;
+    assert.isObject(
+      asset,
+      "the model must receive all host-owned asset metadata",
+    );
+    assert.include(asset, {
+      durablePath: cropPath,
+      width: 1,
+      height: 1,
+      byteLength: bytes.length,
+    });
+    assert.match(String(asset.contentHash), /^sha256:[a-f0-9]{64}$/);
+    assert.equal(result.artifacts?.[0].contentHash, asset.contentHash);
+    const tool = createSubmitDocumentTool({} as never);
+    const parsed = tool.validate({
+      title: "Summary",
+      markdown: "# Summary\n\nOne extracted figure.",
+      citations: [],
+      quotes: [],
+      assets: [asset],
+      groundingReviewed: "passed",
+      groundingIssues: [],
+    });
+    assert.isTrue(parsed.ok);
+    const observations = await createTrustedReadObservations({
+      toolName: "paper_read",
+      callId: "figure-read",
+      input: { mode: "figures" },
+      result,
+    });
+    assert.lengthOf(observations, 1);
+    assert.deepInclude(observations[0], {
+      itemKey: "PAPER001",
+      attachmentItemKey: "PDF00001",
+      pageIndex: 1,
+      sourceFingerprint: (asset.provenance as Record<string, unknown>)
+        .sourceFingerprint,
+    });
+    assert.deepEqual(observations[0].capabilities, ["figure"]);
+  });
 
   it("returns verified cached crops before source-PDF extraction", async function () {
     const cropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";

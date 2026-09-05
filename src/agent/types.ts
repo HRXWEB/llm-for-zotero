@@ -150,6 +150,8 @@ export type AgentPendingField =
       value?: string;
       placeholder?: string;
       editorMode?: "plain" | "json";
+      /** The approved payload format; previewing never changes this format. */
+      contentFormat?: "markdown" | "html";
       spellcheck?: boolean;
     })
   | (AgentPendingFieldBase & {
@@ -313,6 +315,8 @@ export type AgentPendingAction = {
   title: string;
   mode?: "approval" | "review";
   confirmLabel: string;
+  /** Keep a selection action's label bound to the currently checked rows. */
+  selectionAction?: { fieldId: string; verb: string };
   cancelLabel: string;
   description?: string;
   fields: AgentPendingField[];
@@ -624,7 +628,7 @@ export type AgentModelStep =
     }
   | {
       kind: "incomplete";
-      reason: "output_limit" | "provider_pause";
+      reason: "output_limit" | "provider_pause" | "stream_interrupted";
       providerReason?: string;
       text: string;
       recoveryInstruction: string;
@@ -969,18 +973,29 @@ export type AgentToolPresentationSummary =
  * This path is display-only. Interactive review/approval flows should use
  * `createPendingAction` or `createResultReviewAction` instead.
  */
-export type AgentToolResultCard = {
+export type AgentSavedNoteResultCard = {
+  kind: "saved_note";
   title: string;
-  subtitle?: string;
-  body?: string;
-  badges?: string[];
-  href?: string;
-  /**
-   * Optional identifier shown for context. Result-card rendering is read-only;
-   * use review cards for any import workflow.
-   */
-  importIdentifier?: string;
+  destination: string;
+  bodyHtml: string;
+  note: { itemId: number; libraryID: number; key: string };
 };
+
+export type AgentToolResultCard =
+  | AgentSavedNoteResultCard
+  | {
+      kind?: "paper";
+      title: string;
+      subtitle?: string;
+      body?: string;
+      badges?: string[];
+      href?: string;
+      /**
+       * Optional identifier shown for context. Result-card rendering is read-only;
+       * use review cards for any import workflow.
+       */
+      importIdentifier?: string;
+    };
 
 export type AgentToolPresentation = {
   label?: string;

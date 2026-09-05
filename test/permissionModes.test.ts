@@ -599,4 +599,13 @@ describe("provider permission modes", function () {
       ["original:safe", "original:auto", "original:yolo"],
     );
   });
+
+  it("describes requested new notes as confirmation-free in Safe mode", function () {
+    const safe = getOriginalPermissionOptions().find(
+      (entry) => entry.selectionKey === "original:safe",
+    )!;
+    assert.include(safe.description, "Create requested new notes directly");
+    assert.include(safe.description, "other writes");
+    assert.notInclude(safe.description, "every write");
+  });
 });

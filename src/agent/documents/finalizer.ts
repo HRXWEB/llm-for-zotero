@@ -1,4 +1,5 @@
 import { renderMarkdownForNote } from "../../utils/markdown";
+import { Marked } from "marked";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
 import {
@@ -101,6 +102,14 @@ function collectHeadings(markdown: string): Set<string> {
 }
 
 function validateVisibleDocumentPrivacy(markdown: string): void {
+  const parser = new Marked();
+  parser.walkTokens(parser.lexer(markdown), (token) => {
+    if (token.type === "image") {
+      throw new Error(
+        "Document figures must be supplied in assets, not as Markdown image paths. Copy the selected figure's documentAsset from paper_read into assets; the host renders its image, caption and provenance.",
+      );
+    }
+  });
   if (
     /(?:file:\/\/|(?:^|[\s("'])\/(?:Users|home|private|tmp|var)\/|[A-Za-z]:\\(?:Users|Documents|Desktop)\\)/m.test(
       markdown,
@@ -181,10 +190,7 @@ async function resolveVerifiedQuotes(params: {
   markdown: string;
   quotes: SubmitPlanDocumentInput["quotes"];
   corpusKeys: ReadonlySet<string>;
-  evidenceByRef: ReadonlyMap<
-    string,
-    Awaited<ReturnType<typeof listResearchEvidence>>[number]
-  >;
+  evidenceByRef: ReadonlyMap<string, DocumentCitationEvidence>;
 }): Promise<{ markdown: string; verifiedQuotes: PlanVerifiedQuote[] }> {
   const mappings = new Map<string, SubmitPlanDocumentInput["quotes"][number]>();
   for (const quote of params.quotes) {
@@ -286,7 +292,8 @@ async function resolveVerifiedQuotes(params: {
     if (
       !evidence.some(
         (record) =>
-          record.locator?.pageIndex === verification.certificate.pageIndex,
+          record.locator?.pageIndex === undefined ||
+          record.locator.pageIndex === verification.certificate.pageIndex,
       )
     ) {
       throw new Error(
@@ -314,8 +321,49 @@ async function resolveVerifiedQuotes(params: {
   const quotesById = new Map(
     verifiedQuotes.map((quote) => [quote.quoteId, quote]),
   );
+  // A model can write the literal block and then attach its quote token as
+  // provenance. Bind that adjacent pair before expansion, otherwise both
+  // copies become independently certified display blocks.
+  const blocks = new Marked().lexer(params.markdown);
+  let reboundManualQuote = false;
+  const normalizeLiteral = (text: string) => text.replace(/\s+/g, " ").trim();
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (block.type !== "blockquote") continue;
+    const inlineAnchor = block.text.match(
+      /\s*\[\[quote:([A-Za-z0-9._:-]+)\]\](?:\s*(\[\[cite:[A-Za-z0-9._:-]+\]\]))?(?:\s*\([^()\n]*\b\d{4}[a-z]?\))?\s*$/,
+    );
+    let nextIndex = index + 1;
+    while (blocks[nextIndex]?.type === "space") nextIndex += 1;
+    const following = blocks[nextIndex];
+    const anchor =
+      inlineAnchor ||
+      (following?.type === "paragraph"
+        ? following.raw
+            .trim()
+            .match(
+              /^(?:\([^()\n]*\b\d{4}[a-z]?\)\s*)?\[\[quote:([A-Za-z0-9._:-]+)\]\](?:\s*(\[\[cite:[A-Za-z0-9._:-]+\]\]))?$/,
+            )
+        : null);
+    const quote = anchor ? quotesById.get(anchor[1]) : undefined;
+    const literal = inlineAnchor
+      ? block.text.slice(0, inlineAnchor.index)
+      : block.text;
+    if (!quote || normalizeLiteral(literal) !== normalizeLiteral(quote.text))
+      continue;
+    block.raw = `[[quote:${quote.quoteId}]]\n${anchor![2] || ""}\n\n`;
+    reboundManualQuote = true;
+    if (inlineAnchor) continue;
+    for (let consumed = index + 1; consumed <= nextIndex; consumed += 1) {
+      blocks[consumed].raw = "";
+    }
+    index = nextIndex;
+  }
   return {
-    markdown: params.markdown.replace(QUOTE_TOKEN, (_token, quoteId: string) =>
+    markdown: (reboundManualQuote
+      ? blocks.map((block) => block.raw).join("")
+      : params.markdown
+    ).replace(QUOTE_TOKEN, (_token, quoteId: string) =>
       quotesById
         .get(quoteId)!
         .text.split(/\r?\n/)
@@ -859,7 +907,14 @@ function evidenceFromObservations(
             pageIndex: observation.pageIndex,
             sourceFingerprint: observation.sourceFingerprint,
           }
-        : undefined,
+        : observation.attachmentItemKey
+          ? {
+              kind: "attachment_text",
+              attachmentItemKey: observation.attachmentItemKey,
+              pageIndex: observation.pageIndex,
+              sourceFingerprint: observation.sourceFingerprint,
+            }
+          : undefined,
   }));
 }
 
@@ -1039,18 +1094,24 @@ export class DirectDocumentFinalizer {
         "A grounding review with limitations must record the detected issues",
       );
     }
-    if (params.input.quotes.length) {
-      throw new Error(
-        "Direct document quote mappings are not yet supported; paraphrase with a grounded citation instead",
-      );
-    }
     const evidence = evidenceFromObservations(observations);
     const corpus = researchGrounded
       ? coverageFromObservations(observations)
       : params.input.citations.flatMap((cluster) => cluster.sources);
+    const resolvedQuotes = await resolveVerifiedQuotes({
+      markdown: params.input.markdown,
+      quotes: params.input.quotes,
+      corpusKeys: new Set(
+        observations.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+      ),
+      evidenceByRef: new Map(
+        evidence.map((entry) => [entry.evidenceRef, entry]),
+      ),
+    });
+    validateVisibleDocumentPrivacy(resolvedQuotes.markdown);
     const formatted = formatDocumentCitations({
       gateway: this.gateway,
-      draftMarkdown: params.input.markdown,
+      draftMarkdown: resolvedQuotes.markdown,
       clusters: params.input.citations,
       corpus,
       evidence,
@@ -1068,7 +1129,9 @@ export class DirectDocumentFinalizer {
       groundingReviewed: researchGrounded
         ? params.input.groundingReviewed
         : "not_run",
-      quoteVerified: "not_applicable",
+      quoteVerified: resolvedQuotes.verifiedQuotes.length
+        ? "verified"
+        : "not_applicable",
       issues: [...params.input.groundingIssues],
     };
     const documentId = `${params.runId}:document:1`;
@@ -1077,6 +1140,7 @@ export class DirectDocumentFinalizer {
         title,
         markdown: formatted.visibleMarkdown,
         citations: formatted.citationBundle,
+        verifiedQuotes: resolvedQuotes.verifiedQuotes,
         assets: durableAssets,
         coverageItems,
         validation,
@@ -1102,7 +1166,7 @@ export class DirectDocumentFinalizer {
       visibleMarkdown: formatted.visibleMarkdown,
       visibleHtml: renderMarkdownForNote(formatted.visibleMarkdown),
       citationBundle: formatted.citationBundle,
-      verifiedQuotes: [],
+      verifiedQuotes: resolvedQuotes.verifiedQuotes,
       assets: durableAssets,
       coverageStatus: researchGrounded ? "partial" : undefined,
       coverageItems,
