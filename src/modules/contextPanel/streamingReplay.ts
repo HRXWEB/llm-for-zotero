@@ -1,0 +1,428 @@
+import { loadPlanExecutionLedger } from "../../agent/plans/store";
+/** Deterministic native workflow fixture; never invoked by production UI. */
+import { createAgentTurnEventHandler } from "./agentMode/agentEngine";
+import {
+  buildAgentEngineDepsForTests,
+  getConversationKey,
+  refreshConversationPanels,
+} from "./chat";
+import { chatHistory } from "./state";
+import { agentRunTraceCache } from "./agentState";
+import { getConversationWriteGeneration } from "../../shared/conversationWriteFence";
+import { createBlockStreamCoalescer } from "./blockStreamCoalescer";
+import { persistChatScrollSnapshotForConversationKey } from "./chatScrollSnapshots";
+import type { AgentEvent, AgentRunEventRecord } from "../../agent/types";
+import type { PlanExecutionLedger } from "../../agent/plans/types";
+import type { Message } from "./types";
+
+export type StreamingReplayResult = {
+  historyTurns: number;
+  chunks: number;
+  wrapperReplacements: number;
+  progressReplacements: number;
+  progressMutations: number;
+  focusPreserved: boolean;
+  manualScrollDelta: number;
+  exactReasoning: boolean;
+  statusVisible: boolean;
+  progressUpdatePreserved: boolean;
+  finalAnswerVisible: boolean;
+  ledgerReadsDuringText: number;
+  geometryReadsDuringText: number;
+  renderMs: number[];
+  inputFrameMs: number[];
+  typingFrameMs: number[];
+  composerPreserved: boolean;
+  resumeVisibilityCorrect: boolean;
+  singleExecutionProgress: boolean;
+};
+
+export async function exerciseStreamingReplay(
+  panel: { body: HTMLElement; item: Zotero.Item },
+  input: { historyTurns: number; chunks: number },
+): Promise<StreamingReplayResult> {
+  const { body, item } = panel;
+  const doc = body.ownerDocument;
+  const win = doc.defaultView!;
+  const box = body.querySelector<HTMLDivElement>("#llm-chat-box")!;
+  // A visible, sized native viewport is required for timing and focus evidence.
+  body.style.left = "0";
+  body.style.zIndex = "99999";
+  const key = getConversationKey(item);
+  const runId = `stream-replay-${Date.now()}`;
+  const history: Message[] = [];
+  for (let n = 0; n < input.historyTurns; n++) {
+    history.push({
+      role: "user",
+      text: `Earlier question ${n}`,
+      timestamp: n * 2 + 1,
+    });
+    history.push({
+      role: "assistant",
+      text: "A completed answer.\n\n".repeat(12),
+      timestamp: n * 2 + 2,
+    });
+  }
+  const user: Message = {
+    role: "user",
+    text: "Review the corpus",
+    timestamp: Date.now(),
+  };
+  const message: Message = {
+    role: "assistant",
+    text: "",
+    timestamp: user.timestamp + 1,
+    runMode: "agent",
+    agentRunId: runId,
+    streaming: true,
+  };
+  history.push(user, message);
+  chatHistory.set(key, history);
+  const ledger = {
+    version: 1,
+    executionId: runId,
+    planId: runId,
+    revision: 1,
+    conversationKey: key,
+    planDigest: "fixture",
+    attempt: 1,
+    provider: "original",
+    status: "running",
+    grant: {
+      version: 1,
+      planId: runId,
+      revision: 1,
+      planDigest: "fixture",
+      conversationKey: key,
+      conversationGeneration: 0,
+      authority: "user",
+      approvedAt: 1,
+    },
+    activeTaskId: "read",
+    createdAt: 1,
+    startedAt: 1,
+    updatedAt: 1,
+    evidence: [],
+    tasks: [
+      {
+        version: 1,
+        taskId: "read",
+        planStepId: "read",
+        executionId: runId,
+        kind: "required_step",
+        content: "Read the corpus",
+        activeForm: "Reading the corpus",
+        acceptanceCriteria: [],
+        expectedEffect: "read",
+        obligationIds: [],
+        status: "in_progress",
+        attemptCount: 1,
+        evidenceIds: [],
+        failureReasons: [],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+  } as PlanExecutionLedger;
+  const records: AgentRunEventRecord[] = [];
+  const push = (_runId: string, event: AgentEvent) =>
+    records.push({
+      runId,
+      seq: records.length + 1,
+      eventType: event.type,
+      payload: event,
+      createdAt: Date.now(),
+    });
+  push(runId, { type: "plan_execution_updated", ledger });
+  for (let n = 0; n < Math.min(input.historyTurns, 55); n++) {
+    push(runId, {
+      type: "tool_call",
+      callId: `paper-${n}`,
+      name: "paper_read",
+      args: { itemKey: `fixture-${n}` },
+    });
+    push(runId, {
+      type: "tool_result",
+      callId: `paper-${n}`,
+      name: "paper_read",
+      ok: true,
+      actionReceipts: [],
+      content: { text: "Completed paper evidence. ".repeat(80) },
+    });
+  }
+  const initial = "Existing reasoning paragraph with evidence.\n".repeat(1000);
+  push(runId, { type: "reasoning", round: 1, summary: initial });
+  message.reasoningSummary = initial;
+  agentRunTraceCache.set(runId, records);
+  refreshConversationPanels(body, item);
+  await Zotero.Promise.delay(100);
+  const findWrapper = () =>
+    box.querySelector<HTMLElement>(
+      `.llm-message-wrapper[data-message-timestamp="${message.timestamp}"]`,
+    )!;
+  const findProgress = () =>
+    box.querySelector<HTMLElement>(".llm-plan-container-execution")!;
+  const thinkingSummary = box.querySelector<HTMLElement>(
+    ".llm-agent-reasoning-summary",
+  );
+  thinkingSummary?.dispatchEvent(
+    new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+  );
+  await Zotero.Promise.delay(100);
+  await loadPlanExecutionLedger(runId);
+  const progress = findProgress();
+  const trigger = progress.querySelector<HTMLButtonElement>(
+    ".llm-plan-progress-trigger",
+  )!;
+  trigger.click();
+  trigger.focus({ preventScroll: true });
+  box.dispatchEvent(
+    new win.WheelEvent("wheel", { deltaY: -100, bubbles: true }),
+  );
+  box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight - 400);
+  persistChatScrollSnapshotForConversationKey(key, box);
+  const scrollTop = box.scrollTop;
+  let wrapper = findWrapper();
+  let lastProgress = progress;
+  const result: StreamingReplayResult = {
+    ...input,
+    wrapperReplacements: 0,
+    progressReplacements: 0,
+    progressMutations: 0,
+    focusPreserved: true,
+    manualScrollDelta: 0,
+    exactReasoning: false,
+    statusVisible: false,
+    progressUpdatePreserved: false,
+    finalAnswerVisible: false,
+    ledgerReadsDuringText: 0,
+    geometryReadsDuringText: 0,
+    renderMs: [],
+    inputFrameMs: [],
+    typingFrameMs: [],
+    composerPreserved: false,
+    singleExecutionProgress: false,
+    resumeVisibilityCorrect:
+      win.getComputedStyle(progress.querySelector(".llm-plan-actions")!)
+        ?.display === "none",
+  };
+  const observer = new win.MutationObserver((mutations) => {
+    result.progressMutations += mutations.length;
+  });
+  observer.observe(progress, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    characterData: true,
+  });
+  const query = Zotero.DB.queryAsync;
+  Zotero.DB.queryAsync = async function (sql: string, ...args: unknown[]) {
+    if (sql.includes("llm_for_zotero_plan_executions"))
+      result.ledgerReadsDuringText++;
+    return (query as Function).call(Zotero.DB, sql, ...args);
+  } as typeof query;
+  const measured = Array.from(
+    box.querySelectorAll(".llm-message-wrapper.user"),
+  ) as HTMLElement[];
+  const restoreGeometry: Array<() => void> = [];
+  for (const node of measured) {
+    if (!node) continue;
+    const measure = node.getBoundingClientRect;
+    node.getBoundingClientRect = () => {
+      result.geometryReadsDuringText++;
+      return measure.call(node);
+    };
+    restoreGeometry.push(() => {
+      node.getBoundingClientRect = measure;
+    });
+  }
+  const deps = buildAgentEngineDepsForTests(
+    item,
+    "upstream",
+    getConversationWriteGeneration(key),
+  );
+  const ui = deps.getPanelRequestUI(body);
+  const helpers = deps.createPanelUpdateHelpers(body, item, key, ui);
+  let measuring = true;
+  const refresh = () => {
+    const start = win.performance.now();
+    helpers.refreshAssistantMessageSafely(message);
+    if (measuring) result.renderMs.push(win.performance.now() - start);
+  };
+  const coalescer = createBlockStreamCoalescer({
+    onBlock: (text) => {
+      message.pendingFinalText = (message.pendingFinalText || "") + text;
+      refresh();
+    },
+  });
+  const handle = createAgentTurnEventHandler({
+    deps,
+    body,
+    ui,
+    conversationKey: key,
+    runtimeRequest: {
+      conversationKey: key,
+      mode: "agent",
+      userText: user.text,
+    },
+    assistantMessage: message,
+    pairedUserMessage: user,
+    history,
+    isCompactCommand: false,
+    compactStyle: "replace-assistant",
+    messageDeltaCoalescer: coalescer,
+    flushMessageDeltas: coalescer.flushNow,
+    queueRefresh: refresh,
+    refreshAssistant: refresh,
+    refreshChatSafely: helpers.refreshChatSafely,
+    setStatusSafely: helpers.setStatusSafely,
+    pushTraceEvent: push,
+    scheduleQueueDrain: () => {},
+    uiRelease: { releaseReady: () => {} },
+  });
+  let expected = initial;
+  try {
+    for (let n = 0; n < input.chunks; n++) {
+      const delta = `Stream chunk ${n}: compare this evidence.\n`;
+      expected += delta;
+      const start = win.performance.now();
+      await handle({ type: "reasoning", round: 1, summary: delta });
+      if (wrapper !== findWrapper()) result.wrapperReplacements++;
+      if (lastProgress !== findProgress()) result.progressReplacements++;
+      wrapper = findWrapper();
+      lastProgress = findProgress();
+      result.focusPreserved &&= doc.activeElement === trigger;
+      await new Promise<void>((resolve) =>
+        win.requestAnimationFrame(() => {
+          result.inputFrameMs.push(win.performance.now() - start);
+          resolve();
+        }),
+      );
+    }
+    result.manualScrollDelta = box.scrollTop - scrollTop;
+    const displayed = Array.from(
+      box.querySelectorAll(".llm-agent-reasoning-text"),
+    )
+      .map((node) => node?.textContent || "")
+      .join("");
+    result.exactReasoning = displayed.trim() === expected.trim();
+    measuring = false;
+    observer.disconnect();
+    Zotero.DB.queryAsync = query;
+    for (const restore of restoreGeometry) restore();
+    const task = progress.querySelector(
+      ".llm-plan-task-list",
+    )?.firstElementChild;
+    const changed = {
+      ...ledger,
+      updatedAt: 2,
+      tasks: ledger.tasks.map((task) => ({
+        ...task,
+        activeForm: "Checking corpus coverage",
+        updatedAt: 2,
+      })),
+    };
+    await handle({ type: "plan_execution_updated", ledger: changed });
+    result.progressUpdatePreserved =
+      findProgress() === progress &&
+      progress.querySelector(".llm-plan-progress-trigger") === trigger &&
+      progress.querySelector(".llm-plan-task-list")?.firstElementChild ===
+        task &&
+      Boolean(progress.textContent?.includes("Checking corpus coverage"));
+    const composer = ui.inputBox!;
+    composer.focus({ preventScroll: true });
+    composer.value = "Draft ";
+    composer.dispatchEvent(
+      new win.CompositionEvent("compositionstart", { bubbles: true }),
+    );
+    for (let n = 0; n < 10; n++) {
+      const start = win.performance.now();
+      composer.value += "文";
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+      composer.dispatchEvent(
+        new win.InputEvent("input", {
+          bubbles: true,
+          data: "文",
+          inputType: "insertCompositionText",
+          isComposing: true,
+        }),
+      );
+      await handle({
+        type: "reasoning",
+        round: 1,
+        summary: `Interactive chunk ${n}. `,
+      });
+      await new Promise<void>((resolve) =>
+        win.requestAnimationFrame(() => {
+          result.typingFrameMs.push(win.performance.now() - start);
+          resolve();
+        }),
+      );
+    }
+    composer.dispatchEvent(
+      new win.CompositionEvent("compositionend", {
+        bubbles: true,
+        data: "文".repeat(10),
+      }),
+    );
+    result.composerPreserved =
+      composer.value === `Draft ${"文".repeat(10)}` &&
+      doc.activeElement === composer &&
+      composer.selectionStart === composer.value.length;
+    await handle({ type: "status", text: "Streaming replay status" });
+    result.statusVisible = Boolean(
+      ui.status?.textContent?.includes("Streaming replay status"),
+    );
+    await handle({
+      type: "plan_execution_updated",
+      ledger: { ...changed, status: "interrupted", updatedAt: 3 },
+    });
+    result.resumeVisibilityCorrect &&=
+      win.getComputedStyle(progress.querySelector(".llm-plan-actions")!)
+        ?.display !== "none";
+    await handle({
+      type: "final",
+      text: "Final replay answer with **evidence**.",
+    });
+    result.finalAnswerVisible = Boolean(
+      box.textContent?.includes("Final replay answer with evidence."),
+    );
+    // Resuming creates another turn for the same execution. History refreshes
+    // must retain only its newest progress owner inside each mounted panel.
+    const resumedRunId = `${runId}-resumed`;
+    agentRunTraceCache.set(resumedRunId, [
+      {
+        ...records[0],
+        runId: resumedRunId,
+        payload: {
+          type: "plan_execution_updated",
+          ledger: { ...changed, status: "interrupted", updatedAt: 4 },
+        },
+      },
+    ]);
+    history.push(
+      { ...user, text: "Approved plan", timestamp: user.timestamp + 2 },
+      {
+        ...message,
+        text: "[Cancelled]",
+        agentRunId: resumedRunId,
+        streaming: false,
+        timestamp: user.timestamp + 3,
+      },
+    );
+    refreshConversationPanels(body, item);
+    result.singleExecutionProgress =
+      box.querySelectorAll(`[data-llm-plan-execution-id="${runId}"]`).length ===
+      1;
+    agentRunTraceCache.delete(resumedRunId);
+    return result;
+  } finally {
+    observer.disconnect();
+    Zotero.DB.queryAsync = query;
+    for (const restore of restoreGeometry) restore();
+    coalescer.cancel();
+    message.streaming = false;
+    agentRunTraceCache.delete(runId);
+    body.style.left = "-10000px";
+  }
+}

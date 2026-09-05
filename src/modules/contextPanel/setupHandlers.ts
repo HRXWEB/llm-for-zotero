@@ -176,6 +176,7 @@ import {
   getConversationKey,
   ensureConversationLoaded,
   persistChatScrollSnapshot,
+  disposeChatRendering,
   isScrollUpdateSuspended,
   requestChatScrollFollowBottom,
   cancelChatScrollFollowBottomRequest,
@@ -2061,13 +2062,14 @@ export function setupHandlers(
     captureChatBoxViewportState();
   };
 
+  let cleanupStreamingScrollListeners = () => {};
   if (item && chatBox) {
     const handleStreamingFollowWheel = (event: WheelEvent) => {
       noteQuoteValidationUserActivity();
       if (!item || !chatBox) return;
       if (!isCurrentConversationStreaming()) return;
       if (event.deltaY < 0) {
-        cancelChatScrollFollowBottomRequest(item);
+        cancelChatScrollFollowBottomRequest(item, chatBox || undefined);
         return;
       }
       if (event.deltaY <= 0) return;
@@ -2106,7 +2108,7 @@ export function setupHandlers(
       // Skip persistence when scroll was caused by our own programmatic
       // scrollTop writes or by layout mutations (e.g. button relayout
       // changing the flex-sized chat area).
-      if (isScrollUpdateSuspended()) {
+      if (isScrollUpdateSuspended(chatBox || undefined)) {
         captureChatBoxViewportState();
         return;
       }
@@ -2126,7 +2128,7 @@ export function setupHandlers(
           isStreaming: isCurrentConversationStreaming(),
         });
         if (followAction === "cancel") {
-          cancelChatScrollFollowBottomRequest(item);
+          cancelChatScrollFollowBottomRequest(item, chatBox || undefined);
         } else if (followAction === "follow") {
           requestChatScrollFollowBottom(body, item, chatBox);
           captureChatBoxViewportState();
@@ -2137,9 +2139,32 @@ export function setupHandlers(
       captureChatBoxViewportState();
     };
     chatBox.addEventListener("wheel", handleStreamingFollowWheel, {
-      passive: false,
+      passive: true,
     });
     chatBox.addEventListener("scroll", persistScroll, { passive: true });
+    const handleStreamingScrollKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable=true]")) return;
+      if (
+        ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+        (event.key === " " && event.shiftKey)
+      ) {
+        if (item) cancelChatScrollFollowBottomRequest(item, chatBox);
+      }
+    };
+    const handleStreamingTouch = () => {
+      if (item) cancelChatScrollFollowBottomRequest(item, chatBox);
+    };
+    chatBox.addEventListener("keydown", handleStreamingScrollKey);
+    chatBox.addEventListener("touchstart", handleStreamingTouch, {
+      passive: true,
+    });
+    cleanupStreamingScrollListeners = () => {
+      chatBox.removeEventListener("wheel", handleStreamingFollowWheel);
+      chatBox.removeEventListener("scroll", persistScroll);
+      chatBox.removeEventListener("keydown", handleStreamingScrollKey);
+      chatBox.removeEventListener("touchstart", handleStreamingTouch);
+    };
   }
 
   // Capture scroll before click/focus interactions that may trigger a panel
@@ -8370,6 +8395,8 @@ export function setupHandlers(
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
     disposeConversationTurnNavigator(body);
+    disposeChatRendering(body);
+    cleanupStreamingScrollListeners();
     body.removeEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
     body.removeEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
     body.removeEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);

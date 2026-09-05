@@ -6,6 +6,9 @@ import { describe, it } from "mocha";
 
 import {
   applyChatScrollSnapshot,
+  isScrollUpdateSuspended,
+  cancelFollowBottomCatchup,
+  setFollowBottomChatScrollSnapshot,
   clearChatScrollSnapshotsForTests,
   cancelChatNavigation,
   consumePendingChatScrollRestoreForTests,
@@ -203,6 +206,30 @@ function appendElement(
 }
 
 describe("chat scroll snapshots", function () {
+  it("keeps scrolling intent and programmatic-scroll suppression local to each panel", async function () {
+    clearChatScrollSnapshotsForTests();
+    const a = new FakeElement();
+    const b = new FakeElement();
+    a.scrollHeight = b.scrollHeight = 2000;
+    a.clientHeight = b.clientHeight = 400;
+    const boxA = a as unknown as HTMLDivElement;
+    const boxB = b as unknown as HTMLDivElement;
+    setFollowBottomChatScrollSnapshot(1, boxA);
+    setFollowBottomChatScrollSnapshot(1, boxB);
+    cancelFollowBottomCatchup(1, boxA);
+    assert.equal(getChatScrollSnapshot(1, boxA)?.mode, "manual");
+    assert.equal(getChatScrollSnapshot(1, boxB)?.mode, "followBottom");
+    applyChatScrollSnapshot(boxA, {
+      mode: "manual",
+      scrollTop: 300,
+      updatedAt: 1,
+    });
+    assert.isTrue(isScrollUpdateSuspended(boxA));
+    assert.isFalse(isScrollUpdateSuspended(boxB));
+    await Promise.resolve();
+    assert.isFalse(isScrollUpdateSuspended(boxA));
+  });
+
   it("rerenders only quote-validated assistant wrappers", function () {
     const chatSource = readFileSync(
       resolve(here, "../src/modules/contextPanel/chat.ts"),

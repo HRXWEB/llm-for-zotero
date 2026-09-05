@@ -40,6 +40,7 @@ type DirtyFlags = {
 };
 
 type ConversationTurnNavigatorController = {
+  updateAssistant: (message: Message) => void;
   sync: (
     messages: readonly Message[],
     options?: SyncConversationTurnNavigatorOptions,
@@ -295,6 +296,8 @@ export function createConversationTurnNavigator(params: {
   let disposed = false;
   let visible = false;
   let entries: ConversationTurnProjection[] = [];
+  let geometryFrom = 0;
+  const assistantEntries = new Map<Message, ConversationTurnProjection>();
   let structureSignature = "";
   let contentSignature = "";
   let contentMagnitude = 0;
@@ -470,7 +473,11 @@ export function createConversationTurnNavigator(params: {
   const measureTurnGeometry = () => {
     const viewportRect = chatBox.getBoundingClientRect();
     let lastStart = 0;
-    turnStarts = entries.map((entry) => {
+    turnStarts = entries.map((entry, index) => {
+      if (index < geometryFrom && turnStarts[index] !== undefined) {
+        lastStart = turnStarts[index];
+        return lastStart;
+      }
       const wrapper = wrapperByTurnKey.get(entry.key);
       if (!wrapper) return lastStart;
       const rect = wrapper.getBoundingClientRect();
@@ -478,6 +485,7 @@ export function createConversationTurnNavigator(params: {
       lastStart = Math.max(lastStart, nextStart);
       return lastStart;
     });
+    geometryFrom = entries.length;
     dirty.active = true;
     if (!preview.hidden) positionPreview();
   };
@@ -605,9 +613,20 @@ export function createConversationTurnNavigator(params: {
         let eligibilityChanged = false;
         for (const resizeEntry of resizeEntries) {
           if (resizeEntry.target === chatShell) {
+            geometryFrom = 0;
             eligibilityChanged = true;
             continue;
           }
+          const messageIndex = Number(
+            (resizeEntry.target as HTMLElement).dataset.messageIndex,
+          );
+          const affected = entries.findIndex(
+            (entry) => entry.userMessageIndex >= messageIndex,
+          );
+          geometryFrom = Math.min(
+            geometryFrom,
+            affected < 0 ? entries.length : affected,
+          );
           const previousSize = observedSizes.get(resizeEntry.target);
           const nextSize = {
             width: resizeEntry.contentRect.width,
@@ -739,6 +758,20 @@ export function createConversationTurnNavigator(params: {
   });
 
   const controller: ConversationTurnNavigatorController = {
+    updateAssistant(message) {
+      if (disposed) return;
+      const entry = assistantEntries.get(message);
+      if (!entry) return;
+      const answer = projectAnswerPreview(message);
+      if (
+        entry.answerText === answer.text &&
+        entry.answerStatus === answer.status
+      )
+        return;
+      entry.answerText = answer.text;
+      entry.answerStatus = answer.status;
+      if (entries[previewIndex] === entry) schedule({ reconcile: true });
+    },
     sync(messages, options) {
       if (disposed) return;
       if (options && "conversationKey" in options) {
@@ -774,6 +807,15 @@ export function createConversationTurnNavigator(params: {
       contentSignature = nextContentSignature;
       contentMagnitude = nextMagnitude;
       entries = nextEntries;
+      geometryFrom = 0;
+      assistantEntries.clear();
+      for (const entry of entries) {
+        const assistant =
+          entry.assistantMessageIndex === undefined
+            ? undefined
+            : messages[entry.assistantMessageIndex];
+        if (assistant) assistantEntries.set(assistant, entry);
+      }
       markerOrderDirty = markerOrderDirty || structureChanged;
 
       const wrappers = Array.from(
@@ -846,4 +888,11 @@ export function syncConversationTurnNavigator(
 
 export function disposeConversationTurnNavigator(body: Element): void {
   controllers.get(body)?.dispose();
+}
+
+export function updateStreamingTurnNavigator(
+  body: Element,
+  message: Message,
+): void {
+  controllers.get(body)?.updateAssistant(message);
 }

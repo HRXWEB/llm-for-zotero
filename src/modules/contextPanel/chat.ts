@@ -1,3 +1,5 @@
+import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
+import { disposePlanProgress } from "./agentTrace/planProgressView";
 import { renderMarkdownForNote } from "../../utils/markdown";
 import { HTML_NS } from "../../utils/domHelpers";
 import {
@@ -135,7 +137,10 @@ import {
   setFollowBottomChatScrollSnapshot,
   withScrollGuard,
 } from "./chatScrollSnapshots";
-import { syncConversationTurnNavigator } from "./conversationTurnNavigator";
+import {
+  syncConversationTurnNavigator,
+  updateStreamingTurnNavigator,
+} from "./conversationTurnNavigator";
 import { resizeTextareaToContent } from "./textareaSizing";
 import {
   getActiveReaderForSelectedTab,
@@ -347,6 +352,7 @@ import { canEditUserPromptTurn } from "./editability";
 import {
   isFloatingPlanExecutionStatus,
   renderAgentTrace,
+  disposeAgentTrace,
   renderPendingActionCard,
 } from "./agentTrace/render";
 import { applyStableAnimationPhase } from "./stableAnimationPhase";
@@ -361,6 +367,10 @@ import {
   mergeToolActivityPayload,
 } from "./agentTrace/toolActivityDedupe";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
+import {
+  renderStreamingMarkdownInto,
+  disposeStreamingMarkdown,
+} from "./streamingMarkdown";
 import { getWebSourceAnchorsFromTrace } from "../../webAccess/attribution";
 import type { WebSourceAnchor } from "../../webAccess/types";
 import { decorateWebSourceIndicators } from "./webSourceIndicators";
@@ -1461,10 +1471,7 @@ export function syncUserContextAlignmentWidths(body: Element): void {
   }
 }
 
-const followBottomStabilizers = new Map<
-  number,
-  { rafId: number | null; timeoutId: number | null }
->();
+const followBottomStabilizers = new WeakMap<HTMLElement, number>();
 
 /** Legacy cumulative API token usage per conversation key for this UI session. */
 const sessionTokenTotals = new Map<number, number>();
@@ -1625,15 +1632,17 @@ function stickChatBoxToBottomIfFollowing(
   conversationKey: number,
   chatBox: HTMLDivElement,
 ): boolean {
-  const snapshot = getChatScrollSnapshot(conversationKey);
+  const snapshot = getChatScrollSnapshot(conversationKey, chatBox);
   if (
-    (!snapshot || snapshot.mode !== "followBottom") &&
-    !hasActiveFollowBottomCatchupRequest(conversationKey)
+    snapshot
+      ? snapshot.mode !== "followBottom"
+      : !hasActiveFollowBottomCatchupRequest(conversationKey)
   ) {
     return false;
   }
   if (!chatBox.isConnected) return false;
-  chatBox.scrollTop = chatBox.scrollHeight;
+  const bottom = Math.max(0, chatBox.scrollHeight - chatBox.clientHeight);
+  if (Math.abs(chatBox.scrollTop - bottom) > 1) chatBox.scrollTop = bottom;
   persistChatScrollSnapshotForConversationKey(conversationKey, chatBox);
   return true;
 }
@@ -1649,8 +1658,17 @@ export function requestChatScrollFollowBottom(
   stabilizeFollowBottomAfterAsyncChatContent(body, conversationKey, chatBox);
 }
 
-export function cancelChatScrollFollowBottomRequest(item: Zotero.Item): void {
-  cancelFollowBottomCatchup(getConversationKey(item));
+export function cancelChatScrollFollowBottomRequest(
+  item: Zotero.Item,
+  chatBox?: HTMLDivElement,
+): void {
+  cancelFollowBottomCatchup(getConversationKey(item), chatBox);
+  if (chatBox) {
+    const handle = followBottomStabilizers.get(chatBox);
+    if (handle !== undefined)
+      chatBox.ownerDocument.defaultView?.cancelAnimationFrame(handle);
+    followBottomStabilizers.delete(chatBox);
+  }
 }
 
 function scheduleFollowBottomStabilization(
@@ -1659,39 +1677,15 @@ function scheduleFollowBottomStabilization(
   chatBox: HTMLDivElement,
 ): void {
   const win = body.ownerDocument?.defaultView;
-  if (!win) return;
-
-  const clearFollowBottomStabilization = () => {
-    const active = followBottomStabilizers.get(conversationKey);
-    if (!active) return;
-    if (typeof active.rafId === "number") {
-      win.cancelAnimationFrame(active.rafId);
-    }
-    if (typeof active.timeoutId === "number") {
-      win.clearTimeout(active.timeoutId);
-    }
-    followBottomStabilizers.delete(conversationKey);
-  };
-
-  clearFollowBottomStabilization();
-
-  const stickToBottomIfNeeded = () => {
+  if (!win || followBottomStabilizers.has(chatBox)) return;
+  const handle = win.requestAnimationFrame(() => {
+    followBottomStabilizers.delete(chatBox);
+    const activeItem = activeContextPanels.get(body)?.();
+    if (activeItem && getConversationKey(activeItem) !== conversationKey)
+      return;
     stickChatBoxToBottomIfFollowing(conversationKey, chatBox);
-  };
-
-  const handle = {
-    rafId: null as number | null,
-    timeoutId: null as number | null,
-  };
-  handle.rafId = win.requestAnimationFrame(() => {
-    stickToBottomIfNeeded();
-    handle.rafId = null;
   });
-  handle.timeoutId = win.setTimeout(() => {
-    stickToBottomIfNeeded();
-    clearFollowBottomStabilization();
-  }, 80);
-  followBottomStabilizers.set(conversationKey, handle);
+  followBottomStabilizers.set(chatBox, handle);
 }
 
 function stabilizeFollowBottomAfterAsyncChatContent(
@@ -1699,7 +1693,6 @@ function stabilizeFollowBottomAfterAsyncChatContent(
   conversationKey: number,
   chatBox: HTMLDivElement,
 ): void {
-  if (!stickChatBoxToBottomIfFollowing(conversationKey, chatBox)) return;
   scheduleFollowBottomStabilization(body, conversationKey, chatBox);
 }
 
@@ -2875,6 +2868,18 @@ function syncFloatingPlanProgress(chatBox: HTMLElement): void {
     chatBox.querySelectorAll(".llm-plan-container-execution"),
   ).filter(Boolean) as HTMLElement[];
   if (!cards.length) return;
+  const owners = new Map<string, HTMLElement>();
+  for (const card of cards) {
+    const executionId = card.dataset.llmPlanExecutionId;
+    if (!executionId) continue;
+    const owner = owners.get(executionId);
+    if (
+      !owner ||
+      Number(card.dataset.llmPlanRenderSequence || "0") >
+        Number(owner.dataset.llmPlanRenderSequence || "0")
+    )
+      owners.set(executionId, card);
+  }
   const latest = cards.reduce((current, candidate) => {
     const currentSequence = Number(
       current.dataset.llmPlanRenderSequence || "0",
@@ -2886,9 +2891,11 @@ function syncFloatingPlanProgress(chatBox: HTMLElement): void {
   });
   for (const card of cards) {
     if (
-      card !== latest &&
-      card.classList.contains("llm-plan-progress-floating")
+      (card.dataset.llmPlanExecutionId &&
+        owners.get(card.dataset.llmPlanExecutionId) !== card) ||
+      (card !== latest && card.classList.contains("llm-plan-progress-floating"))
     ) {
+      disposePlanProgress(card);
       card.remove();
     }
   }
@@ -2896,8 +2903,9 @@ function syncFloatingPlanProgress(chatBox: HTMLElement): void {
     latest.classList.remove("llm-plan-progress-floating");
     return;
   }
-  latest.classList.add("llm-plan-progress-floating");
-  chatBox.appendChild(latest);
+  if (!latest.classList.contains("llm-plan-progress-floating"))
+    latest.classList.add("llm-plan-progress-floating");
+  if (latest.parentElement !== chatBox) chatBox.appendChild(latest);
 }
 
 function findNativeMcpActionCard(
@@ -5951,16 +5959,52 @@ export function scheduleConversationQuoteRevalidation(
   validateLoadedConversationQuoteMessages(messages, normalizedKey);
 }
 
-function createQueuedRefresh(refresh: () => void): () => void {
-  let refreshQueued = false;
+const queuedPanelRefreshes = new WeakMap<
+  Element,
+  Set<ReturnType<typeof createCoalescedFrameScheduler>>
+>();
+function createQueuedRefresh(refresh: () => void, body?: Element): () => void {
+  const scheduler = createCoalescedFrameScheduler({
+    getWindow: () =>
+      body?.ownerDocument?.defaultView || Zotero.getMainWindow?.(),
+    run: () => {
+      if (body) queuedPanelRefreshes.get(body)?.delete(scheduler);
+      if (!body || body.isConnected) refresh();
+    },
+  });
   return () => {
-    if (refreshQueued) return;
-    refreshQueued = true;
-    setTimeout(() => {
-      refreshQueued = false;
-      refresh();
-    }, 50);
+    if (body) {
+      let pending = queuedPanelRefreshes.get(body);
+      if (!pending) {
+        pending = new Set();
+        queuedPanelRefreshes.set(body, pending);
+      }
+      pending.add(scheduler);
+    }
+    scheduler.schedule();
   };
+}
+
+export function disposeChatRendering(body: Element): void {
+  for (const scheduler of queuedPanelRefreshes.get(body) || [])
+    scheduler.cancel();
+  queuedPanelRefreshes.delete(body);
+  const box = body.querySelector<HTMLDivElement>("#llm-chat-box");
+  if (!box) return;
+  const frame = followBottomStabilizers.get(box);
+  if (frame !== undefined)
+    body.ownerDocument?.defaultView?.cancelAnimationFrame(frame);
+  followBottomStabilizers.delete(box);
+  for (const view of mountedAssistantViews.get(box)?.values() || []) {
+    disposeAgentTrace(view.trace);
+    if (view.answer) disposeStreamingMarkdown(view.answer);
+  }
+  mountedAssistantViews.delete(box);
+  for (const root of Array.from(
+    box.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
+  )) {
+    if (root) disposePlanProgress(root as HTMLElement);
+  }
 }
 
 function waitForUiStep(): Promise<void> {
@@ -8848,8 +8892,9 @@ export async function retryLatestAssistantResponse(
     // Streaming flushes only mutate this assistant message, so re-render just
     // its bubble; refreshChat falls back to a full rebuild if the wrapper is
     // not in the DOM yet.
-    const queueRefresh = createQueuedRefresh(() =>
-      refreshAssistantMessageSafely(assistantMessage),
+    const queueRefresh = createQueuedRefresh(
+      () => refreshAssistantMessageSafely(assistantMessage),
+      body,
     );
     const codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
@@ -10425,7 +10470,7 @@ function buildAgentEngineDeps(
     findLatestRetryPair,
     reconstructRetryPayload,
     isReasoningExpandedByDefault,
-    createQueuedRefresh,
+    createQueuedRefresh: (refresh) => createQueuedRefresh(refresh, panelBody),
     waitForUiStep,
     finalizeCancelledAssistantMessage,
     sanitizeText,
@@ -11511,8 +11556,9 @@ export async function sendQuestion(
 
   // [webchat] Dedicated pipeline — bypass context assembly, send raw PDF + question
   if (effectiveRequestConfig.providerProtocol === "web_sync") {
-    const webChatQueueRefresh = createQueuedRefresh(() =>
-      refreshAssistantMessageSafely(assistantMessage),
+    const webChatQueueRefresh = createQueuedRefresh(
+      () => refreshAssistantMessageSafely(assistantMessage),
+      body,
     );
     const reportWebChatSendOutcome = (
       outcome: "success" | "failed" | "cancelled",
@@ -11755,8 +11801,9 @@ export async function sendQuestion(
     // Streaming flushes only mutate this assistant message, so re-render just
     // its bubble; refreshChat falls back to a full rebuild if the wrapper is
     // not in the DOM yet.
-    const queueRefresh = createQueuedRefresh(() =>
-      refreshAssistantMessageSafely(assistantMessage),
+    const queueRefresh = createQueuedRefresh(
+      () => refreshAssistantMessageSafely(assistantMessage),
+      body,
     );
     const codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
@@ -12299,6 +12346,105 @@ export function renderForkSourceMarkerInto(
   bubble.append(leftRule, button, rightRule);
 }
 
+type MountedAssistantView = {
+  wrapper: HTMLElement;
+  bubble: HTMLElement;
+  trace: HTMLElement;
+  user: Message | null;
+  runId?: string;
+  text: string;
+  quoteCitations?: Message["quoteCitations"];
+  quoteOverride?: Message["quoteDisplayOverride"];
+  answer?: HTMLElement;
+};
+const mountedAssistantViews = new WeakMap<
+  HTMLElement,
+  Map<Message, MountedAssistantView>
+>();
+
+/** Text/activity refreshes never rebuild the conversation or restore its scroll snapshot. */
+function updateMountedAssistantViews(
+  body: Element,
+  item: Zotero.Item,
+  box: HTMLDivElement,
+  messages: ReadonlySet<Message>,
+): boolean {
+  const views = mountedAssistantViews.get(box);
+  if (!views || !messages.size) return false;
+  for (const message of messages) {
+    const view = views.get(message);
+    if (
+      !view ||
+      view.wrapper.parentElement !== box ||
+      !message.streaming ||
+      message.compactMarker ||
+      message.documentId ||
+      message.planDocumentId ||
+      message.agentRunId !== view.runId ||
+      message.generatedImages?.length
+    )
+      return false;
+  }
+  for (const message of messages) {
+    const view = views.get(message)!;
+    const events = message.agentRunId
+      ? getCachedAgentRunEvents(message.agentRunId)
+      : message.pendingAgentTraceEvents || [];
+    let interleaved = false;
+    const trace = renderAgentTrace({
+      doc: box.ownerDocument,
+      panelItem: item,
+      message,
+      userMessage: view.user,
+      events,
+      previous: view.trace,
+      onInterleavedText: () => {
+        interleaved = true;
+      },
+    });
+    if (trace && trace !== view.trace) {
+      view.trace.replaceWith(trace);
+      view.trace = trace;
+    }
+    if (
+      message.text !== view.text ||
+      message.quoteCitations !== view.quoteCitations ||
+      message.quoteDisplayOverride !== view.quoteOverride
+    ) {
+      if (!view.answer) {
+        view.answer = box.ownerDocument.createElement("div");
+        view.answer.className = "llm-assistant-answer";
+        view.bubble.appendChild(view.answer);
+      }
+      renderStreamingMarkdownInto(
+        view.answer,
+        buildAssistantDisplayMarkdownForRender(message),
+        box.ownerDocument,
+        () =>
+          stabilizeFollowBottomAfterAsyncChatContent(
+            body,
+            getConversationKey(item),
+            box,
+          ),
+      );
+      view.text = message.text;
+      view.quoteCitations = message.quoteCitations;
+      view.quoteOverride = message.quoteDisplayOverride;
+      updateStreamingTurnNavigator(body, message);
+      view.bubble.querySelector(".llm-typing")?.remove();
+    }
+    if (view.answer) view.answer.hidden = interleaved;
+  }
+  if (
+    Array.from(messages).some((message) =>
+      views.get(message)?.trace.querySelector(".llm-plan-container-execution"),
+    )
+  )
+    syncFloatingPlanProgress(box);
+  scheduleFollowBottomStabilization(body, getConversationKey(item), box);
+  return true;
+}
+
 export type RefreshChatOptions = {
   rerenderAssistantMessages?: ReadonlySet<Message>;
 };
@@ -12311,6 +12457,17 @@ export function refreshChat(
   if (item && !isPanelConversationCurrent(body, item)) return;
   const chatBox = body.querySelector("#llm-chat-box") as HTMLDivElement | null;
   if (!chatBox) return;
+  if (
+    item &&
+    options.rerenderAssistantMessages &&
+    updateMountedAssistantViews(
+      body,
+      item,
+      chatBox,
+      options.rerenderAssistantMessages,
+    )
+  )
+    return;
   const doc = body.ownerDocument!;
   setPromptMenuTarget(null);
   const paperContextDisplayCache: PaperContextDisplayCache = new Map();
@@ -12458,6 +12615,16 @@ export function refreshChat(
     }
   }
   if (!useTargetedRerender) {
+    for (const root of Array.from(
+      chatBox.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
+    )) {
+      if (root) disposePlanProgress(root as HTMLElement);
+    }
+    for (const view of mountedAssistantViews.get(chatBox)?.values() || []) {
+      disposeAgentTrace(view.trace);
+      if (view.answer) disposeStreamingMarkdown(view.answer);
+    }
+    mountedAssistantViews.delete(chatBox);
     chatBox.innerHTML = "";
   }
 
@@ -13358,11 +13525,15 @@ export function refreshChat(
           : null;
       const agentTraceReplacesAssistantTurn =
         agentTraceEl?.dataset.llmAssistantTurnReplacement === "true";
+      let answerHost: HTMLElement | undefined;
       if (hasAnswerText && !agentUsesInterleavedText) {
         const safeText = buildAssistantDisplayMarkdownForRender(
           msg,
           webSourceAnchors,
         );
+        answerHost = doc.createElement("div");
+        answerHost.className = "llm-assistant-answer";
+        bubble.appendChild(answerHost);
         if (msg.streaming) bubble.classList.add("streaming");
         if (msg.compactMarker) {
           renderCompactMarkerInto(
@@ -13374,7 +13545,7 @@ export function refreshChat(
           );
         } else
           try {
-            renderRenderedMarkdownInto(bubble, safeText, doc, {
+            renderRenderedMarkdownInto(answerHost, safeText, doc, {
               onAsyncContentRendered: () => {
                 stabilizeFollowBottomAfterAsyncChatContent(
                   body,
@@ -13385,9 +13556,9 @@ export function refreshChat(
             });
           } catch (err) {
             ztoolkit.log("LLM render error:", err);
-            bubble.textContent = safeText;
+            answerHost.textContent = safeText;
           }
-        decorateWebSourceIndicators(bubble, doc, webSourceAnchors);
+        decorateWebSourceIndicators(answerHost, doc, webSourceAnchors);
       }
 
       const bubbleHeaderNodes: HTMLElement[] = [];
@@ -13514,6 +13685,22 @@ export function refreshChat(
 
       if (agentTraceEl) {
         bubbleHeaderNodes.push(agentTraceEl);
+      }
+      if (agentTraceEl && msg.streaming) {
+        let views = mountedAssistantViews.get(chatBox);
+        if (!views) {
+          views = new Map();
+          mountedAssistantViews.set(chatBox, views);
+        }
+        views.set(msg, {
+          wrapper,
+          bubble,
+          trace: agentTraceEl,
+          user: previousUserMessage,
+          runId: msg.agentRunId,
+          text: msg.text,
+          answer: answerHost,
+        });
       }
 
       for (let i = bubbleHeaderNodes.length - 1; i >= 0; i -= 1) {
@@ -13885,6 +14072,14 @@ export function refreshChat(
     if (outputLimitRow) wrapper.appendChild(outputLimitRow);
     const existingTargetedWrapper = targetedMessageWrappers.get(msg);
     if (useTargetedRerender && existingTargetedWrapper) {
+      const previousTrace = existingTargetedWrapper.querySelector<HTMLElement>(
+        ".llm-agent-activity",
+      );
+      if (previousTrace) disposeAgentTrace(previousTrace);
+      const previousAnswer = existingTargetedWrapper.querySelector<HTMLElement>(
+        ".llm-assistant-answer",
+      );
+      if (previousAnswer) disposeStreamingMarkdown(previousAnswer);
       existingTargetedWrapper.replaceWith(wrapper);
     } else {
       chatBox.appendChild(wrapper);
@@ -13922,15 +14117,10 @@ export function refreshChat(
     scheduleFollowBottomStabilization(body, conversationKey, chatBox);
   } else {
     const win = body.ownerDocument?.defaultView;
-    const active = followBottomStabilizers.get(conversationKey);
-    if (active && win) {
-      if (typeof active.rafId === "number") {
-        win.cancelAnimationFrame(active.rafId);
-      }
-      if (typeof active.timeoutId === "number") {
-        win.clearTimeout(active.timeoutId);
-      }
-      followBottomStabilizers.delete(conversationKey);
+    const active = followBottomStabilizers.get(chatBox);
+    if (active !== undefined && win) {
+      win.cancelAnimationFrame(active);
+      followBottomStabilizers.delete(chatBox);
     }
   }
 }
@@ -13976,11 +14166,7 @@ export function refreshConversationPanels(
         syncPanelState?.();
       }
     };
-    if (chatBox) {
-      withScrollGuard(chatBox, conversationKey, updatePanel);
-    } else {
-      updatePanel();
-    }
+    updatePanel();
     refreshedPanels.add(body);
   };
 

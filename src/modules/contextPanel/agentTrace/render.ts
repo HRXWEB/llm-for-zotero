@@ -1,3 +1,12 @@
+import {
+  renderStreamingMarkdownInto,
+  disposeStreamingMarkdown,
+} from "../streamingMarkdown";
+import {
+  renderPlanProgress,
+  isFloatingPlanExecutionStatus,
+} from "./planProgressView";
+export { isFloatingPlanExecutionStatus } from "./planProgressView";
 import { getAgentRuntime } from "../../../agent";
 import type {
   AgentPendingChoiceValue,
@@ -56,10 +65,7 @@ import type {
   PlanExecutionLedger,
 } from "../../../agent/types";
 import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../../agent/plans/store";
+import { loadPlanArtifact } from "../../../agent/plans/store";
 import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import {
   PLAN_APPROVED_EVENT,
@@ -117,7 +123,6 @@ type AgentTraceSummaryRow = {
 };
 
 const agentTraceActionExpandedCache = new Map<string, boolean>();
-const planProgressPinnedOpenCache = new Map<string, boolean>();
 const agentActivityExpandedCache = new WeakMap<
   Message,
   { open: boolean; wasWorking: boolean }
@@ -161,6 +166,7 @@ type RenderAgentTraceParams = {
   message: Message;
   userMessage?: Message | null;
   events: AgentRunEventRecord[];
+  previous?: HTMLElement;
   onTraceMissing?: () => void;
   onInterleavedText?: () => void;
 };
@@ -236,11 +242,16 @@ function appendAgentActivityDisclosure(params: {
       : previous || { open: false, wasWorking: false };
   agentActivityExpandedCache.set(message, state);
 
-  const details = doc.createElement("details") as HTMLDetailsElement;
+  const mounted = wrap.querySelector?.<HTMLDetailsElement>(
+    ".llm-agent-activity-details",
+  );
+  const details =
+    mounted || (doc.createElement("details") as HTMLDetailsElement);
   details.className = "llm-agent-activity-details";
   details.open = params.forceOpen === true || state.open;
 
-  const summary = doc.createElement("summary") as HTMLElement;
+  const summary =
+    details.querySelector?.("summary") || doc.createElement("summary");
   summary.className = "llm-agent-activity-summary";
   const duration = formatAgentActivityDuration(
     resolveAgentActivityDurationMs(message, userMessage, events),
@@ -256,11 +267,12 @@ function appendAgentActivityDisclosure(params: {
       : planPhase === "executing"
         ? `Plan ran for ${duration}`
         : `Worked for ${duration}`;
+  if (mounted) return;
   details.append(summary, list);
   details.addEventListener("toggle", () => {
     agentActivityExpandedCache.set(message, {
       open: details.open,
-      wasWorking: working,
+      wasWorking: message.streaming === true,
     });
   });
   wrap.appendChild(details);
@@ -4364,7 +4376,95 @@ function appendSharedAgentTraceEvent(
   }
 }
 
+type TraceProjection = ReturnType<typeof buildAgentTraceDisplayItemsCanonical>;
+const streamingProjections = new WeakMap<
+  Message,
+  {
+    events: AgentRunEventRecord[];
+    count: number;
+    last: AgentRunEventRecord | undefined;
+    text: string;
+    user: Message | null | undefined;
+    projection: TraceProjection;
+    tail?: Extract<AgentRunEventRecord["payload"], { type: "reasoning" }>;
+  }
+>();
+
+/** Reuse the canonical projection; append the active compacted reasoning group. */
 export function buildAgentTraceDisplayItems(
+  events: AgentRunEventRecord[],
+  userMessage?: Message | null,
+  assistantMessage?: Message | null,
+): TraceProjection {
+  const cached = assistantMessage && streamingProjections.get(assistantMessage);
+  if (
+    assistantMessage?.streaming &&
+    cached &&
+    cached.events === events &&
+    cached.count <= events.length &&
+    events[cached.count - 1] === cached.last &&
+    cached.text === assistantMessage.text &&
+    cached.user === userMessage
+  ) {
+    const added = events.slice(cached.count);
+    if (!added.length) return cached.projection;
+    const tail = cached.tail;
+    const lastItem =
+      cached.projection.items[cached.projection.items.length - 1];
+    if (
+      tail &&
+      lastItem?.type === "reasoning" &&
+      added.every(
+        (entry) =>
+          entry.payload.type === "reasoning" &&
+          getReasoningTraceKey(entry.payload) === getReasoningTraceKey(tail),
+      )
+    ) {
+      for (const entry of added) {
+        const next = entry.payload as typeof tail;
+        tail.summary = appendAgentTraceText(tail.summary, next.summary);
+        tail.details = appendAgentTraceText(tail.details, next.details);
+        tail.stepLabel = next.stepLabel || tail.stepLabel;
+      }
+      if (readAgentTraceText(tail.stepLabel))
+        lastItem.label = readAgentTraceText(tail.stepLabel)!;
+      lastItem.summary =
+        readAgentTraceText(tail.details) ||
+        readAgentTraceText(tail.summary) ||
+        undefined;
+      cached.count = events.length;
+      cached.last = events[events.length - 1];
+      return cached.projection;
+    }
+  }
+  const projection = buildAgentTraceDisplayItemsCanonical(
+    events,
+    userMessage,
+    assistantMessage,
+  );
+  if (assistantMessage?.streaming) {
+    const compacted = compactAgentTraceEvents(events);
+    const tail = compacted[compacted.length - 1]?.payload;
+    const lastItem = projection.items[projection.items.length - 1];
+    const canAppend =
+      tail?.type === "reasoning" &&
+      lastItem?.type === "reasoning" &&
+      lastItem.summary ===
+        (readAgentTraceText(tail.details) || readAgentTraceText(tail.summary));
+    streamingProjections.set(assistantMessage, {
+      events,
+      count: events.length,
+      last: events[events.length - 1],
+      text: assistantMessage.text,
+      user: userMessage,
+      projection,
+      tail: canAppend ? { ...tail } : undefined,
+    });
+  } else if (assistantMessage) streamingProjections.delete(assistantMessage);
+  return projection;
+}
+
+function buildAgentTraceDisplayItemsCanonical(
   events: AgentRunEventRecord[],
   userMessage: Message | null | undefined,
   assistantMessage?: Message | null,
@@ -4639,30 +4739,6 @@ function createPlanningDriveIcon(doc: Document): HTMLSpanElement {
   return loader;
 }
 
-const PLAN_STATUS_SYMBOLS: Record<string, string> = {
-  pending: "",
-  in_progress: "",
-  waiting_for_user: "!",
-  interrupted: "↻",
-  completed: "✓",
-  blocked: "!",
-  failed: "×",
-  skipped: "–",
-  cancelled: "×",
-};
-
-export function isFloatingPlanExecutionStatus(
-  status: string | undefined,
-): boolean {
-  return [
-    "pending",
-    "running",
-    "waiting_for_user",
-    "interrupted",
-    "blocked",
-  ].includes(status || "");
-}
-
 let planContainerRenderSequence = 0;
 
 function dispatchPlanEvent(
@@ -4710,12 +4786,23 @@ function getPlanActionContract(
 }
 
 function renderPlanContainer(params: {
+  previous?: HTMLElement;
   doc: Document;
   events: AgentRunEventRecord[];
   projection:
     | { artifact: PlanArtifact; ledger?: undefined }
     | { artifact?: undefined; ledger: PlanExecutionLedger };
 }): HTMLElement {
+  if (params.projection.ledger) {
+    const progress = renderPlanProgress(
+      params.doc,
+      params.projection.ledger,
+      params.events,
+      params.previous,
+    );
+    progress.dataset.llmPlanRenderSequence = `${++planContainerRenderSequence}`;
+    return progress;
+  }
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container";
   root.dataset.llmPlanRenderSequence = `${++planContainerRenderSequence}`;
@@ -4736,34 +4823,6 @@ function renderPlanContainer(params: {
     }
   };
 
-  const executionStatusLabel = (
-    status: PlanExecutionLedger["status"],
-  ): string => {
-    switch (status) {
-      case "pending":
-        return "Starting";
-      case "running":
-        return "In progress";
-      case "waiting_for_user":
-        return "Needs input";
-      case "interrupted":
-        return "Interrupted";
-      case "completed":
-        return "Completed";
-      case "completed_with_exceptions":
-        return "Completed with exceptions";
-      case "blocked":
-        return "Blocked";
-      case "failed":
-        return "Failed";
-      case "cancelled":
-        return "Cancelled";
-      case "superseded":
-        return "Superseded";
-    }
-    return status;
-  };
-
   const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
     const markdown = params.doc.createElement("div");
     markdown.className = "llm-plan-markdown";
@@ -4781,256 +4840,14 @@ function renderPlanContainer(params: {
     return markdown;
   };
 
-  const renderExecutionTasks = (ledger: PlanExecutionLedger): HTMLElement => {
-    const tasks = params.doc.createElement("div");
-    tasks.className = "llm-plan-task-list";
-    ledger.tasks.forEach((entry, index) => {
-      const hasDetails = Boolean(
-        entry.acceptanceCriteria.length ||
-        entry.evidenceIds.length ||
-        entry.failureReasons.length ||
-        entry.parentTaskId,
-      );
-      const row = params.doc.createElement(hasDetails ? "details" : "div") as
-        | HTMLDetailsElement
-        | HTMLDivElement;
-      row.className = `llm-plan-task llm-plan-task-${entry.status}`;
-      if (hasDetails) {
-        (row as HTMLDetailsElement).open = [
-          "waiting_for_user",
-          "interrupted",
-          "blocked",
-          "failed",
-        ].includes(entry.status);
-      }
-
-      const line = params.doc.createElement(hasDetails ? "summary" : "div");
-      line.className = "llm-plan-task-line";
-      const badge = params.doc.createElement("span");
-      badge.className = `llm-plan-task-badge llm-plan-task-badge-${entry.status}`;
-      badge.setAttribute("aria-hidden", "true");
-      applyStableAnimationPhase(badge, entry.startedAt || ledger.createdAt);
-      const symbol = PLAN_STATUS_SYMBOLS[entry.status] || "";
-      badge.textContent = symbol || `${index + 1}`;
-
-      const content = params.doc.createElement("span");
-      content.className = "llm-plan-task-content";
-      const label = params.doc.createElement("span");
-      label.className = "llm-plan-task-label";
-      label.textContent =
-        entry.status === "in_progress" ? entry.activeForm : entry.content;
-      content.appendChild(label);
-      if (
-        entry.status === "in_progress" &&
-        entry.activeForm !== entry.content
-      ) {
-        const original = params.doc.createElement("span");
-        original.className = "llm-plan-task-original";
-        original.textContent = entry.content;
-        content.appendChild(original);
-      } else if (entry.parentTaskId) {
-        const supporting = params.doc.createElement("span");
-        supporting.className = "llm-plan-task-original";
-        supporting.textContent = "Supporting step";
-        content.appendChild(supporting);
-      }
-
-      const pill = params.doc.createElement("span");
-      pill.className = `llm-plan-task-pill llm-plan-task-pill-${entry.status}`;
-      pill.textContent =
-        entry.status === "completed"
-          ? "Done"
-          : entry.status === "failed"
-            ? "Failed"
-            : entry.status === "blocked"
-              ? "Blocked"
-              : entry.status === "waiting_for_user"
-                ? "Needs input"
-                : entry.status === "interrupted"
-                  ? "Interrupted"
-                  : entry.status === "skipped"
-                    ? "Skipped"
-                    : entry.status === "cancelled"
-                      ? "Cancelled"
-                      : "";
-      if (!pill.textContent) pill.hidden = true;
-
-      line.append(badge, content, pill);
-      row.appendChild(line);
-
-      if (hasDetails) {
-        const detail = params.doc.createElement("div");
-        detail.className = "llm-plan-task-details";
-        if (entry.acceptanceCriteria.length) {
-          const criteria = params.doc.createElement("p");
-          criteria.className = "llm-plan-task-criteria";
-          criteria.textContent = `Done when: ${entry.acceptanceCriteria
-            .map((criterion) =>
-              typeof criterion === "string" ? criterion : criterion.description,
-            )
-            .join(" · ")}`;
-          detail.appendChild(criteria);
-        }
-        if (entry.evidenceIds.length) {
-          const evidence = params.doc.createElement("p");
-          evidence.className = "llm-plan-task-evidence";
-          evidence.textContent = `${entry.evidenceIds.length} evidence record${
-            entry.evidenceIds.length === 1 ? "" : "s"
-          } attached`;
-          detail.appendChild(evidence);
-        }
-        if (entry.failureReasons.length) {
-          const failure = params.doc.createElement("p");
-          failure.className = "llm-plan-task-failure";
-          failure.textContent = entry.failureReasons.join(" · ");
-          detail.appendChild(failure);
-        }
-        row.appendChild(detail);
-      }
-      tasks.appendChild(row);
-    });
-    return tasks;
-  };
-
-  const wrapExecutionProgress = (ledger: PlanExecutionLedger): void => {
-    if (!isFloatingPlanExecutionStatus(ledger.status)) {
-      planProgressPinnedOpenCache.delete(ledger.executionId);
-    }
-    const required = ledger.tasks.filter(
-      (entry) => entry.kind === "required_step",
-    );
-    const completed = required.filter(
-      (entry) => entry.status === "completed",
-    ).length;
-    const progressLabel = `${completed} of ${required.length} required steps complete`;
-    const progressTriggerLabel = (open: boolean): string =>
-      `${open ? "Hide" : "Show"} task progress details, ${progressLabel}`;
-    const detailChildren = Array.from(root.children);
-    const liveRegion = detailChildren.find((child) =>
-      child.classList.contains("llm-plan-live-region"),
-    );
-
-    const trigger = params.doc.createElement("button");
-    trigger.type = "button";
-    trigger.className = "llm-plan-progress-trigger";
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", progressTriggerLabel(false));
-    const dot = params.doc.createElement("span");
-    dot.className = "llm-plan-progress-trigger-dot";
-    dot.dataset.status = ledger.status;
-    dot.setAttribute("aria-hidden", "true");
-    const label = params.doc.createElement("strong");
-    label.className = "llm-plan-progress-trigger-label";
-    label.textContent = "Task progress";
-    const count = params.doc.createElement("span");
-    count.className = "llm-plan-progress-trigger-count";
-    count.textContent = `${completed}/${required.length}`;
-    const chevron = params.doc.createElement("span");
-    chevron.className = "llm-plan-progress-trigger-chevron";
-    chevron.textContent = "⌃";
-    chevron.setAttribute("aria-hidden", "true");
-    trigger.append(dot, label, count, chevron);
-
-    const popover = params.doc.createElement("div");
-    popover.className = "llm-plan-progress-popover";
-    popover.setAttribute("aria-label", "Task progress details");
-    for (const child of detailChildren) {
-      if (child !== liveRegion) popover.appendChild(child);
-    }
-
-    const positionFloatingPopover = () => {
-      if (!root.classList.contains("llm-plan-progress-floating")) return;
-      const anchor = trigger.getBoundingClientRect();
-      const container = root.parentElement?.getBoundingClientRect();
-      const viewportWidth = params.doc.documentElement.clientWidth;
-      const viewportHeight = params.doc.documentElement.clientHeight;
-      const boundaryLeft = container?.left ?? 0;
-      const boundaryRight = container?.right ?? viewportWidth;
-      const availableWidth = Math.max(0, boundaryRight - boundaryLeft - 16);
-      const width = Math.min(420, availableWidth);
-      const centeredLeft = anchor.left + anchor.width / 2 - width / 2;
-      const left = Math.max(
-        boundaryLeft + 8,
-        Math.min(centeredLeft, boundaryRight - width - 8),
-      );
-      popover.style.position = "fixed";
-      popover.style.right = "auto";
-      popover.style.bottom = `${Math.max(8, viewportHeight - anchor.top + 7)}px`;
-      popover.style.left = `${left}px`;
-      popover.style.width = `${width}px`;
-      popover.style.maxHeight = `${Math.max(
-        96,
-        Math.min(360, viewportHeight * 0.5, anchor.top - 24),
-      )}px`;
-    };
-
-    const setPinnedOpen = (open: boolean) => {
-      if (open) positionFloatingPopover();
-      if (open) {
-        planProgressPinnedOpenCache.set(ledger.executionId, true);
-      } else {
-        planProgressPinnedOpenCache.delete(ledger.executionId);
-      }
-      root.classList.toggle("llm-plan-progress-open", open);
-      trigger.setAttribute("aria-expanded", open ? "true" : "false");
-      trigger.setAttribute("aria-label", progressTriggerLabel(open));
-    };
-    trigger.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setPinnedOpen(!root.classList.contains("llm-plan-progress-open"));
-    });
-    root.addEventListener("mouseenter", () => {
-      positionFloatingPopover();
-      root.classList.add("llm-plan-progress-hover");
-    });
-    root.addEventListener("mouseleave", () => {
-      root.classList.remove("llm-plan-progress-hover");
-    });
-    root.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      setPinnedOpen(false);
-      trigger.focus();
-    });
-
-    root.replaceChildren(trigger, popover);
-    const pinnedOpen =
-      planProgressPinnedOpenCache.get(ledger.executionId) === true;
-    root.classList.toggle("llm-plan-progress-open", pinnedOpen);
-    trigger.setAttribute("aria-expanded", pinnedOpen ? "true" : "false");
-    trigger.setAttribute("aria-label", progressTriggerLabel(pinnedOpen));
-    if (pinnedOpen) {
-      params.doc.defaultView?.setTimeout(() => {
-        if (!root.classList.contains("llm-plan-progress-open")) return;
-        if (!root.isConnected && !root.parentElement) return;
-        positionFloatingPopover();
-      }, 0);
-    }
-    if (liveRegion) root.appendChild(liveRegion);
-  };
-
-  const paint = (
-    projection:
-      | { artifact: PlanArtifact; ledger?: undefined }
-      | { artifact?: undefined; ledger: PlanExecutionLedger },
-  ) => {
+  const paint = (projection: { artifact: PlanArtifact }) => {
     root.replaceChildren();
     const artifact = projection.artifact;
-    const ledger = projection.ledger;
-    const planId = artifact?.planId || ledger!.planId;
-    const revision = artifact?.revision || ledger!.revision;
+    const planId = artifact.planId;
+    const revision = artifact.revision;
     root.dataset.llmPlanId = planId;
     root.dataset.llmPlanRevision = `${revision}`;
-    if (ledger) {
-      root.dataset.llmPlanExecutionId = ledger.executionId;
-      root.dataset.llmPlanExecutionStatus = ledger.status;
-      applyStableAnimationPhase(root, ledger.createdAt);
-    } else {
-      delete root.dataset.llmPlanExecutionId;
-      delete root.dataset.llmPlanExecutionStatus;
-    }
-    root.classList.toggle("llm-plan-container-execution", Boolean(ledger));
-    root.setAttribute("aria-label", ledger ? "Task progress" : "Plan");
+    root.setAttribute("aria-label", "Plan");
 
     const header = params.doc.createElement("div");
     header.className = "llm-plan-header";
@@ -5038,7 +4855,7 @@ function renderPlanContainer(params: {
     heading.className = "llm-plan-heading";
     const title = params.doc.createElement("strong");
     title.className = "llm-plan-title";
-    title.textContent = ledger ? "Task progress" : "Plan";
+    title.textContent = "Plan";
     heading.appendChild(title);
     if (revision > 1) {
       const version = params.doc.createElement("span");
@@ -5048,10 +4865,8 @@ function renderPlanContainer(params: {
     }
     const status = params.doc.createElement("span");
     status.className = "llm-plan-status";
-    status.textContent = ledger
-      ? executionStatusLabel(ledger.status)
-      : artifactStatusLabel(artifact!.status);
-    status.dataset.status = ledger?.status || artifact!.status;
+    status.textContent = artifactStatusLabel(artifact.status);
+    status.dataset.status = artifact.status;
     header.append(heading, status);
     root.appendChild(header);
 
@@ -5070,77 +4885,13 @@ function renderPlanContainer(params: {
         scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
         root.appendChild(scope);
       }
-    } else {
-      const required = ledger!.tasks.filter(
-        (entry) => entry.kind === "required_step",
-      );
-      const completed = required.filter(
-        (entry) => entry.status === "completed",
-      ).length;
-      const progress = params.doc.createElement("div");
-      progress.className = "llm-plan-progress";
-      progress.setAttribute("role", "progressbar");
-      progress.setAttribute("aria-label", "Required task completion");
-      progress.setAttribute("aria-valuemin", "0");
-      progress.setAttribute("aria-valuemax", `${required.length}`);
-      progress.setAttribute("aria-valuenow", `${completed}`);
-      const progressTrack = params.doc.createElement("span");
-      progressTrack.className = "llm-plan-progress-track";
-      progressTrack.setAttribute("aria-hidden", "true");
-      const progressFill = params.doc.createElement("span");
-      progressFill.className = "llm-plan-progress-fill";
-      progressFill.style.width = `${
-        required.length ? Math.round((completed / required.length) * 100) : 0
-      }%`;
-      progressTrack.appendChild(progressFill);
-      progress.appendChild(progressTrack);
-      root.append(progress, renderExecutionTasks(ledger!));
-      const researchProgress = [...params.events]
-        .reverse()
-        .map((entry) => entry.payload)
-        .find(
-          (event) =>
-            event.type === "plan_research_progress" &&
-            event.progress.executionId === ledger!.executionId,
-        );
-      if (researchProgress?.type === "plan_research_progress") {
-        const research = params.doc.createElement("div");
-        research.className = "llm-plan-research-progress";
-        research.textContent = `Screened ${researchProgress.progress.screenedItems.toLocaleString()}/${researchProgress.progress.totalItems.toLocaleString()}; deep-read ${researchProgress.progress.deepReadCompleted.toLocaleString()}/${researchProgress.progress.candidateItems.toLocaleString()}`;
-        root.appendChild(research);
-      }
     }
 
     const live = params.doc.createElement("div");
     live.className = "llm-plan-live-region";
     live.setAttribute("aria-live", "polite");
-    live.textContent = projection.ledger
-      ? ledger!.tasks.find((entry) => entry.status === "in_progress")
-          ?.activeForm ||
-        status.textContent ||
-        ""
-      : status.textContent || "";
+    live.textContent = status.textContent || "";
     root.appendChild(live);
-
-    if (projection.ledger?.status === "interrupted") {
-      const recoveryActions = params.doc.createElement("div");
-      recoveryActions.className = "llm-plan-actions";
-      const resume = params.doc.createElement("button");
-      resume.type = "button";
-      resume.className = "llm-plan-action llm-plan-approve";
-      resume.textContent = "Resume execution";
-      resume.addEventListener("click", () => {
-        stageApprovedPlanExecution(projection.ledger!);
-        dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
-          planId: projection.ledger!.planId,
-          revision: projection.ledger!.revision,
-          executionId: projection.ledger!.executionId,
-          recovery: true,
-        });
-      });
-      recoveryActions.appendChild(resume);
-      root.appendChild(recoveryActions);
-    }
 
     if (projection.artifact?.status === "awaiting_approval") {
       const approvalHint = params.doc.createElement("p");
@@ -5279,17 +5030,6 @@ function renderPlanContainer(params: {
         })();
       });
     }
-
-    if (ledger) {
-      const wasFloating = root.classList.contains("llm-plan-progress-floating");
-      wrapExecutionProgress(ledger);
-      if (wasFloating && !isFloatingPlanExecutionStatus(ledger.status)) {
-        root.classList.remove("llm-plan-progress-floating");
-        if (root.parentElement?.classList.contains("llm-messages")) {
-          root.remove();
-        }
-      }
-    }
   };
 
   paint(params.projection);
@@ -5299,21 +5039,6 @@ function renderPlanContainer(params: {
       if (!root.isConnected && !root.parentElement) return;
       if (stored) paint({ artifact: stored });
     });
-  }
-  const ledger = params.projection.ledger;
-  if (ledger) {
-    params.doc.defaultView?.setTimeout(() => {
-      if (!root.isConnected && !root.parentElement) return;
-      void loadPlanExecutionLedger(ledger.executionId)
-        .then((stored) => {
-          if (stored && stored.updatedAt > ledger.updatedAt) {
-            paint({ ledger: stored });
-          }
-        })
-        .catch((error) => {
-          ztoolkit.log("LLM: Failed to refresh Plan execution ledger:", error);
-        });
-    }, 0);
   }
   return root;
 }
@@ -5622,6 +5347,39 @@ function renderPlanDocumentCard(params: {
   return root;
 }
 
+type TraceItemView = { signature: string; node: HTMLElement };
+type TraceView = {
+  list: HTMLElement;
+  items: Map<string, TraceItemView>;
+  plan?: { signature: string; node: HTMLElement };
+  eventCount?: number;
+  lastEvent?: AgentRunEventRecord;
+  quoteCitations?: Message["quoteCitations"];
+  quoteOverride?: Message["quoteDisplayOverride"];
+  formattingVersion?: number;
+};
+const traceViews = new WeakMap<HTMLElement, TraceView>();
+
+export function disposeAgentTrace(root: HTMLElement): void {
+  const view = traceViews.get(root);
+  if (!view) return;
+  for (const item of view.items.values()) disposeStreamingMarkdown(item.node);
+  traceViews.delete(root);
+}
+
+function updateReasoningText(target: HTMLElement, next: string): void {
+  const text = target.firstChild;
+  const previous = target.textContent || "";
+  if (previous === next) return;
+  if (
+    text?.nodeType === 3 &&
+    target.childNodes.length === 1 &&
+    next.startsWith(previous)
+  ) {
+    (text as Text).appendData(next.slice(previous.length));
+  } else target.textContent = next;
+}
+
 export function renderAgentTrace({
   doc,
   panelItem,
@@ -5630,6 +5388,7 @@ export function renderAgentTrace({
   events,
   onTraceMissing,
   onInterleavedText,
+  previous,
 }: RenderAgentTraceParams): HTMLElement | null {
   const runId = message.agentRunId?.trim() || "pending";
   if (
@@ -5639,16 +5398,43 @@ export function renderAgentTrace({
   ) {
     return null;
   }
-  const wrap = doc.createElement("div");
-  wrap.className = "llm-agent-activity";
-  applyStableAnimationPhase(
-    wrap,
-    message.waitingAnimationStartedAt ||
-      events.find((entry) => entry.createdAt > 0)?.createdAt ||
-      message.timestamp,
-  );
-  const list = doc.createElement("div");
+  const retained = previous ? traceViews.get(previous) : undefined;
+  const wrap = retained ? previous! : doc.createElement("div");
+  if (!retained) wrap.className = "llm-agent-activity";
+  if (!retained)
+    applyStableAnimationPhase(
+      wrap,
+      message.waitingAnimationStartedAt ||
+        events.find((entry) => entry.createdAt > 0)?.createdAt ||
+        message.timestamp,
+    );
+  const list = retained?.list || doc.createElement("div");
   list.className = "llm-agent-activity-list";
+  const view: TraceView = retained || { list, items: new Map() };
+  traceViews.set(wrap, view);
+  const added =
+    retained &&
+    view.eventCount !== undefined &&
+    events[view.eventCount - 1] === view.lastEvent
+      ? events.slice(view.eventCount)
+      : null;
+  const formattingChanged =
+    view.quoteCitations !== message.quoteCitations ||
+    view.quoteOverride !== message.quoteDisplayOverride;
+  if (formattingChanged)
+    view.formattingVersion = (view.formattingVersion || 0) + 1;
+  view.quoteCitations = message.quoteCitations;
+  view.quoteOverride = message.quoteDisplayOverride;
+  const textOnly =
+    !formattingChanged &&
+    added &&
+    added.every(
+      (entry) =>
+        entry.payload.type === "reasoning" ||
+        entry.payload.type === "message_delta",
+    );
+  view.eventCount = events.length;
+  view.lastEvent = events[events.length - 1];
 
   if (!events.length) {
     onTraceMissing?.();
@@ -5680,6 +5466,10 @@ export function renderAgentTrace({
     onInterleavedText?.();
   }
   const pending = getPendingConfirmation(events);
+  if (!textOnly) {
+    wrap.className = "llm-agent-activity";
+    delete wrap.dataset.llmAssistantTurnReplacement;
+  }
   if (pending) {
     wrap.classList.add("llm-agent-activity-with-pending-action");
   }
@@ -5687,13 +5477,66 @@ export function renderAgentTrace({
     wrap.classList.add("llm-agent-activity-question-card");
     wrap.dataset.llmAssistantTurnReplacement = "true";
     onInterleavedText?.();
-    wrap.appendChild(renderPendingActionCard(doc, pending));
+    wrap.replaceChildren(renderPendingActionCard(doc, pending));
+    view.items.clear();
     return wrap;
   }
   const hasFinalResponse = events.some(
     (entry) => entry.payload.type === "final",
   );
+  let cursor = list.firstChild;
+  const nextViews = new Map<string, TraceItemView>();
+  let currentKey = "";
+  let currentSignature = "";
+  const place = (node: HTMLElement) => {
+    if (node !== cursor) list.insertBefore(node, cursor);
+    cursor = node.nextSibling;
+    nextViews.set(currentKey, { signature: currentSignature, node });
+  };
   for (const [itemIndex, itemEntry] of processItems.entries()) {
+    currentKey =
+      itemEntry.type === "reasoning"
+        ? `reasoning:${itemEntry.key}`
+        : itemEntry.type === "action" && itemEntry.detailKey
+          ? `action:${itemEntry.detailKey}`
+          : `${itemEntry.type}:${itemIndex}`;
+    currentSignature = JSON.stringify(itemEntry);
+    if (
+      itemEntry.type === "inline_text" ||
+      (itemEntry.type === "message" && itemEntry.markdown)
+    )
+      currentSignature += `:${view.formattingVersion || 0}`;
+    const old = view.items.get(currentKey);
+    if (old?.signature === currentSignature) {
+      place(old.node);
+      continue;
+    }
+    if (old && itemEntry.type === "inline_text" && message.streaming) {
+      renderStreamingMarkdownInto(
+        old.node,
+        buildAgentTraceMarkdownForRender(itemEntry.text, message),
+        doc,
+        () => {},
+      );
+      place(old.node);
+      continue;
+    }
+    if (old && itemEntry.type === "reasoning") {
+      const target = old.node.querySelector<HTMLElement>(
+        ".llm-agent-reasoning-text",
+      );
+      if (target) {
+        updateReasoningText(
+          target,
+          itemEntry.summary || itemEntry.details || "",
+        );
+        const label = old.node.querySelector("summary");
+        if (label && label.textContent !== itemEntry.label)
+          label.textContent = itemEntry.label;
+        place(old.node);
+        continue;
+      }
+    }
     if (itemEntry.type === "inline_text") {
       const inlineEl = doc.createElement("div");
       inlineEl.className = "llm-agent-inline-text";
@@ -5706,7 +5549,7 @@ export function renderAgentTrace({
       } catch {
         inlineEl.textContent = inlineText;
       }
-      list.appendChild(inlineEl);
+      place(inlineEl);
       continue;
     }
 
@@ -5727,7 +5570,7 @@ export function renderAgentTrace({
       } else {
         messageEl.textContent = itemEntry.text;
       }
-      list.appendChild(messageEl);
+      place(messageEl);
       continue;
     }
 
@@ -5735,7 +5578,7 @@ export function renderAgentTrace({
       const papers = itemEntry.cards.filter(
         (card) => card.kind !== "saved_note",
       );
-      if (papers.length) list.appendChild(renderResultCardList(doc, papers));
+      if (papers.length) place(renderResultCardList(doc, papers));
       continue;
     }
 
@@ -5751,7 +5594,7 @@ export function renderAgentTrace({
           frameClassName: "llm-agent-image-artifact-frame",
         },
       );
-      if (rendered) list.appendChild(container);
+      if (rendered) place(container);
       continue;
     }
 
@@ -5808,7 +5651,7 @@ export function renderAgentTrace({
       // Details section removed — most models duplicate summary in details
 
       details.appendChild(bodyWrap);
-      list.appendChild(details);
+      place(details);
       continue;
     }
 
@@ -5872,7 +5715,25 @@ export function renderAgentTrace({
       }
     }
 
-    list.appendChild(actionWrap);
+    place(actionWrap);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    list.removeChild(cursor);
+    cursor = next;
+  }
+  for (const [key, old] of view.items) {
+    if (nextViews.get(key)?.node !== old.node)
+      disposeStreamingMarkdown(old.node);
+  }
+  view.items = nextViews;
+  if (textOnly) return wrap;
+
+  if (retained) {
+    for (const child of Array.from(wrap.children)) {
+      if (child !== list.parentElement && child !== view.plan?.node)
+        child?.remove();
+    }
   }
   appendAgentActivityDisclosure({
     doc,
@@ -5902,25 +5763,20 @@ export function renderAgentTrace({
     // second copy below the card. Execution turns still render their final
     // answer normally beside the task-progress projection.
     if (planProjection.artifact) onInterleavedText?.();
-    const planContainer = renderPlanContainer({
-      doc,
-      events,
-      projection: planProjection,
-    });
-    if (planProjection.ledger) {
-      const priorExecutionCards = Array.from(
-        doc.querySelectorAll(
-          ".llm-plan-container-execution[data-llm-plan-execution-id]",
-        ),
-      ).filter(Boolean) as HTMLElement[];
-      for (const node of priorExecutionCards) {
-        if (
-          node.dataset.llmPlanExecutionId === planProjection.ledger.executionId
-        ) {
-          node.remove();
-        }
-      }
-    }
+    const research = [...events]
+      .reverse()
+      .find((entry) => entry.payload.type === "plan_research_progress");
+    const planSignature = JSON.stringify([planProjection, research?.payload]);
+    const planContainer =
+      view.plan?.signature === planSignature
+        ? view.plan.node
+        : renderPlanContainer({
+            doc,
+            events,
+            projection: planProjection,
+            previous: view.plan?.node,
+          });
+    view.plan = { signature: planSignature, node: planContainer };
     const planId =
       planProjection.artifact?.planId || planProjection.ledger!.planId;
     for (const node of Array.from(
@@ -5943,7 +5799,13 @@ export function renderAgentTrace({
           });
       }
     }
-    wrap.appendChild(planContainer);
+    if (
+      !planContainer.parentElement ||
+      (planProjection.ledger &&
+        !isFloatingPlanExecutionStatus(planProjection.ledger.status) &&
+        planContainer.parentElement !== wrap)
+    )
+      wrap.appendChild(planContainer);
   }
 
   const planDocumentId =

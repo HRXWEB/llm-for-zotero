@@ -1,3 +1,4 @@
+import { exerciseStreamingReplay } from "./streamingReplay";
 import { buildUI } from "./buildUI";
 import { getAgentRuntime } from "../../agent";
 import { renderPendingActionCard, renderAgentTrace } from "./agentTrace/render";
@@ -1539,6 +1540,7 @@ async function waitForPanelConversationChange(params: {
   previousConversationKind?: string;
   allowReusedDraft?: boolean;
   previousStatusText?: string;
+  completed?: () => boolean;
 }): Promise<WorkflowTestDiagnostics> {
   const startedAt = Date.now();
   // Generous deadline: the switch path does several DB round-trips, and a
@@ -1553,10 +1555,13 @@ async function waitForPanelConversationChange(params: {
     const kindChanged =
       params.previousConversationKind === undefined ||
       diagnostics.conversationKind !== params.previousConversationKind;
-    if (keyChanged && kindChanged) return diagnostics;
+    if (keyChanged && kindChanged && (!params.completed || params.completed()))
+      return diagnostics;
     if (
       params.allowReusedDraft &&
-      diagnostics.statusText !== params.previousStatusText &&
+      (!params.completed || params.completed()) &&
+      (params.completed ||
+        diagnostics.statusText !== params.previousStatusText) &&
       /^(Reused existing new|Started new)/.test(diagnostics.statusText || "")
     ) {
       return diagnostics;
@@ -1573,13 +1578,35 @@ async function startNewPanelConversation(
   assertWorkflowTestEnabled();
   const panel = getPanel(panelId);
   const before = await getDiagnostics(panelId);
-  dispatchWorkflowClick(panel.body, "#llm-history-new", "New chat button");
-  return waitForPanelConversationChange({
-    panelId,
-    previousConversationKey: before.conversationKey,
-    allowReusedDraft: options?.allowReusedDraft,
-    previousStatusText: before.statusText,
+  // Identity changes before asynchronous hydration clears the old composer.
+  // Observe a fresh completion announcement, including repeated "Started new"
+  // labels, rather than treating the new key as a completed UI transition.
+  const status = panel.body.querySelector("#llm-status");
+  const Observer = panel.body.ownerDocument.defaultView?.MutationObserver;
+  if (!status || !Observer)
+    throw new Error("New-chat completion observer is unavailable");
+  let completed = false;
+  const observer = new Observer(() => {
+    if (/^(Reused existing new|Started new)/.test(status.textContent || ""))
+      completed = true;
   });
+  observer.observe(status, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  try {
+    dispatchWorkflowClick(panel.body, "#llm-history-new", "New chat button");
+    return await waitForPanelConversationChange({
+      panelId,
+      previousConversationKey: before.conversationKey,
+      allowReusedDraft: options?.allowReusedDraft,
+      previousStatusText: before.statusText,
+      completed: () => completed,
+    });
+  } finally {
+    observer.disconnect();
+  }
 }
 
 async function togglePanelConversationMode(
@@ -4679,6 +4706,8 @@ export function installWorkflowTestHarness(targetAddon: {
     createStandaloneNoteFixture,
     renderPanelForItem,
     exerciseBackgroundAgentPublication,
+    exerciseStreamingReplay: (input) =>
+      exerciseStreamingReplay(getPanel(input.panelId), input),
     renderStartupPanelForItem,
     startNewPanelConversation,
     togglePanelConversationMode,

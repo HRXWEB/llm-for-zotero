@@ -27,6 +27,7 @@ import {
 } from "./figureExport";
 
 export type RenderedMarkdownOptions = {
+  deferEnrichment?: boolean;
   resolveImage?: (src: string) => string | null;
   onAsyncContentRendered?: () => void;
 };
@@ -2366,6 +2367,7 @@ export function renderRenderedMarkdownInto(
       target.textContent = sanitizeText(text);
     }
   }
+  if (options?.deferEnrichment) return;
   attachRenderedCodeBlockControls(target, doc);
   attachRenderedCopyButtons(target, doc);
   attachRenderedSvgPreviewButtons(target, doc);

@@ -108,7 +108,50 @@ class FakeElement {
   private html = "";
   private listeners = new Map<string, Array<(event: any) => void>>();
 
-  constructor(public readonly tagName = "div") {}
+  public parentElement: FakeElement | null = null;
+  get childNodes() {
+    return this.children;
+  }
+  get nodeType() {
+    return 1;
+  }
+  get nodeName() {
+    return this.tagName.toUpperCase();
+  }
+  get nextSibling(): FakeElement | null {
+    const siblings = this.parentElement?.children || [];
+    return siblings[siblings.indexOf(this) + 1] || null;
+  }
+  get isConnected() {
+    return false;
+  }
+  remove() {
+    this.parentElement?.removeChild(this);
+  }
+  removeChild(child: FakeElement) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentElement = null;
+    return child;
+  }
+  getAttribute(name: string) {
+    return this.attributes[name] ?? null;
+  }
+  hasAttribute(name: string) {
+    return name in this.attributes;
+  }
+  removeAttribute(name: string) {
+    delete this.attributes[name];
+  }
+  constructor(public readonly tagName = "div") {
+    const attributes = this.attributes;
+    Object.defineProperty(attributes, Symbol.iterator, {
+      value: function* () {
+        for (const [name, value] of Object.entries(attributes))
+          yield { name, value };
+      },
+    });
+  }
 
   set className(value: string) {
     this.classList.add(...value.split(/\s+/).filter(Boolean));
@@ -159,6 +202,8 @@ class FakeElement {
     if (selector === ":scope .llm-codeblock-shell") {
       return this.findByClass("llm-codeblock-shell");
     }
+    if (selector.startsWith(".")) return this.findByClass(selector.slice(1));
+    if (selector === "summary") return this.findAllByTag("summary")[0] || null;
     return null;
   }
 
@@ -223,16 +268,12 @@ class FakeElement {
   }
 
   insertBefore(child: FakeElement, before: FakeElement | null): FakeElement {
-    if (!before) {
-      this.children.unshift(child);
-      return child;
-    }
-    const index = this.children.indexOf(before);
-    if (index < 0) {
-      this.children.unshift(child);
-      return child;
-    }
-    this.children.splice(index, 0, child);
+    if (child === before) return child;
+    child.remove();
+    const index = before ? this.children.indexOf(before) : -1;
+    if (index < 0) this.children.push(child);
+    else this.children.splice(index, 0, child);
+    child.parentElement = this;
     return child;
   }
 
@@ -241,16 +282,16 @@ class FakeElement {
   }
 
   append(...children: FakeElement[]): void {
-    this.children.push(...children);
+    for (const child of children) this.appendChild(child);
   }
 
   appendChild(child: FakeElement): FakeElement {
-    this.children.push(child);
-    return child;
+    return this.insertBefore(child, null);
   }
 
   replaceChildren(...children: FakeElement[]): void {
-    this.children.splice(0, this.children.length, ...children);
+    for (const child of [...this.children]) this.removeChild(child);
+    this.append(...children);
   }
 
   focus(): void {}
@@ -1653,8 +1694,10 @@ describe("agentTrace render", function () {
     const renderProgress = (
       status: "running" | "completed",
       updatedAt: number,
+      previous?: FakeElement,
     ) =>
       renderAgentTrace({
+        previous: previous as unknown as HTMLElement,
         doc: fakeDocument,
         message: {
           role: "assistant",
@@ -1729,7 +1772,7 @@ describe("agentTrace render", function () {
       ?.dispatchFakeEvent("click");
     assert.isTrue(firstRoot?.classList.contains("llm-plan-progress-open"));
 
-    const updated = renderProgress("running", 3);
+    const updated = renderProgress("running", 3, first);
     const updatedRoot = updated.findByClass("llm-plan-container-execution");
     const updatedTrigger = updatedRoot?.findByClass(
       "llm-plan-progress-trigger",
@@ -1738,7 +1781,7 @@ describe("agentTrace render", function () {
     assert.equal(updatedTrigger?.attributes["aria-expanded"], "true");
     assert.include(updatedTrigger?.attributes["aria-label"] || "", "Hide");
 
-    renderProgress("completed", 4);
+    renderProgress("completed", 4, updated);
     const restarted = renderProgress("running", 5);
     const restartedRoot = restarted.findByClass("llm-plan-container-execution");
     assert.isFalse(restartedRoot?.classList.contains("llm-plan-progress-open"));

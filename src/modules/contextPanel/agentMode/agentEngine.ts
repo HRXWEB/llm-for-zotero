@@ -244,6 +244,7 @@ type AgentTurnEventContext = {
   messageDeltaCoalescer: { pushText: (text: string) => void };
   flushMessageDeltas: (reason: BlockStreamFlushReason) => void;
   queueRefresh: () => void;
+  refreshAssistant: () => void;
   refreshChatSafely: () => void;
   setStatusSafely: (text: string, kind: StatusKind) => void;
   pushTraceEvent: (runId: string, event: AgentEvent) => void;
@@ -257,7 +258,7 @@ type AgentTurnEventContext = {
  * only in which user message is paired with the turn, which history array
  * receives compact markers, and how compaction treats the assistant bubble.
  */
-function createAgentTurnEventHandler(
+export function createAgentTurnEventHandler(
   ctx: AgentTurnEventContext,
 ): (event: AgentEvent) => Promise<void> {
   const {
@@ -432,9 +433,9 @@ function createAgentTurnEventHandler(
         setStatusSafely(event.text, "sending");
         if (isCompactingStatus) {
           assistantMessage.pendingAgentTraceEvents = undefined;
-          queueRefresh();
         }
-        break;
+        queueRefresh();
+        return;
       }
       case "reasoning": {
         if (event.summary) {
@@ -551,7 +552,7 @@ function createAgentTurnEventHandler(
       default:
         break;
     }
-    refreshChatSafely();
+    ctx.refreshAssistant();
     await deps.waitForUiStep();
   };
 }
@@ -1791,6 +1792,7 @@ export async function sendAgentTurn(
         messageDeltaCoalescer,
         flushMessageDeltas,
         queueRefresh,
+        refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
         refreshChatSafely,
         setStatusSafely,
         pushTraceEvent,
@@ -2319,6 +2321,7 @@ export async function retryAgentTurn(
         messageDeltaCoalescer,
         flushMessageDeltas,
         queueRefresh,
+        refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
         refreshChatSafely,
         setStatusSafely,
         pushTraceEvent,

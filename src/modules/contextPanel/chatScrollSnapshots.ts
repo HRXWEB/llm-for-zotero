@@ -41,6 +41,10 @@ type RecentChatNavigationSuppression = {
 };
 
 const chatScrollSnapshots = new Map<number, ChatScrollSnapshot>();
+let panelScrollSnapshots = new WeakMap<
+  HTMLDivElement,
+  { key: number; snapshot: ChatScrollSnapshot }
+>();
 const pendingChatScrollRestores = new Map<
   number,
   {
@@ -65,10 +69,23 @@ let recentChatNavigationSuppressions = new WeakMap<
 const liveNavigationBoxes = new Set<HTMLDivElement>();
 const liveNavigationSuppressionBoxes = new Set<HTMLDivElement>();
 
-let scrollUpdatesSuspended = false;
+let suspendedScrollBoxes = new WeakMap<HTMLDivElement, number>();
+let suspendedScrollCount = 0;
+function suspendChatScrollUpdates(box: HTMLDivElement): void {
+  suspendedScrollBoxes.set(box, (suspendedScrollBoxes.get(box) || 0) + 1);
+  suspendedScrollCount++;
+  const active = suspendedScrollBoxes;
+  Promise.resolve().then(() => {
+    if (active !== suspendedScrollBoxes) return;
+    const remaining = (active.get(box) || 1) - 1;
+    if (remaining) active.set(box, remaining);
+    else active.delete(box);
+    suspendedScrollCount--;
+  });
+}
 
-export function isScrollUpdateSuspended(): boolean {
-  return scrollUpdatesSuspended;
+export function isScrollUpdateSuspended(box?: HTMLDivElement): boolean {
+  return box ? suspendedScrollBoxes.has(box) : suspendedScrollCount > 0;
 }
 
 function normalizeConversationKey(conversationKey: number): number | null {
@@ -408,16 +425,31 @@ export function requestFollowBottomCatchup(conversationKey: number): void {
   );
 }
 
-export function cancelFollowBottomCatchup(conversationKey: number): void {
+export function cancelFollowBottomCatchup(
+  conversationKey: number,
+  chatBox?: HTMLDivElement,
+): void {
   const normalized = normalizeConversationKey(conversationKey);
   if (!normalized) return;
   followBottomCatchupRequests.delete(normalized);
+  if (chatBox) {
+    const snapshot: ChatScrollSnapshot = {
+      mode: "manual",
+      scrollTop: chatBox.scrollTop,
+      updatedAt: Date.now(),
+    };
+    panelScrollSnapshots.set(chatBox, { key: normalized, snapshot });
+    chatScrollSnapshots.set(normalized, snapshot);
+  }
 }
 
 export function getChatScrollSnapshot(
   conversationKey: number,
+  chatBox?: HTMLDivElement,
 ): ChatScrollSnapshot | undefined {
   const normalized = normalizeConversationKey(conversationKey);
+  const local = chatBox && panelScrollSnapshots.get(chatBox);
+  if (local && local.key === normalized) return local.snapshot;
   return normalized ? chatScrollSnapshots.get(normalized) : undefined;
 }
 
@@ -428,7 +460,9 @@ export function setFollowBottomChatScrollSnapshot(
   const normalized = normalizeConversationKey(conversationKey);
   if (!normalized) return;
   pendingChatScrollRestores.delete(normalized);
-  chatScrollSnapshots.set(normalized, buildFollowBottomScrollSnapshot(chatBox));
+  const snapshot = buildFollowBottomScrollSnapshot(chatBox);
+  panelScrollSnapshots.set(chatBox, { key: normalized, snapshot });
+  chatScrollSnapshots.set(normalized, snapshot);
 }
 
 export function persistChatScrollSnapshotForConversationKey(
@@ -447,7 +481,9 @@ export function persistChatScrollSnapshotForConversationKey(
   ) {
     return;
   }
-  chatScrollSnapshots.set(normalized, buildChatScrollSnapshot(chatBox));
+  const snapshot = buildChatScrollSnapshot(chatBox);
+  panelScrollSnapshots.set(chatBox, { key: normalized, snapshot });
+  chatScrollSnapshots.set(normalized, snapshot);
 }
 
 function buildNavigationAnchor(
@@ -592,6 +628,10 @@ function persistNavigationDestination(navigation: ActiveChatNavigation): void {
     updatedAt: Date.now(),
     anchor: navigation.anchor,
   };
+  panelScrollSnapshots.set(navigation.chatBox, {
+    key: navigation.conversationKey,
+    snapshot: finalSnapshot,
+  });
   chatScrollSnapshots.set(navigation.conversationKey, finalSnapshot);
   cleanupActiveNavigation(navigation);
   startRecentNavigationSuppression(
@@ -681,13 +721,14 @@ export function navigateChatToMessage(params: {
   if (targetScrollTop === null) return false;
 
   cancelChatNavigation(params.chatBox, false);
-  cancelFollowBottomCatchup(conversationKey);
+  cancelFollowBottomCatchup(conversationKey, params.chatBox);
   const snapshot: ChatScrollSnapshot = {
     mode: "manual",
     scrollTop: targetScrollTop,
     updatedAt: Date.now(),
     anchor,
   };
+  panelScrollSnapshots.set(params.chatBox, { key: conversationKey, snapshot });
   chatScrollSnapshots.set(conversationKey, snapshot);
 
   const cancelFromInput = () => cancelChatNavigation(params.chatBox, true);
@@ -763,6 +804,7 @@ export function persistPendingChatScrollRestoreForConversationKey(
   if (!isChatViewportVisible(chatBox)) return;
   const snapshot = buildChatScrollSnapshot(chatBox, preferredAnchorElement);
   chatScrollSnapshots.set(normalized, snapshot);
+  panelScrollSnapshots.set(chatBox, { key: normalized, snapshot });
   pendingChatScrollRestores.set(normalized, {
     snapshot,
     expiresAt: Date.now() + PENDING_RESTORE_TTL_MS,
@@ -836,15 +878,12 @@ export function applyChatScrollSnapshot(
   chatBox: HTMLDivElement,
   snapshot: ChatScrollSnapshot,
 ): void {
-  scrollUpdatesSuspended = true;
+  suspendChatScrollUpdates(chatBox);
   if (snapshot.mode === "followBottom") {
     chatBox.scrollTop = chatBox.scrollHeight;
   } else if (!restoreChatScrollAnchor(chatBox, snapshot.anchor)) {
     chatBox.scrollTop = clampScrollTop(chatBox, snapshot.scrollTop);
   }
-  Promise.resolve().then(() => {
-    scrollUpdatesSuspended = false;
-  });
 }
 
 export function restoreChatScrollSnapshotForConversationKey(
@@ -874,7 +913,7 @@ export function withScrollGuard(
   const anchoredSnapshot =
     restoreMode === "anchor" ? buildAnchoredChatScrollSnapshot(chatBox) : null;
 
-  scrollUpdatesSuspended = true;
+  suspendChatScrollUpdates(chatBox);
   try {
     fn();
   } finally {
@@ -893,9 +932,6 @@ export function withScrollGuard(
       chatBox.scrollTop = savedScrollTop;
     }
     persistChatScrollSnapshotForConversationKey(conversationKey, chatBox);
-    Promise.resolve().then(() => {
-      scrollUpdatesSuspended = false;
-    });
   }
 }
 
@@ -916,5 +952,7 @@ export function clearChatScrollSnapshotsForTests(): void {
     HTMLDivElement,
     RecentChatNavigationSuppression
   >();
-  scrollUpdatesSuspended = false;
+  panelScrollSnapshots = new WeakMap();
+  suspendedScrollBoxes = new WeakMap();
+  suspendedScrollCount = 0;
 }

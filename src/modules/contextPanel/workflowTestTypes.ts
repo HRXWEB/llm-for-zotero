@@ -443,6 +443,11 @@ export type WorkflowTestApi = {
     noteHtml: string;
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
+  exerciseStreamingReplay: (input: {
+    panelId: string;
+    historyTurns: number;
+    chunks: number;
+  }) => Promise<import("./streamingReplay").StreamingReplayResult>;
   exerciseBackgroundAgentPublication: (input: {
     panelId: string;
     paperBItemId: number;
