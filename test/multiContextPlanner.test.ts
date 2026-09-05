@@ -1282,11 +1282,14 @@ describe("multiContextPlanner", function () {
       advanced: {
         temperature: 0.2,
         outputTokenLimit: { mode: "custom", tokens: 512 },
-        inputTokenCap: 2_000,
+        // Leave a small evidence budget after the shared system instructions.
+        inputTokenCap: 2_500,
       },
     });
 
     assert.equal(plan.mode, "retrieval");
+    assert.isAbove(plan.contextBudget.contextBudgetTokens, 0);
+    assert.isBelow(plan.contextBudget.contextBudgetTokens, 512);
     assert.isAbove(
       plan.selectedChunkCount,
       0,

@@ -260,7 +260,11 @@ export function createUpdatePlanTool(
         additionalProperties: false,
         required: ["steps", "ready"],
         properties: {
-          explanation: { type: "string" },
+          explanation: {
+            type: "string",
+            description:
+              "User-visible explanation rendered directly in the plan card. Follow the readable paper-mention rule; exact item keys belong in the structured scope fields.",
+          },
           ready: { type: "boolean" },
           contract: {
             type: "object",

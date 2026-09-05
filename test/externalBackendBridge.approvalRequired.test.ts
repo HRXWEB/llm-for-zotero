@@ -472,6 +472,11 @@ describe("external bridge action approval handling", function () {
         "Do not create a Papers, papers, Notes, or other alternate subfolder",
       );
       assert.include(customInstruction, "Original agent-mode Zotero behavior");
+      assert.include(customInstruction, "(creator, year)");
+      assert.include(
+        customInstruction,
+        "Keep exact Zotero keys and numeric IDs in structured target fields/internal records",
+      );
       assert.include(
         customInstruction,
         "a prose plan or unwritten note body is not completion",

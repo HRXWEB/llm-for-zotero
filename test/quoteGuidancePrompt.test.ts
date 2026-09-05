@@ -9,6 +9,7 @@ import {
 import { buildAgentStableResourceContextBlock } from "../src/agent/context/resourceContextPlan";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import {
   buildGenericSourceQuoteCitationGuidance,
   buildPaperQuoteCitationGuidance,
@@ -126,6 +127,51 @@ describe("quote guidance prompts", function () {
 
     assertCanonicalCitationContract(text);
     assert.equal(countOccurrences(text, BALANCED_EVIDENCE_GUIDANCE), 1);
+  });
+
+  it("uses readable paper mentions across chat, planning, and native instructions while preserving citation rules", async function () {
+    const planSchema = createUpdatePlanTool().spec.inputSchema;
+    assert.include(
+      (planSchema.properties as any).explanation.description,
+      "User-visible explanation rendered directly in the plan card",
+    );
+    const messages = await buildAgentInitialMessages(request(), [], []);
+    const manifest = buildZoteroEnvironmentManifest({
+      scope: {
+        conversationKey: 1,
+        libraryID: 1,
+        kind: "paper",
+        paperItemID: 11,
+        activeItemId: 11,
+        activeContextItemId: 12,
+        paperTitle: "Prompt Paper",
+      },
+      mcpEnabled: true,
+      mcpReady: true,
+    });
+    for (const prompt of [
+      DEFAULT_SYSTEM_PROMPT,
+      AGENT_PERSONA_INSTRUCTIONS.join("\n"),
+      messages.map((message) => message.content).join("\n"),
+      manifest,
+    ]) {
+      for (const instruction of [
+        "user-facing text (plans, steps, progress, answers)",
+        "(creator, year)",
+        "Disambiguate with a short title, then available version/library",
+        "Missing creator: use title; missing year: n.d.",
+        "call indistinguishable records duplicates",
+        "Never invent metadata",
+        "Keep exact Zotero keys and numeric IDs in structured target fields/internal records",
+        "User-visible tool fields, including plan explanations and step descriptions, follow this display rule too",
+        "Do not repeat raw IDs from user input or tool results as visible paper labels",
+        "display them only on explicit user request for technical identifiers",
+        "Preserve verified-quote sourceLabel strings and formal document CSL citations",
+      ]) {
+        assert.include(prompt, instruction);
+      }
+      assertCanonicalCitationContract(prompt);
+    }
   });
 
   it("includes the canonical contract once in Codex native MCP instructions", function () {
