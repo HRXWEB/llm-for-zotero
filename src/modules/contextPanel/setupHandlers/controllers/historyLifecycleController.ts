@@ -1,3 +1,4 @@
+import { createNoteConversationItem } from "../../noteEditing/conversationItem";
 import { createElement } from "../../../../utils/domHelpers";
 import { t } from "../../../../utils/i18n";
 import type { ConversationSystem } from "../../../../shared/types";
@@ -2267,8 +2268,13 @@ export function createHistoryLifecycleController(
         setStatus(status, t("Could not load this conversation"), "error");
       return false;
     }
-    const nextItem =
-      system === "claude_code"
+    const nextItem = noteFocusItem
+      ? createNoteConversationItem(
+          noteFocusItem,
+          system,
+          normalizedConversationKey,
+        )
+      : system === "claude_code"
         ? createClaudeGlobalPortalItem(libraryID, normalizedConversationKey)
         : system === "codex"
           ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
@@ -2283,9 +2289,7 @@ export function createHistoryLifecycleController(
     ) {
       return false;
     }
-    if (!noteFocusItem) {
-      if (!setCurrentItem(nextItem as any)) return false;
-    }
+    if (!setCurrentItem(nextItem as any)) return false;
     if (system === "claude_code") {
       rememberClaudeConversationSelection({
         conversationKey: normalizedConversationKey,
@@ -2483,7 +2487,14 @@ export function createHistoryLifecycleController(
     // legacy key-only compatibility tombstone; it never cancels a pending
     // deletion intent.
     forgetRecentlyDeletedConversation(resolvedConversationKey);
-    if (!noteFocusItem) {
+    if (noteFocusItem) {
+      const nextItem = createNoteConversationItem(
+        noteFocusItem,
+        system,
+        resolvedConversationKey,
+      );
+      if (!setCurrentItem(nextItem)) return false;
+    } else {
       if (system === "claude_code") {
         const nextItem = createClaudePaperPortalItem(
           paperItem,
@@ -3712,7 +3723,7 @@ export function createHistoryLifecycleController(
     if (forceFresh) {
       clearTransientComposeStateForItem(targetConversationKey);
     }
-    await switchGlobalConversation(targetConversationKey);
+    if (!(await switchGlobalConversation(targetConversationKey))) return false;
     if (status) {
       setStatus(
         status,
@@ -3809,7 +3820,7 @@ export function createHistoryLifecycleController(
     if (forceFresh) {
       clearTransientComposeStateForItem(targetConversationKey);
     }
-    await switchPaperConversation(targetConversationKey);
+    if (!(await switchPaperConversation(targetConversationKey))) return false;
     if (status) {
       setStatus(
         status,

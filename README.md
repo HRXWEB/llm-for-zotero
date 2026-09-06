@@ -293,6 +293,19 @@ reviewable and undoable.
 
 #### Find related papers
 
+Use `/discover_related` while viewing a paper to run the direct OpenAlex action.
+It opens Recommendations, References, and Citations tabs with up to 20 papers per mode by default.
+Use `/discover_related 30` to change the initial retrieval limit, **Load more** to retrieve 20 more per mode while preserving your selections, and **Import selected** to save the papers you choose.
+This shortcut does not require a model.
+
+Ask “find relevant papers” in chat to start model-assisted discovery.
+The agent assesses retrieved candidates and presents a ranked card with relevance reasons.
+An explicit count, such as “find 15 relevant papers,” sets the batch size; otherwise it starts with five.
+Use **Find more** to add another batch of the same size while preserving your selections, then **Import selected** to save the papers you choose.
+Requests for references, citing papers, or a specific search source constrain discovery to that request.
+If fewer relevant matches are available, the card explains the shortfall instead of padding the list.
+A configured model is required for model-assisted discovery; literature search used to answer a question remains a separate flow that can finish with a cited answer without an import card.
+
 <p align="center">
   <img src="./assets/agent/related_papers.gif" alt="Animation showing agent finding related papers in the library" width="1024" />
 </p>

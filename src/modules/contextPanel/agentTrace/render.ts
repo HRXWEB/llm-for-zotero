@@ -1,3 +1,4 @@
+import { getDiscoveryCardProjection } from "./discoveryCardProjection";
 import {
   renderStreamingMarkdownInto,
   disposeStreamingMarkdown,
@@ -1571,11 +1572,14 @@ function renderPaperResultListField(
       if (!loadMoreButton) return;
       loadMoreButton.disabled = true;
       loadMoreButton.textContent = "Loading…";
-      // Resolve the current confirmation with the load_more actionId.
-      // The action will re-fetch with a larger limit and re-invoke
-      // requestConfirmation — producing a fresh card with the expanded
-      // result set and the prior selections preserved (via the data
-      // payload below).
+      // Submit the current selection once; expansion is a read-only
+      // continuation, independent of the import button.
+      const card = container.closest(".llm-agent-hitl-card");
+      if (card)
+        for (const control of Array.from(
+          card.querySelectorAll("input,button,select,textarea"),
+        ) as HTMLInputElement[])
+          control.disabled = true;
       getAgentRuntime().resolveConfirmation(requestId, {
         approved: true,
         actionId: field.loadMoreActionId as string,
@@ -5412,6 +5416,7 @@ function renderPlanDocumentCard(params: {
 
 type TraceItemView = { signature: string; node: HTMLElement };
 type TraceView = {
+  discovery?: { key: string; node: HTMLElement };
   list: HTMLElement;
   items: Map<string, TraceItemView>;
   plan?: { signature: string; node: HTMLElement };
@@ -5503,6 +5508,7 @@ export function renderAgentTrace({
   view.quoteOverride = message.quoteDisplayOverride;
   const textOnly =
     view.allowPlanRecovery === allowPlanRecovery &&
+    message.streaming !== false &&
     !formattingChanged &&
     added &&
     added.every(
@@ -5825,7 +5831,8 @@ export function renderAgentTrace({
         child !== list.parentElement &&
         child !== view.plan?.node &&
         child !== view.document?.node &&
-        child !== view.document?.caption
+        child !== view.document?.caption &&
+        child !== view.discovery?.node
       )
         child?.remove();
     }
@@ -5979,7 +5986,46 @@ export function renderAgentTrace({
     wrap.appendChild(divider);
   }
 
-  if (pending) {
+  const discovery = getDiscoveryCardProjection(events);
+  if (discovery && message.streaming === false) discovery.phase = "closed";
+  if (discovery) {
+    const identity = discovery.pending.action.discovery!;
+    const key = `${identity.sessionId}:${identity.revision}:${discovery.phase}`;
+    if (view.discovery?.key !== key) {
+      const previousScroll =
+        view.discovery?.node.querySelector(".llm-search-results-list")
+          ?.scrollTop || 0;
+      view.discovery?.node.remove();
+      const shell = doc.createElement("div");
+      shell.className = "llm-agent-pending-action-shell";
+      shell.dataset.discoverySession = identity.sessionId;
+      const card = renderPendingActionCard(doc, discovery.pending);
+      if (discovery.phase !== "pending") {
+        for (const control of Array.from(
+          card.querySelectorAll("input,button,select,textarea"),
+        ) as (HTMLInputElement | HTMLButtonElement | HTMLSelectElement)[])
+          control.disabled = true;
+        const status = doc.createElement("div");
+        status.className = "llm-agent-hitl-description";
+        status.setAttribute("role", "status");
+        status.textContent =
+          discovery.phase === "loading"
+            ? "Finding more relevant papers…"
+            : "Paper review closed.";
+        card.prepend(status);
+      }
+      shell.appendChild(card);
+      view.discovery = { key, node: shell };
+      wrap.appendChild(shell);
+      const resultList = card.querySelector(".llm-search-results-list");
+      if (resultList) resultList.scrollTop = previousScroll;
+    } else if (view.discovery.node.parentElement !== wrap)
+      wrap.appendChild(view.discovery.node);
+  } else if (view.discovery) {
+    view.discovery.node.remove();
+    view.discovery = undefined;
+  }
+  if (pending && !pending.action.discovery) {
     const pendingShell = doc.createElement("div");
     pendingShell.className = "llm-agent-pending-action-shell";
     pendingShell.appendChild(renderPendingActionCard(doc, pending));

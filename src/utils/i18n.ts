@@ -389,10 +389,10 @@ const zhCN: Record<string, string> = {
   yolo: "全自动",
   "Create requested new notes directly. Review other writes, filesystem reads outside the current context, commands, scripts, and network actions.":
     "直接创建用户请求的新笔记。审核其他写入、当前上下文之外的文件系统读取，以及命令、脚本和网络操作。",
-  "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.":
-    "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。",
-  "Execute every valid in-scope Original Agent action without mode-based prompts.":
-    "执行原生 Agent 所有有效且在范围内的操作，不显示基于模式的确认提示。",
+  "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.":
+    "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。现有笔记的更改需要审核。",
+  "Execute every valid in-scope Original Agent action without mode-based prompts. Existing-note changes require review.":
+    "执行原生 Agent 所有有效且在范围内的操作，不显示基于模式的确认提示。现有笔记的更改需要审核。",
   "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
     "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",

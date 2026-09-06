@@ -2516,6 +2516,17 @@ export class AgentRuntime {
             );
 
             if (reviewOutcome.kind === "deliver") {
+              // Completion follows the latest review continuation, including a
+              // request for more papers that has not triggered another search.
+              const reviewRecord = toolExecutionRecords.findLast(
+                (record) => record.name === currentResult.name,
+              );
+              if (
+                reviewRecord &&
+                reviewOutcome.toolMessageContent !== undefined
+              ) {
+                reviewRecord.content = reviewOutcome.toolMessageContent;
+              }
               return options.suppressModelDelivery
                 ? { toolResult: currentResult }
                 : {

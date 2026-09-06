@@ -70,6 +70,11 @@ describe("workflow: editable note review card", function () {
       );
       assert.lengthOf(preview.querySelectorAll("li"), 2);
       assert.notInclude(preview.textContent, "<h1>");
+      assert.isTrue(
+        card.querySelector<HTMLDetailsElement>(".llm-note-review-changes")!
+          .open,
+        "the proposed changes are visible before the user interacts with the card",
+      );
       const editor = card.querySelector<HTMLTextAreaElement>("textarea")!;
       assert.equal(
         editor.value,

@@ -1,24 +1,19 @@
 import type { AgentToolDefinition } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { getAgentToolResultHandle } from "../../store/toolResultHandles";
 import { isExplicitLiteratureImport } from "../../model/literatureIntent";
-import type { LiteratureCandidateSet } from "../../services/literatureDiscovery";
+import {
+  type LiteratureReviewInput,
+  discoveryContent,
+  getLiteratureDiscovery,
+  prepareLiteratureDiscoveryReview,
+  resolveLiteratureDiscoveryReview,
+} from "../../services/literatureDiscovery";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
 } from "../../reviewCards";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { fail, ok, validateObject, normalizePositiveInt } from "../shared";
-
-type LiteratureReviewInput = {
-  selections: Array<{
-    candidateSetId: string;
-    candidateIndex: number;
-    reason: string;
-  }>;
-  targetCollectionId?: number;
-  shortfallReason?: string;
-};
 
 export function createLiteratureReviewTool(
   gateway: ZoteroGateway,
@@ -37,7 +32,7 @@ export function createLiteratureReviewTool(
         properties: {
           selections: {
             type: "array",
-            minItems: 1,
+            minItems: 0,
             items: {
               type: "object",
               additionalProperties: false,
@@ -61,6 +56,23 @@ export function createLiteratureReviewTool(
                 },
               },
             },
+          },
+          sessionId: {
+            type: "string",
+            description:
+              "Discovery sessionId from search results or Find more.",
+          },
+          revision: {
+            type: "integer",
+            minimum: 0,
+            description:
+              "Current discovery revision from search results or Find more.",
+          },
+          outcome: {
+            type: "string",
+            enum: ["complete", "no_more", "search_failed"],
+            description:
+              "Use no_more for exhausted relevant matches or search_failed for retrieval errors. Explain either in shortfallReason.",
           },
           targetCollectionId: {
             type: "integer",
@@ -86,10 +98,9 @@ export function createLiteratureReviewTool(
     validate(args) {
       if (
         !validateObject<Record<string, unknown>>(args) ||
-        !Array.isArray(args.selections) ||
-        !args.selections.length
+        !Array.isArray(args.selections)
       )
-        return fail("Provide a nonempty ranked selections list.");
+        return fail("Provide a ranked selections list.");
       const selections: LiteratureReviewInput["selections"] = [];
       for (const entry of args.selections) {
         if (
@@ -113,8 +124,37 @@ export function createLiteratureReviewTool(
       const targetCollectionId = normalizePositiveInt(args.targetCollectionId);
       if (args.targetCollectionId !== undefined && !targetCollectionId)
         return fail("Invalid targetCollectionId.");
+      if (
+        args.sessionId !== undefined &&
+        (typeof args.sessionId !== "string" ||
+          !/^trh_[a-z0-9]+$/i.test(args.sessionId))
+      )
+        return fail("Invalid discovery sessionId.");
+      if (
+        args.revision !== undefined &&
+        (!Number.isSafeInteger(args.revision) || Number(args.revision) < 0)
+      )
+        return fail("Invalid discovery revision.");
+      if (
+        args.outcome !== undefined &&
+        !["complete", "no_more", "search_failed"].includes(String(args.outcome))
+      )
+        return fail("Invalid discovery outcome.");
+      if (
+        (args.outcome === "no_more" ||
+          args.outcome === "search_failed" ||
+          !selections.length) &&
+        !(
+          typeof args.shortfallReason === "string" &&
+          args.shortfallReason.trim()
+        )
+      )
+        return fail("Explain the shortfall or search failure.");
       return ok({
         selections,
+        sessionId: args.sessionId as string | undefined,
+        revision: args.revision as number | undefined,
+        outcome: args.outcome as LiteratureReviewInput["outcome"],
         targetCollectionId,
         shortfallReason:
           typeof args.shortfallReason === "string"
@@ -135,59 +175,19 @@ export function createLiteratureReviewTool(
         throw new Error(
           "This is an explicit import request. Use library_import for the requested count and destination; do not substitute a discovery card.",
         );
-      const selected: Record<string, unknown>[] = [];
-      const identities = new Set<string>();
-      let requestedCount: number | undefined;
-      for (const selection of input.selections) {
-        const record = await getAgentToolResultHandle({
-          conversationKey: context.request.conversationKey!,
-          handle: selection.candidateSetId,
-        });
-        const set = record?.content as LiteratureCandidateSet | undefined;
-        if (
-          !record ||
-          record.toolName !== "literature_search" ||
-          set?.kind !== "literature_candidates" ||
-          set.runId !== context.runId ||
-          set.libraryID !== context.request.libraryID ||
-          record.resourceSignature !== context.resourceSignature
-        )
-          throw new Error(
-            "Candidate set is unavailable or belongs to another turn/library/paper. Search again before reviewing.",
-          );
-        requestedCount = set.requestedCount || requestedCount;
-        const candidate = set.results[selection.candidateIndex - 1];
-        if (!candidate)
-          throw new Error(
-            "Candidate index does not exist in the saved search results.",
-          );
-        const identity = String(
-          candidate.doi ||
-            candidate.arxivId ||
-            candidate.id ||
-            candidate.sourceUrl ||
-            candidate.title,
-        ).toLowerCase();
-        if (identities.has(identity))
-          throw new Error(
-            "The shortlist contains the same paper more than once.",
-          );
-        identities.add(identity);
-        selected.push({ ...candidate, relevanceReason: selection.reason });
-      }
-      const expected = requestedCount || 5;
-      if (
-        selected.length > expected ||
-        (selected.length < expected && !input.shortfallReason)
-      )
-        throw new Error(
-          `Review requires ${expected} ranked papers, not ${selected.length}. Search further or disclose a genuine shortfall.`,
-        );
+      const active = await getLiteratureDiscovery(context, true);
       const targetCollectionId =
+        active?.session.targetCollectionId ||
         input.targetCollectionId ||
         (context.request.turnPaperScope.collections.length === 1
           ? context.request.turnPaperScope.collections[0].collectionId
           : undefined);
+      if (
+        active?.session.revision &&
+        input.targetCollectionId !== undefined &&
+        input.targetCollectionId !== active.session.targetCollectionId
+      )
+        throw new Error("Find more cannot change the import destination.");
       const collection = targetCollectionId
         ? gateway.getCollectionSummary(targetCollectionId)
         : null;
@@ -203,26 +203,42 @@ export function createLiteratureReviewTool(
       );
       const libraryName =
         (library && library.name) || `Library ${context.request.libraryID}`;
-      return {
-        mode: "search",
-        results: selected,
-        reviewRequired: true,
-        libraryID: context.request.libraryID,
+      const discovery = await prepareLiteratureDiscoveryReview(input, context, {
         targetCollectionId,
         destinationLabel: collection
           ? `${libraryName} › ${collection.path || collection.name}`
           : libraryName,
-        shortfallReason: input.shortfallReason,
-      };
+      });
+      return discoveryContent(discovery.record);
     },
     createResultReviewAction: (_input, result, context) =>
       createSearchLiteratureReviewAction(result, context, result.content),
-    resolveResultReview: (_input, result, resolution, context) =>
-      resolveSearchLiteratureReview(
+    resolveResultReview: async (_input, result, resolution, context) => {
+      const content = result.content as {
+        sessionId?: string;
+        revision?: number;
+      };
+      const actionId =
+        resolution.actionId || (resolution.approved ? "import" : "cancel");
+      if (!["find_more", "import", "cancel"].includes(actionId))
+        throw new Error("Unknown discovery action.");
+      const action = !resolution.approved ? "cancel" : actionId;
+      const continuation = await resolveLiteratureDiscoveryReview(
+        content,
+        action,
+        (resolution.data as { selectedPaperIds?: unknown } | undefined)
+          ?.selectedPaperIds,
+        context,
+      );
+      if (action === "find_more") {
+        return { kind: "deliver", toolMessageContent: continuation };
+      }
+      return resolveSearchLiteratureReview(
         result.content as never,
         result,
         resolution,
         context,
-      ),
+      );
+    },
   };
 }

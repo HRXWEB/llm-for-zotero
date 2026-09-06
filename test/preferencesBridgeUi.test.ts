@@ -85,9 +85,9 @@ describe("bridge settings UI behavior", function () {
       assert.equal(t("Permission mode"), "权限模式");
       assert.equal(
         t(
-          "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.",
+          "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.",
         ),
-        "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。",
+        "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。现有笔记的更改需要审核。",
       );
     } finally {
       if (previousZotero) {

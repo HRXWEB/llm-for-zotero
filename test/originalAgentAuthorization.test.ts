@@ -207,10 +207,7 @@ describe("Original Agent unified authorization", function () {
         constraints: parseActionConstraints(userText),
         hasMatchingActionIntent: true,
       };
-      assert.equal(
-        decide(edit, context).kind,
-        mode === "safe" ? "confirm" : "execute",
-      );
+      assert.equal(decide(edit, context).kind, "confirm");
       assert.equal(decide(create, context).kind, "block");
       for (const operation of ["save_note", "save_notes_batch"]) {
         assert.equal(

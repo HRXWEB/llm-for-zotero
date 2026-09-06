@@ -8,6 +8,7 @@ import {
 import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
 import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
 import {
+  appendNoteHtml,
   isLikelyHtmlNoteContent,
   normalizeNoteSourceText,
   stripNoteHtml,
@@ -33,7 +34,11 @@ import {
 import { executeAndRecordUndo } from "./mutateLibraryShared";
 import { buildSavedNoteResultCards } from "./noteResultPresentation";
 
-type NotePatch = { find: string; replace: string };
+type NotePatch = {
+  find: string;
+  replace: string;
+  findFormat?: "text" | "markdown";
+};
 
 export const SOURCE_NOTE_COPY_GUIDANCE =
   "To copy an existing note without revising its content, use mode:'create' with sourceNoteId and the requested target/collections instead of reconstructing its content. This preserves the native note, including formatting, original provenance and embedded images; do not generate a new header or perform a corrective edit.";
@@ -193,22 +198,15 @@ function applyPatchesToNoteHtml(
 
   let result = html;
   for (const patch of patches) {
-    const applied = replaceTextContentInHtml(result, patch.find, patch.replace);
+    const find =
+      patch.findFormat === "markdown"
+        ? stripNoteHtml(renderRawNoteHtml(patch.find))
+        : patch.find;
+    const applied = replaceTextContentInHtml(result, find, patch.replace);
     if (applied === null) return null;
     result = applied;
   }
   return result;
-}
-
-function buildAppendedNoteHtml(
-  existingHtml: string,
-  appendHtml: string,
-): string {
-  const base = (existingHtml || "").trim();
-  const addition = (appendHtml || "").trim();
-  if (!base) return addition;
-  if (!addition) return base;
-  return `${base}<hr/>${addition}`;
 }
 
 function buildAppendedNoteText(
@@ -460,11 +458,18 @@ export function createEditCurrentNoteTool(
                 find: {
                   type: "string",
                   description:
-                    "The exact text in the current note to find (must match verbatim).",
+                    "The exact text to find. Use selected visible text with findFormat:text, or copy the Markdown from library_read with findFormat:markdown.",
+                },
+                findFormat: {
+                  type: "string",
+                  enum: ["text", "markdown"],
+                  description:
+                    "Representation of find: text for the selected editor text (default), markdown when copying formatted noteText from library_read. This only interprets find; replace is plain visible text.",
                 },
                 replace: {
                   type: "string",
-                  description: "The replacement text.",
+                  description:
+                    "The replacement visible text (plain text, without Markdown formatting markers).",
                 },
               },
               required: ["find", "replace"],
@@ -510,7 +515,7 @@ export function createEditCurrentNoteTool(
         "For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
         SOURCE_NOTE_COPY_GUIDANCE +
         " " +
-        "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Existing-note edits follow the current permission mode. " +
+        "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Existing-note edits and appends always require the note review card, in every permission mode. " +
         "Pass Markdown by default. When the user explicitly requests HTML output (e.g. for styled note templates), pass well-formed HTML with inline styles directly. " +
         "When the note discusses a specific figure, first use `paper_read({ mode:'figures' })` and embed the extracted PDF crop path: `![Figure N](file:///{path})` — auto-imported as a Zotero attachment. " +
         "Treat paper_read mode:'figures' as the authority for figure crop cache reuse/regeneration; use returned crop paths as-is and do not inspect or validate `figure_crops` metadata before writing. " +
@@ -603,7 +608,17 @@ export function createEditCurrentNoteTool(
           if (typeof entry.replace !== "string") {
             return fail("Each patch must include a 'replace' string");
           }
-          patches.push({ find: entry.find, replace: entry.replace });
+          if (
+            entry.findFormat !== undefined &&
+            entry.findFormat !== "text" &&
+            entry.findFormat !== "markdown"
+          )
+            return fail("findFormat must be text or markdown");
+          patches.push({
+            find: entry.find,
+            replace: entry.replace,
+            findFormat: entry.findFormat as NotePatch["findFormat"],
+          });
         }
       }
 
@@ -1140,7 +1155,7 @@ export function createEditCurrentNoteTool(
             const appendHtml = input._isHtml
               ? sanitizeNoteHtml(contentToAppend)
               : renderRawNoteHtml(contentToAppend);
-            const nextHtml = buildAppendedNoteHtml(snapshot.html, appendHtml);
+            const nextHtml = appendNoteHtml(snapshot.html, appendHtml);
             await persistVerifiedNoteHtml(targetNote, nextHtml);
 
             const appendedText = normalizeNoteSourceText(contentToAppend);

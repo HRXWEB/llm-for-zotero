@@ -690,6 +690,10 @@ async function classifyActionIntent(
       "For create_collection, put the new name in parameters.collectionName and an explicitly supplied parent ID in parameters.parentCollectionId; if only the parent name is given, scope.path identifies that existing parent, never the new collection. A later filing may name that newly requested destination: the host binds it to the verified creation receipt. Never invent the future collection ID.",
       'Use parameters only for requested values: tags:string[], metadataFields:string[], targetNoteId:number, targetItemId:number, noteMode:"create|edit|append", destinationCollectionId:number, sourceCollectionId:number, collectionId:number, collectionName:string, parentCollectionId:number|null, deleteItems:boolean, filePath:string. Tags are only the desired tag values, never quoted paper titles or collection names. Omit unspecified values.',
       `Router task kind: ${router.taskKind}`,
+      "When a note is open and the user requests rewriting, polishing, shortening, translating, or otherwise editing its selected text, require note_edit targeting that note. The host presents a diff for review before applying it in every permission mode. Explaining a selection is a read; rewriting it is an edit proposal.",
+      `Active note context: ${JSON.stringify(request.activeNoteContext ? { noteId: request.activeNoteContext.noteId, title: request.activeNoteContext.title, noteKind: request.activeNoteContext.noteKind } : null)}`,
+      `Selected text: ${JSON.stringify((request.selectedTexts || []).map((text, index) => ({ source: request.selectedTextSources?.[index], text })))}`,
+
       "User message:",
       request.userText || "",
       'Reply only with JSON: {"retrievalIntent":"none","wantedSections":[],"writeDisposition":"none|required|uncertain","actionIntents":[]}',

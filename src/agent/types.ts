@@ -311,6 +311,8 @@ export type AgentPendingField =
     });
 
 export type AgentPendingAction = {
+  /** Stable identity for an expandable discovery card. */
+  discovery?: { sessionId: string; revision: number };
   toolName: string;
   title: string;
   mode?: "approval" | "review";

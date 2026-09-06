@@ -240,6 +240,45 @@ describe("workflow: note editing mode", function () {
     });
   });
 
+  for (const kind of ["standalone", "item"] as const) {
+    it(`creates and deletes conversations while retaining ${kind} note focus`, async function () {
+      fixture =
+        kind === "standalone"
+          ? await api.createStandaloneNoteFixture({
+              noteHtml: "<p>Conversation navigation sentence.</p>",
+            })
+          : await api.createItemNoteFixture({
+              title: "Note navigation parent",
+              pdfTitle: "Note navigation PDF",
+              noteHtml: "<p>Conversation navigation sentence.</p>",
+            });
+      const panel = await api.renderPanelForItem(fixture.noteItemId);
+      await api.seedPanelStoredTurn(
+        panel.panelId,
+        "Original note question",
+        "Original answer",
+      );
+      const before = await api.getDiagnostics(panel.panelId);
+      const fresh = await api.startNewPanelConversation(panel.panelId);
+      assert.notEqual(fresh.conversationKey, before.conversationKey);
+      assert.equal(fresh.noteId, fixture.noteItemId);
+      await api.seedPanelStoredTurn(
+        panel.panelId,
+        "Temporary note question",
+        "Temporary answer",
+      );
+      await api.clickPanelDelete(panel.panelId);
+      const deleted = await api.getDiagnostics(panel.panelId);
+      assert.notEqual(deleted.conversationKey, fresh.conversationKey);
+      assert.equal(deleted.noteId, fixture.noteItemId);
+      const send = await api.ask(
+        panel.panelId,
+        "Explain this note after navigation",
+      );
+      assert.equal(send.activeNoteContext?.noteId, fixture.noteItemId);
+    });
+  }
+
   it("routes upstream, Codex, and Claude Code sends through parent paper conversations", async function () {
     const selectedSentence = "Runtime-specific note chats must stay isolated.";
     fixture = await api.createItemNoteFixture({

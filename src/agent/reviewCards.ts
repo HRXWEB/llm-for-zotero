@@ -367,7 +367,7 @@ function prepareSearchReview(
     | SearchLiteratureOnlineMode
     | undefined;
   const results = Array.isArray(content.results) ? content.results : [];
-  if (!mode || results.length === 0) {
+  if (!mode || (results.length === 0 && !content.sessionId)) {
     return null;
   }
 
@@ -422,7 +422,7 @@ function prepareSearchReview(
     const title = readString(record.title);
     if (!title) continue;
     papers.push({
-      rowId: `paper-${index + 1}`,
+      rowId: readString(record.discoveryPaperId) || `paper-${index + 1}`,
       title,
       subtitle: buildPaperSubtitle(record),
       body: readString(record.relevanceReason) || readString(record.abstract),
@@ -432,7 +432,7 @@ function prepareSearchReview(
       raw: record,
     });
   }
-  if (!papers.length) return null;
+  if (!papers.length && !content.sessionId) return null;
   return {
     kind: "paper_results",
     mode,
@@ -717,6 +717,14 @@ export function createSearchLiteratureReviewAction(
     toolName: "literature_review",
     mode: "review",
     title: "Relevant papers",
+    ...((result.content as { sessionId?: string }).sessionId
+      ? {
+          discovery: {
+            sessionId: (result.content as { sessionId: string }).sessionId,
+            revision: (result.content as { revision: number }).revision,
+          },
+        }
+      : {}),
     description: [
       `${prepared.papers.length} ranked papers · Import to ${normalizedArgs.destinationLabel || `Library ${context.request.libraryID}`}`,
       normalizedArgs.shortfallReason,
@@ -742,13 +750,23 @@ export function createSearchLiteratureReviewAction(
           badges: paper.badges,
           href: paper.href,
           importIdentifier: paper.importIdentifier,
-          checked: true,
+          checked: paper.raw.checked !== false,
           year: typeof paper.raw.year === "number" ? paper.raw.year : undefined,
           citationCount:
             typeof paper.raw.citationCount === "number"
               ? paper.raw.citationCount
               : undefined,
         })),
+        loadMoreActionId:
+          (result.content as { sessionId?: string; outcome?: string })
+            .sessionId &&
+          (result.content as { outcome?: string }).outcome !== "no_more"
+            ? "find_more"
+            : undefined,
+        loadMoreLabel:
+          (result.content as { outcome?: string }).outcome === "search_failed"
+            ? "Retry finding more"
+            : `Find ${Number((result.content as { batchSize?: number }).batchSize) || 5} more`,
         minSelectedByAction: [{ actionId: "import", min: 1 }],
         visibleForActionIds: ["import"],
       },

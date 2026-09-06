@@ -332,6 +332,16 @@ export function authorizeOriginalAction(
         "Paper discovery requires user selection in every permission mode. Call literature_review with the ranked candidates; only its approved selection may initiate the import.",
     };
   }
+  if (
+    proposal.operation === "note_edit" ||
+    proposal.operation === "note_append"
+  ) {
+    return {
+      kind: "confirm",
+      reason:
+        "Review the proposed changes to the existing note before applying them.",
+    };
+  }
   if (context.hasApprovedPlanAuthority) {
     return { kind: "execute", authority: "plan_approval" };
   }

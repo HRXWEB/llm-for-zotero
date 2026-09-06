@@ -17,5 +17,5 @@ export function normalizeOriginalAgentPermissionMode(
 }
 
 export function getOriginalAgentPermissionModeDescription(): string {
-  return "Explicitly requested new Zotero notes are created without confirmation and shown as saved-note cards in every mode. auto executes clear, in-scope actions and asks only for genuine ambiguity or exceptional danger. safe reviews other writes, filesystem reads outside the current context, commands, scripts, and network actions. yolo executes every valid in-scope action without mode-based prompts. Hard scope, lifecycle, journal, and integrity checks remain active in every mode.";
+  return "Explicitly requested new Zotero notes are created without confirmation and shown as saved-note cards in every mode. Existing-note edits and appends require diff review in every mode. auto executes clear, in-scope actions and asks only for genuine ambiguity or exceptional danger. safe reviews other writes, filesystem reads outside the current context, commands, scripts, and network actions. yolo executes every valid in-scope action without mode-based prompts. Hard scope, lifecycle, journal, and integrity checks remain active in every mode.";
 }

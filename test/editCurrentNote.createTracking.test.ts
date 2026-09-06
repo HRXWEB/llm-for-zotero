@@ -501,7 +501,7 @@ describe("editCurrentNote create tracking", function () {
         },
         { ...baseContext, request },
       );
-      assert.equal(execution.kind, mode === "safe" ? "confirmation" : "result");
+      assert.equal(execution.kind, "confirmation");
       if (execution.kind === "confirmation") {
         assert.equal(existing.getNote(), before);
         const field = execution.action.fields.find(
@@ -588,7 +588,7 @@ describe("editCurrentNote create tracking", function () {
         },
         { ...baseContext, request },
       );
-      assert.equal(result.kind, mode === "safe" ? "confirmation" : "result");
+      assert.equal(result.kind, "confirmation");
       if (result.kind === "confirmation") {
         assert.equal(existing.getNote(), before, "review must not write");
         const diff = result.action.fields.find(
@@ -701,6 +701,41 @@ describe("editCurrentNote create tracking", function () {
       assert.equal(existing.getNote(), example.after);
     });
   }
+
+  it("prepares a patch copied from the Markdown note reader with explicit format", async function () {
+    const before =
+      "<p>Items marked <strong>Discussion-only (ours)</strong> are our proposals.</p>";
+    const existing = saveExistingNote(60, 9, before);
+    const gateway = new ZoteroGateway();
+    const reading = gateway.getStandaloneNoteContent({ noteId: 60 })!;
+    const tool = createEditCurrentNoteTool(gateway);
+    const validated = tool.validate({
+      mode: "edit",
+      targetNoteId: 60,
+      patches: [
+        {
+          find: reading.noteText,
+          findFormat: "markdown",
+          replace: "These proposals are ours.",
+        },
+      ],
+    });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    const action = await tool.createPendingAction!(
+      validated.value,
+      baseContext,
+    );
+    assert.equal(action.mode, "review");
+    assert.equal(existing.getNote(), before);
+    assert.isTrue(
+      action.fields.some(
+        (field) =>
+          field.type === "diff_preview" &&
+          field.after.includes("These proposals are ours."),
+      ),
+    );
+  });
 
   it("rejects a missing patch match without flattening or changing the note", async function () {
     const before =

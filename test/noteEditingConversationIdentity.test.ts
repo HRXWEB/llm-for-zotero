@@ -1,9 +1,14 @@
 import { assert } from "chai";
 import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
 import {
+  resolveInitialPanelItemState,
   resolveActiveNoteSession,
   resolveDisplayConversationKind,
 } from "../src/modules/contextPanel/portalScope";
+import {
+  activeGlobalConversationByLibrary,
+  clearAllState,
+} from "../src/modules/contextPanel/state";
 import { buildDefaultConversationKey } from "../src/shared/conversationKeySpace";
 
 describe("note editing conversation identity", function () {
@@ -17,6 +22,7 @@ describe("note editing conversation identity", function () {
   });
 
   afterEach(function () {
+    clearAllState();
     globalScope.Zotero = originalZotero;
   });
 
@@ -85,5 +91,26 @@ describe("note editing conversation identity", function () {
       getConversationKey(noteItem),
       buildDefaultConversationKey("upstream", "global", 1),
     );
+  });
+  it("keeps each mounted note conversation stable when another surface navigates", function () {
+    const note = {
+      id: 3975,
+      libraryID: 1,
+      isNote: () => true,
+      isAttachment: () => false,
+      getNoteTitle: () => "Note",
+    } as unknown as Zotero.Item;
+    globalScope.Zotero = {
+      Prefs: { get: () => undefined },
+      Items: { get: () => note },
+    };
+    activeGlobalConversationByLibrary.set(1, 2500000111);
+    const first = resolveInitialPanelItemState(note).item!;
+    activeGlobalConversationByLibrary.set(1, 2500000112);
+    const second = resolveInitialPanelItemState(note).item!;
+    assert.equal(getConversationKey(first), 2500000111);
+    assert.equal(getConversationKey(second), 2500000112);
+    assert.notStrictEqual(first, second);
+    assert.equal(resolveActiveNoteSession(first)?.noteId, 3975);
   });
 });

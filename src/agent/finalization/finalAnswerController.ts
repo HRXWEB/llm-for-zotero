@@ -61,7 +61,7 @@ export class AgentFinalAnswerController {
   private shallowLibraryCorrectionUsed = false;
   private webAttributionCorrectionUsed = false;
   private documentCorrectionUsed = false;
-  private literatureReviewCorrectionUsed = false;
+  private readonly literatureReviewCorrections = new Set<string>();
   private paperSourceCheckUsed = false;
 
   constructor(
@@ -144,7 +144,10 @@ export class AgentFinalAnswerController {
       (record) =>
         record.ok &&
         (record.name === "literature_search" ||
-          record.name === "search_literature_online") &&
+          record.name === "search_literature_online" ||
+          (record.name === "literature_review" &&
+            (record.content as { discoveryPhase?: string } | undefined)
+              ?.discoveryPhase === "expanding")) &&
         Boolean(
           (record.content as { reviewRequired?: boolean } | undefined)
             ?.reviewRequired,
@@ -158,11 +161,18 @@ export class AgentFinalAnswerController {
     ) {
       const failure =
         "The relevant-paper shortlist was not presented for review, so discovery is not complete.";
-      if (params.canCorrect && !this.literatureReviewCorrectionUsed) {
-        this.literatureReviewCorrectionUsed = true;
+      const pending = params.toolExecutionRecords[lastDiscovery].content as
+        | { sessionId?: string; revision?: number }
+        | undefined;
+      const correctionKey = `${pending?.sessionId || "discovery"}:${pending?.revision || 0}`;
+      if (
+        params.canCorrect &&
+        !this.literatureReviewCorrections.has(correctionKey)
+      ) {
+        this.literatureReviewCorrections.add(correctionKey);
         return {
           kind: "correct",
-          correction: `${failure} Rank genuinely relevant candidates from the saved literature_search results and call literature_review with the requested number, their candidateSetId/candidateIndex references, relevance reasons and destination. Search further if needed; disclose any genuine shortfall. Do not import silently or finish with recommendations in prose.`,
+          correction: `${failure} Use the active discovery sessionId and revision; select only NEW papers for an expansion. Rank genuinely relevant candidates from the saved literature_search results and call literature_review with the requested number, their candidateSetId/candidateIndex references, relevance reasons and destination. Search further if needed; disclose any genuine shortfall. Do not import silently or finish with recommendations in prose.`,
         };
       }
       return { kind: "fail", userMessage: failure };

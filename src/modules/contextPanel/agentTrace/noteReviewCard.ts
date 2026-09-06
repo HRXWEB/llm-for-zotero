@@ -83,6 +83,7 @@ export function renderNoteReviewCard(params: {
   if (diff) {
     const details = doc.createElement("details");
     details.className = "llm-note-review-changes";
+    details.open = diff.sourceFieldId === field.id;
     const summary = doc.createElement("summary");
     summary.textContent =
       diff.sourceFieldId === field.id ? "Show changes" : "Current note";

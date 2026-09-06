@@ -1826,7 +1826,7 @@ async function selectNoteEditorText(
   assertWorkflowTestEnabled();
   const panel = getPanel(panelId);
   const synced = syncNoteEditingSelectedText({
-    noteItem: panel.item,
+    noteItem: activeContextPanels.get(panel.body)?.() || panel.item,
     text,
   });
   if (!synced) throw new Error("Workflow panel item is not a note");

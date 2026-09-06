@@ -165,17 +165,21 @@ describe("workflow: native source-note copy", function () {
       );
       assert.equal(
         edit.kind,
-        "result",
-        "Auto edit does not ask for confirmation",
+        "confirmation",
+        "Auto edits require note diff review",
       );
-      if (edit.kind !== "result") return;
+      if (edit.kind !== "confirmation") return;
+      assert.equal(copied.getNote(), copiedBefore);
+      const applied = await edit.execute({ approved: true });
+      assert.equal(applied.kind, "result");
+      if (applied.kind !== "result") return;
       await copied.reload(undefined, true);
       assert.equal(
         copied.getNote(),
         copiedBefore.replace("preserved paragraph", "reviewed paragraph"),
       );
       assert.equal(
-        edit.execution.result.actionReceipts?.[0].verification,
+        applied.execution.result.actionReceipts?.[0].verification,
         "verified",
         "native encoding and a literal entity must not cause a false write failure",
       );

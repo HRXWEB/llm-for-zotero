@@ -256,11 +256,15 @@ describe("workflow: behavior audit shared-owner regressions", function () {
           context,
           { callerKind: "model" },
         );
-        assert.equal(execution.kind, "result");
-        if (execution.kind !== "result") return;
+        assert.equal(execution.kind, "confirmation");
+        if (execution.kind !== "confirmation") return;
+        assert.equal(note.getNote(), example.html);
+        const applied = await execution.execute({ approved: true });
+        assert.equal(applied.kind, "result");
+        if (applied.kind !== "result") return;
         assert.isTrue(
-          execution.execution.result.ok,
-          JSON.stringify(execution.execution.result.content),
+          applied.execution.result.ok,
+          JSON.stringify(applied.execution.result.content),
         );
         await note.reload(undefined, true);
         const template = Zotero.getMainWindow().document.createElement(
@@ -276,7 +280,7 @@ describe("workflow: behavior audit shared-owner regressions", function () {
         if (example.name === "inline boundaries")
           assert.match(note.getNote(), /<em><\/em>/);
         assert.equal(
-          execution.execution.result.actionReceipts?.[0].verification,
+          applied.execution.result.actionReceipts?.[0].verification,
           "verified",
         );
       } finally {

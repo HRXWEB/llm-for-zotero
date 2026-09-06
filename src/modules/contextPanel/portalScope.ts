@@ -1,4 +1,8 @@
 import {
+  createNoteConversationItem,
+  getNoteConversation,
+} from "./noteEditing/conversationItem";
+import {
   buildDefaultUpstreamGlobalConversationKey,
   GLOBAL_CONVERSATION_KEY_BASE,
   PAPER_CONVERSATION_KEY_BASE,
@@ -320,6 +324,8 @@ function resolveLibraryIdFromItem(
 export function resolveConversationSystemForItem(
   item: Zotero.Item | null | undefined,
 ): ConversationSystem | null {
+  const noteConversation = getNoteConversation(item);
+  if (noteConversation) return noteConversation.system;
   if (isClaudeGlobalPortalItem(item) || isClaudePaperPortalItem(item)) {
     return "claude_code";
   }
@@ -336,7 +342,10 @@ export function resolvePreferredConversationSystem(params: {
   item: Zotero.Item | null | undefined;
   preferredSystem?: ConversationSystem | null;
 }): ConversationSystem {
-  const preferred = params.preferredSystem || getConversationSystemPref();
+  const preferred =
+    params.preferredSystem ||
+    getNoteConversation(params.item)?.system ||
+    getConversationSystemPref();
   if (resolveActiveNoteSession(params.item)) {
     return resolvePreferredNoteFocusSystem({
       preferredSystem: preferred,
@@ -499,6 +508,13 @@ export function resolveConversationKeyForNoteFocus(
   item: Zotero.Item | null | undefined,
   options?: { conversationSystem?: ConversationSystem | null },
 ): number | null {
+  const bound = getNoteConversation(item);
+  if (
+    bound &&
+    (!options?.conversationSystem ||
+      options.conversationSystem === bound.system)
+  )
+    return bound.conversationKey;
   const noteSession = resolveActiveNoteSession(item);
   if (!noteSession) return null;
   const conversationSystem = resolvePreferredConversationSystem({
@@ -530,9 +546,19 @@ export function resolveInitialPanelItemState(
 } {
   let item = initialItem || null;
   const noteSession = resolveActiveNoteSession(item);
-  if (noteSession) {
-    return {
+  if (noteSession && item) {
+    const system = resolvePreferredConversationSystem({
       item,
+      preferredSystem: options?.conversationSystem,
+    });
+    const key = resolveConversationKeyForNoteFocus(item, {
+      conversationSystem: system,
+    })!;
+    return {
+      item:
+        getNoteConversation(item)?.system === system
+          ? item
+          : createNoteConversationItem(item, system, key),
       basePaperItem:
         noteSession.noteKind === "item" && noteSession.parentItemId
           ? Zotero.Items.get(noteSession.parentItemId) || null

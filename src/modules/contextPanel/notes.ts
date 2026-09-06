@@ -1198,7 +1198,7 @@ async function buildChatHistoryNotePayloadForSave(
   };
 }
 
-function appendAssistantAnswerToNoteHtml(
+export function appendNoteHtml(
   existingHtml: string,
   newAnswerHtml: string,
 ): string {
@@ -1206,6 +1206,14 @@ function appendAssistantAnswerToNoteHtml(
   const addition = (newAnswerHtml || "").trim();
   if (!base) return addition;
   if (!addition) return base;
+  // Native editors store all note content inside the schema container.
+  // Appending outside it forces an editor rewrite during save verification.
+  const schema = base.match(
+    /^(<div\b[^>]*\bdata-schema-version=[^>]*>)([\s\S]*)<\/div>$/i,
+  );
+  if (schema) {
+    return `${schema[1]}${schema[2].trim()}\n<hr>\n${addition}\n</div>`;
+  }
   return `${base}<hr/>${addition}`;
 }
 
@@ -1438,10 +1446,7 @@ export async function createNoteFromAssistantText(
     if (existingNote) {
       try {
         const html = await buildHtml(existingNote.id);
-        const appendedHtml = appendAssistantAnswerToNoteHtml(
-          existingNote.getNote() || "",
-          html,
-        );
+        const appendedHtml = appendNoteHtml(existingNote.getNote() || "", html);
         // Verified write: a silently lost saveTx (the #327 failure class)
         // throws here, falling through to create a new note instead of
         // reporting a success that never reached the database.

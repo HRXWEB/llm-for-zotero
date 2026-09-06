@@ -16,7 +16,7 @@ export function isLiteratureDiscovery(text: string): boolean {
   return (
     requiresLiteratureSelection(text) ||
     (!isExplicitLiteratureImport(text) &&
-      /\b(?:find|discover|recommend|suggest)\b[^.!?\n]{0,100}\b(?:papers?|studies|articles?)\b/i.test(
+      /\b(?:find|discover|recommend|suggest|show|list)\b[^.!?\n]{0,100}\b(?:papers?|studies|articles?|references)\b/i.test(
         text,
       ))
   );
@@ -47,7 +47,7 @@ export function requestedLiteratureCount(text: string): number | undefined {
     "twenty",
   ];
   const match = new RegExp(
-    `\\b(\\d+|${words.join("|")})\\s+(?:(?:most|top|highly|closely|relevant|related|similar|new|best)\\s+){0,4}(?:papers?|studies|articles?)\\b`,
+    `\\b(\\d+|${words.join("|")})\\s+(?:(?:most|top|highly|closely|relevant|related|similar|new|best)\\s+){0,4}(?:papers?|studies|articles?|references|citations)\\b`,
     "i",
   ).exec(text);
   if (!match) return undefined;

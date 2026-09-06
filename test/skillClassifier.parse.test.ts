@@ -322,6 +322,53 @@ describe("detectTurnIntent", function () {
     assert.equal(result.routingReceipt?.skills[0]?.source, "explicit");
   });
 
+  it("requires the selected-note edit even when the model classifies it as chat", async function () {
+    let actionPrompt = "";
+    const result = await detectTurnIntent(
+      {
+        userText: "help me rewrite this sentence",
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "key",
+        providerProtocol: "openai_chat_compat",
+        activeNoteContext: {
+          noteId: 3975,
+          title: "Editing fixture",
+          noteKind: "standalone",
+          noteText: "A selected sentence.",
+        },
+        selectedTexts: ["A selected sentence."],
+        selectedTextSources: ["note-edit"],
+      } as any,
+      SKILLS,
+      {
+        llmCall: async (params) => {
+          if (
+            !String(params.prompt).includes("Classify only the exact mutation")
+          )
+            return completeOutcome(
+              '{"schemaVersion":1,"taskKind":"read","requestedScopes":["none"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+            );
+          actionPrompt = String(params.prompt);
+          return completeOutcome(
+            '{"writeDisposition":"none","actionIntents":[],"retrievalIntent":"none","wantedSections":[]}',
+          );
+        },
+      },
+    );
+    assert.equal(result.classifiedIntent?.writeDisposition, "required");
+    assert.equal(
+      result.classifiedIntent?.actionIntents[0].operation,
+      "note_edit",
+    );
+    assert.equal(
+      result.classifiedIntent?.actionIntents[0].parameters?.targetNoteId,
+      3975,
+    );
+    assert.include(actionPrompt, '"noteId":3975');
+    assert.include(actionPrompt, '"source":"note-edit"');
+  });
+
   it("passes the profile to a provider-safe utility classifier call", async function () {
     let captured: Record<string, unknown> = {};
     const profileOverride = {

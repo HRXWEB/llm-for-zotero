@@ -419,7 +419,10 @@ function mutationRequestIsExplicit(text: string): boolean {
 
 /** High-confidence fallback used only when the classifier call fails. */
 export function inferActionIntentsFromRequest(
-  request: Pick<AgentRuntimeRequest, "userText" | "turnPaperScope">,
+  request: Pick<
+    AgentRuntimeRequest,
+    "userText" | "turnPaperScope" | "activeNoteContext"
+  >,
 ): AgentActionIntent[] {
   const text = affirmativeActionText(
     withoutQualifiedActionProhibitions(request.userText || ""),
@@ -458,6 +461,30 @@ export function inferActionIntentsFromRequest(
       constraints: options.constraints,
     });
   };
+
+  const activeNoteId = request.activeNoteContext?.noteId;
+  // An imperative on the open note is already an explicit edit target. Carry
+  // that target into the same typed contract used by every other mutation.
+  const noteEditRequest =
+    /^(?:(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:help\s+me\s+)?(?:rewrite|reword|revise|polish|shorten|expand|simplify|translate|edit|correct|improve)\s+(?:(?:this|that|it)\b|(?:(?:the|my)\s+)?(?:(?:selected|current|open)\s+)?(?:sentence|paragraph|text|note|selection|wording)\b)|(?:请|請)?(?:帮我|幫我)?(?:改写|改寫|重写|重寫|润色|潤色|缩短|縮短|修改|翻译|翻譯))/i.test(
+      text,
+    );
+  if (
+    activeNoteId &&
+    noteEditRequest &&
+    !/\bnote\s+\d+\b/i.test(text) &&
+    !/\b(?:without\s+(?:changing|editing)|do\s+not\s+(?:change|edit)|alternatives?|options?|hypothetical)\b/i.test(
+      text,
+    )
+  ) {
+    add(
+      "note_edit",
+      { noteMode: "edit", targetNoteId: activeNoteId },
+      { targetKind: "items", scope: undefined },
+    );
+    intents[intents.length - 1].coverage = "one";
+    return intents;
+  }
 
   if (mutationRequestIsExplicit(text)) {
     // Recovery describes a past write; that description is not permission to

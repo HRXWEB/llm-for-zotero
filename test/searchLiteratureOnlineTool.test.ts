@@ -63,6 +63,7 @@ describe("search_literature_online tool", function () {
     }
   });
   const baseContext: AgentToolContext = {
+    runId: "search-tool-test",
     request: resolvedAgentRequest({
       conversationKey: 11,
       mode: "agent",

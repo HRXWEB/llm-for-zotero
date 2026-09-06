@@ -1,3 +1,5 @@
+import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
+import { createNoteConversationItem } from "./noteEditing/conversationItem";
 /* eslint-disable @typescript-eslint/no-require-imports */
 import { createElement } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
@@ -345,6 +347,7 @@ import type {
   AgentConfirmationResolution,
 } from "../../agent/types";
 import {
+  resolveConversationKeyForNoteFocus,
   createGlobalPortalItem,
   createPaperPortalItem,
   isGlobalPortalItem,
@@ -1440,6 +1443,25 @@ export function setupHandlers(
       if (!resolvedNextSystem) return;
       if (resolvedNextSystem === getConversationSystem()) return;
       persistDraftInputForCurrentConversation();
+      const nextKey = resolveConversationKeyForNoteFocus(item, {
+        conversationSystem: resolvedNextSystem,
+      });
+      if (!nextKey) return;
+      const nextItem = createNoteConversationItem(
+        item,
+        resolvedNextSystem,
+        nextKey,
+      );
+      if (
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "switch-note-provider",
+          ownershipLease,
+        )
+      )
+        return;
+      item = nextItem;
       setConversationSystemPref(resolvedNextSystem);
       currentConversationSystem = resolvedNextSystem;
       syncConversationIdentity();
@@ -1656,7 +1678,18 @@ export function setupHandlers(
     ) {
       return;
     }
+    const previousConversationKey = conversationKey;
     conversationKey = item ? getConversationKey(item) : null;
+    if (
+      resolveCurrentNoteSession() &&
+      previousConversationKey &&
+      conversationKey
+    ) {
+      copyNoteEditingSelectedTextContext({
+        fromConversationKey: previousConversationKey,
+        toConversationKey: conversationKey,
+      });
+    }
     activeContextPanels.set(body, () => item);
     void retainClaudeRuntimeForBody(body, item);
     if ((body as HTMLElement).dataset?.standalone === "true") {

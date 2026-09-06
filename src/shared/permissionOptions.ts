@@ -37,7 +37,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Auto",
       compactLabel: "auto",
       description:
-        "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger.",
+        "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.",
       available: true,
     },
     yolo: {
@@ -46,7 +46,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Yolo",
       compactLabel: "yolo",
       description:
-        "Execute every valid in-scope Original Agent action without mode-based prompts.",
+        "Execute every valid in-scope Original Agent action without mode-based prompts. Existing-note changes require review.",
       available: true,
     },
   };

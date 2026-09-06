@@ -396,7 +396,9 @@ describe("portalScope resolveInitialPanelItemState", function () {
     const resolved = resolveInitialPanelItemState(noteItem);
     const session = resolveActiveNoteSession(noteItem);
 
-    assert.equal(resolved.item, noteItem);
+    assert.notStrictEqual(resolved.item, noteItem);
+    assert.equal(resolved.item?.id, noteItem.id);
+    assert.deepEqual(resolveActiveNoteSession(resolved.item), session);
     assert.equal(resolved.basePaperItem, parentItem);
     assert.deepEqual(session, {
       noteKind: "item",
@@ -422,7 +424,9 @@ describe("portalScope resolveInitialPanelItemState", function () {
     const resolved = resolveInitialPanelItemState(noteItem);
     const session = resolveActiveNoteSession(noteItem);
 
-    assert.equal(resolved.item, noteItem);
+    assert.notStrictEqual(resolved.item, noteItem);
+    assert.equal(resolved.item?.id, noteItem.id);
+    assert.deepEqual(resolveActiveNoteSession(resolved.item), session);
     assert.isNull(resolved.basePaperItem);
     assert.isFalse(isPaperPortalItem(resolved.item));
     assert.deepEqual(session, {

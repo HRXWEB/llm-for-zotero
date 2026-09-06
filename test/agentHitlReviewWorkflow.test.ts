@@ -388,159 +388,197 @@ describe("AgentRuntime HITL review workflow", function () {
   });
 
   for (const mode of ["safe", "auto", "yolo"]) {
-    for (const approve of [true, false]) {
-      it(`searches, ranks, then ${approve ? "imports only checked papers" : "cancels without writes"} in ${mode}`, async function () {
-        const restoreDb = installMockDb();
-        const originalFetch = globalThis.fetch;
-        let imported: unknown = null;
-        let candidateSetId = "";
-        try {
-          await initAgentChangeJournal();
-          globalThis.fetch = (async () => ({
-            ok: true,
-            status: 200,
-            json: async () => ({
-              results: Array.from({ length: 12 }, (_, index) => ({
-                id: `https://openalex.org/W${index + 1}`,
-                display_name: `Candidate ${index + 1}`,
-                doi: `https://doi.org/10.1000/paper-${index + 1}`,
-                publication_year: 2024,
-              })),
-            }),
-          })) as typeof fetch;
-          const registry = new AgentToolRegistry();
-          const gateway = {
-            resolveMetadataItem: () => null,
-            getEditableArticleMetadata: () => null,
-            getCollectionSummary: () => ({
-              collectionId: 79,
-              libraryID: 1,
-              name: "Test collection",
-            }),
-          };
-          const search = createSearchLiteratureOnlineTool(gateway as never);
-          const executeSearch = search.execute;
-          search.execute = async (input, context) => {
-            const result = (await executeSearch(input, context)) as any;
-            candidateSetId = result.candidateSetId;
-            return result;
-          };
-          registry.register(
-            createRenamedTool({
-              tool: search,
-              name: "literature_search",
-              label: "Search",
-            }),
-          );
-          registry.register(createLiteratureReviewTool(gateway as never));
-          registry.register(
-            createStubFacadeTool(
-              "library_import",
-              async (input) => {
-                imported = input;
-                return { appliedCount: 4, result: { succeeded: 4, failed: 0 } };
-              },
-              ["import"],
-            ),
-          );
-          const callStep = (name: string, args: unknown): AgentModelStep => {
-            const calls = [{ id: `call-${name}`, name, arguments: args }];
-            return {
-              kind: "tool_calls",
-              calls,
-              assistantMessage: {
-                role: "assistant",
-                content: "",
-                tool_calls: calls,
-              },
-            };
-          };
-          const bypassProse = mode === "auto" && !approve;
-          const adapter = new StepAdapter([
-            callStep("literature_search", {
-              mode: "search",
-              workflow: "review",
-              query: "population coding",
-              limit: 12,
-            }),
-            ...(bypassProse
-              ? [
-                  {
-                    kind: "final",
-                    text: "Here are my recommendations.",
-                  } as AgentModelStep,
-                ]
-              : []),
-            () =>
-              callStep("literature_review", {
-                selections: [8, 2, 10, 4, 1].map((candidateIndex) => ({
-                  candidateSetId,
-                  candidateIndex,
-                  reason: "Relevant decoding evidence.",
+    for (const expand of [false, true]) {
+      for (const approve of [true, false]) {
+        it(`searches, ranks${expand ? ", expands" : ""}, then ${approve ? "imports only checked papers" : "cancels without writes"} in ${mode}`, async function () {
+          const restoreDb = installMockDb();
+          const originalFetch = globalThis.fetch;
+          let imported: unknown = null;
+          let candidateSetId = "";
+          let sessionId = "";
+          let revision = 0;
+          try {
+            await initAgentChangeJournal();
+            globalThis.fetch = (async () => ({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                results: Array.from({ length: 12 }, (_, index) => ({
+                  id: `https://openalex.org/W${index + 1}`,
+                  display_name: `Candidate ${index + 1}`,
+                  doi: `https://doi.org/10.1000/paper-${index + 1}`,
+                  publication_year: 2024,
                 })),
-                targetCollectionId: 79,
               }),
-          ]);
-          const runtime = new AgentRuntime({
-            registry,
-            adapterFactory: () => adapter,
-          });
-          const cards: string[] = [];
-          const outcome = await runtime.runTurn({
-            request: makeRequest({
-              userText: "Find five papers relevant to this paper.",
-              metadata: { permissionMode: mode },
-            }),
-            onEvent: async (event) => {
-              if (event.type !== "confirmation_required") return;
-              cards.push(event.action.toolName);
-              assert.equal(event.action.toolName, "literature_review");
-              assert.isNull(imported, "no imports before shortlist approval");
-              assert.equal(
-                adapter.stepIndex,
-                bypassProse ? 3 : 2,
-                "the model ranks after reading candidates",
-              );
-              const list = event.action.fields[0];
-              if (list.type !== "paper_result_list")
-                throw new Error("Not a paper card");
-              assert.deepEqual(
-                list.rows.map((row) => row.title),
-                [8, 2, 10, 4, 1].map((i) => `Candidate ${i}`),
-              );
-              runtime.resolveConfirmation(event.requestId, {
-                approved: approve,
-                actionId: approve ? "import" : "cancel",
-                data: {
-                  selectedPaperIds: [
-                    "paper-1",
-                    "paper-3",
-                    "paper-4",
-                    "paper-5",
-                  ],
+            })) as typeof fetch;
+            const registry = new AgentToolRegistry();
+            const gateway = {
+              resolveMetadataItem: () => null,
+              getEditableArticleMetadata: () => null,
+              getCollectionSummary: () => ({
+                collectionId: 79,
+                libraryID: 1,
+                name: "Test collection",
+              }),
+            };
+            const search = createSearchLiteratureOnlineTool(gateway as never);
+            const executeSearch = search.execute;
+            search.execute = async (input, context) => {
+              const result = (await executeSearch(input, context)) as any;
+              candidateSetId = result.candidateSetId;
+              sessionId = result.sessionId;
+              return result;
+            };
+            registry.register(
+              createRenamedTool({
+                tool: search,
+                name: "literature_search",
+                label: "Search",
+              }),
+            );
+            registry.register(createLiteratureReviewTool(gateway as never));
+            registry.register(
+              createStubFacadeTool(
+                "library_import",
+                async (input) => {
+                  imported = input;
+                  return {
+                    appliedCount: 4,
+                    result: { succeeded: 4, failed: 0 },
+                  };
                 },
-              });
-            },
-          });
-          assert.equal(outcome.kind, "completed");
-          assert.deepEqual(cards, ["literature_review"]);
-          if (approve)
-            assert.deepInclude(imported, {
-              identifiers: [
-                "10.1000/paper-8",
-                "10.1000/paper-10",
-                "10.1000/paper-4",
-                "10.1000/paper-1",
-              ],
-              libraryID: 1,
-              targetCollectionId: 79,
+                ["import"],
+              ),
+            );
+            const callStep = (name: string, args: unknown): AgentModelStep => {
+              const calls = [{ id: `call-${name}`, name, arguments: args }];
+              return {
+                kind: "tool_calls",
+                calls,
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: calls,
+                },
+              };
+            };
+            const bypassProse = mode === "auto" && !approve;
+            const adapter = new StepAdapter([
+              callStep("literature_search", {
+                mode: "search",
+                workflow: "review",
+                query: "population coding",
+                limit: 12,
+              }),
+              ...(bypassProse
+                ? [
+                    {
+                      kind: "final",
+                      text: "Here are my recommendations.",
+                    } as AgentModelStep,
+                  ]
+                : []),
+              () =>
+                callStep("literature_review", {
+                  selections: [8, 2, 10, 4, 1].map((candidateIndex) => ({
+                    candidateSetId,
+                    candidateIndex,
+                    reason: "Relevant decoding evidence.",
+                  })),
+                  targetCollectionId: 79,
+                }),
+              ...(expand
+                ? [
+                    {
+                      kind: "final",
+                      text: "Already showed the card.",
+                    } as AgentModelStep,
+                    () =>
+                      callStep("literature_review", {
+                        sessionId,
+                        revision,
+                        selections: [3, 5, 6, 7, 9].map((candidateIndex) => ({
+                          candidateSetId,
+                          candidateIndex,
+                          reason: "Additional relevant evidence.",
+                        })),
+                      }),
+                  ]
+                : []),
+            ]);
+            const runtime = new AgentRuntime({
+              registry,
+              adapterFactory: () => adapter,
             });
-          else assert.isNull(imported);
-        } finally {
-          globalThis.fetch = originalFetch;
-          restoreDb();
-        }
-      });
+            const cards: string[] = [];
+            const outcome = await runtime.runTurn({
+              request: makeRequest({
+                userText: "Find five papers relevant to this paper.",
+                metadata: { permissionMode: mode },
+              }),
+              onEvent: async (event) => {
+                if (event.type !== "confirmation_required") return;
+                cards.push(event.action.toolName);
+                assert.equal(event.action.toolName, "literature_review");
+                assert.isNull(imported, "no imports before shortlist approval");
+                const list = event.action.fields[0];
+                if (list.type !== "paper_result_list")
+                  throw new Error("Not a paper card");
+                assert.deepEqual(
+                  list.rows.map((row) => row.title),
+                  (cards.length > 1
+                    ? [8, 2, 10, 4, 1, 3, 5, 6, 7, 9]
+                    : [8, 2, 10, 4, 1]
+                  ).map((i) => `Candidate ${i}`),
+                );
+                if (expand && cards.length === 1) {
+                  revision = event.action.discovery!.revision + 1;
+                  runtime.resolveConfirmation(event.requestId, {
+                    approved: true,
+                    actionId: "find_more",
+                    data: { selectedPaperIds: [list.rows[0].id] },
+                  });
+                  return;
+                }
+                if (expand) {
+                  assert.isTrue(list.rows[0].checked);
+                  assert.isFalse(list.rows[1].checked);
+                  assert.isTrue(list.rows[5].checked);
+                }
+                runtime.resolveConfirmation(event.requestId, {
+                  approved: approve,
+                  actionId: approve ? "import" : "cancel",
+                  data: {
+                    selectedPaperIds: (expand
+                      ? [0, 5, 6, 9]
+                      : [0, 2, 3, 4]
+                    ).map((i) => list.rows[i].id),
+                  },
+                });
+              },
+            });
+            assert.equal(outcome.kind, "completed");
+            assert.deepEqual(
+              cards,
+              expand
+                ? ["literature_review", "literature_review"]
+                : ["literature_review"],
+            );
+            if (approve)
+              assert.deepInclude(imported, {
+                identifiers: (expand ? [8, 3, 5, 9] : [8, 10, 4, 1]).map(
+                  (i) => `10.1000/paper-${i}`,
+                ),
+                libraryID: 1,
+                targetCollectionId: 79,
+              });
+            else assert.isNull(imported);
+          } finally {
+            globalThis.fetch = originalFetch;
+            restoreDb();
+          }
+        });
+      }
     }
   }
 });
