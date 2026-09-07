@@ -88,7 +88,7 @@ function createNotifierQueueHandle(): NotifierQueueHandle {
   };
 }
 
-function stripZoteroNoteWrapper(html: string): string {
+export function stripZoteroNoteWrapper(html: string): string {
   const normalized = (html || "").trim();
   const match = normalized.match(
     /^<div class="zotero-note znv\d+">([\s\S]*)<\/div>$/,

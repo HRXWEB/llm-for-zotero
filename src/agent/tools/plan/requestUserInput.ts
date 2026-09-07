@@ -1,3 +1,7 @@
+import { detectTurnIntent } from "../../model/semanticIntentService";
+import { getAllSkills } from "../../skills";
+import { ActionReferenceResolutionError } from "../../contracts/actionScope";
+import { isConversationWriteGenerationCurrent } from "../../../shared/conversationWriteFence";
 import type {
   AgentPendingChoiceValue,
   AgentPendingField,
@@ -77,15 +81,16 @@ function validateInput(
   return ok({ questions });
 }
 
-export function createRequestUserInputTool(): AgentToolDefinition<
-  RequestUserInput,
-  unknown
-> {
+export function createRequestUserInputTool(
+  prepare?: (
+    request: import("../../types").AgentRuntimeRequest,
+  ) => Promise<import("../../types").AgentActionContract | null>,
+): AgentToolDefinition<RequestUserInput, unknown> {
   return {
     spec: {
       name: "request_user_input",
       description:
-        "Ask one to three concise multiple-choice questions when a material planning decision cannot be discovered from context.",
+        "Ask one to three concise multiple-choice questions when a material reference or workflow decision cannot be discovered from context.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -122,10 +127,11 @@ export function createRequestUserInputTool(): AgentToolDefinition<
       },
       executionClass: "control",
       requiresConfirmation: true,
-      localAgentOnly: true,
       interaction: "user_input",
     },
-    isAvailable: (request) => request.planContext?.phase === "planning",
+    isAvailable: (request) =>
+      request.planContext?.phase === "planning" ||
+      Boolean(request.classifiedIntent?.semantic),
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({
@@ -135,10 +141,10 @@ export function createRequestUserInputTool(): AgentToolDefinition<
       }),
     createPendingAction: (input) => ({
       toolName: "request_user_input",
-      title: "Plan needs your input",
+      title: "Agent needs your input",
       mode: "review",
-      confirmLabel: "Continue planning",
-      cancelLabel: "Cancel plan",
+      confirmLabel: "Continue",
+      cancelLabel: "Cancel",
       fields: input.questions.map<AgentPendingField>((question) => ({
         type: "choice",
         id: question.id,
@@ -149,8 +155,8 @@ export function createRequestUserInputTool(): AgentToolDefinition<
         customPlaceholder: "Something else…",
       })),
       actions: [
-        { id: "continue", label: "Continue planning", approved: true },
-        { id: "cancel", label: "Cancel plan", approved: false },
+        { id: "continue", label: "Continue", approved: true },
+        { id: "cancel", label: "Cancel", approved: false },
       ],
       defaultActionId: "continue",
       cancelActionId: "cancel",
@@ -166,11 +172,75 @@ export function createRequestUserInputTool(): AgentToolDefinition<
         })),
       });
     },
-    execute: async (input) => ({
-      answers: input.questions.map((question) => ({
+    execute: async (input, context) => {
+      const publicAnswers = input.questions.map((question) => ({
         id: question.id,
         answer: question.answer,
-      })),
-    }),
+      }));
+      if (
+        !prepare ||
+        context.request.actionPreparation?.state !== "needs_input"
+      )
+        return { answers: publicAnswers };
+      const answers = input.questions.map((question) => ({
+        question: question.question,
+        answer:
+          question.options.find((option) => option.id === question.answer)
+            ?.label ||
+          question.answer ||
+          "",
+      }));
+      if (answers.some((entry) => !entry.answer))
+        throw new Error("The requested clarification has not been answered.");
+      const revised = {
+        ...context.request,
+        clarificationHistory: [
+          ...(context.request.clarificationHistory || []),
+          ...answers,
+        ],
+      };
+      const result = await detectTurnIntent(revised, getAllSkills(), {
+        signal: context.signal,
+      });
+      if (!result.classifiedIntent)
+        throw new Error(
+          "Semantic interpretation of the clarification is unavailable. Actions remain paused.",
+        );
+      revised.classifiedIntent = result.classifiedIntent;
+      let contract: import("../../types").AgentActionContract | undefined;
+      let issues: string[] = [];
+      try {
+        contract = (await prepare(revised)) || undefined;
+      } catch (error) {
+        if (!(error instanceof ActionReferenceResolutionError)) throw error;
+        issues = [error.message];
+      }
+      if (
+        context.signal?.aborted ||
+        (context.request.conversationGeneration !== undefined &&
+          !isConversationWriteGenerationCurrent(
+            context.request.conversationKey,
+            context.request.conversationGeneration,
+          ))
+      ) {
+        throw new Error(
+          "The conversation changed while resolving the request.",
+        );
+      }
+      context.request.clarificationHistory = revised.clarificationHistory;
+      context.request.classifiedIntent = revised.classifiedIntent;
+      context.request.actionContract = contract;
+      context.request.actionProgress = undefined;
+      context.request.actionPreparation = {
+        state: issues.length ? "needs_input" : "ready",
+        issues,
+      };
+      await context.checkpointActionProgress?.();
+      return {
+        answers: publicAnswers,
+        preparation: context.request.actionPreparation,
+        contract,
+      };
+    },
   };
 }

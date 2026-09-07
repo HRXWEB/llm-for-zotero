@@ -1,20 +1,32 @@
 import type { AgentSavedNoteResultCard } from "../../../agent/types";
 import { createDocumentCardLayout } from "../documentCard";
 import { parseSanitizedRenderedHtml } from "../renderedMarkdown";
-import { inferExplicitDocumentKind } from "../../../agent/documents/outcomePolicy";
 import {
   navigatePlanDocumentCitationSource,
   planDocumentCitationSourceHref,
 } from "../planDocumentPresentation";
 
 export function savedNoteIsPrimaryOutcome(
-  userText: string,
+  events: readonly import("../../../agent/types").AgentEvent[],
   hasPlan: boolean,
 ): boolean {
+  const event = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "provider_event" &&
+        event.providerType === "agent_action_contract",
+    );
+  const contract =
+    event?.type === "provider_event"
+      ? (event.payload?.contract as
+          | import("../../../agent/contracts/types").AgentActionContract
+          | undefined)
+      : undefined;
   return (
     !hasPlan &&
-    /\bnotes?\b/i.test(userText) &&
-    !inferExplicitDocumentKind(userText)
+    Boolean(contract?.intent?.semantic) &&
+    contract?.intent?.deliverableIntent === "chat"
   );
 }
 

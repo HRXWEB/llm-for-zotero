@@ -183,6 +183,7 @@ export function createSearchPaperTool(
 
       return {
         results: await retrievalService.retrieveEvidence({
+          intent: context.request.classifiedIntent,
           papers,
           question: input.question || context.request.userText,
           queryVariants: input.queryVariants,

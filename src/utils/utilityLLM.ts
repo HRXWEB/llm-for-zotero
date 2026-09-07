@@ -25,6 +25,7 @@ import { callLLMWithTimeout } from "./llmCallTimeout";
 export type UtilityLLMFailureReason =
   | "not_configured"
   | "budget_unavailable"
+  | "output_limit"
   | "timeout"
   | "transport"
   | "empty";
@@ -33,7 +34,7 @@ export type UtilityLLMFailure = {
   ok: false;
   reason: UtilityLLMFailureReason;
   /**
-   * The provider's own error text, truncated. `reason` is a five-value enum
+   * The provider's own error text, truncated. `reason` is a typed category
    * chosen so callers can branch on it; without this a 401, a 429 and a
    * dropped socket are all indistinguishable in the log.
    */
@@ -81,8 +82,12 @@ export type UtilityLLMParams = {
   authMode?: ModelProviderAuthMode;
   providerProtocol?: ProviderProtocol;
   profileOverride?: ModelProfileOverride;
+  /** Preserve a supported configured reasoning level for semantic interpretation. */
+  reasoning?: ReasoningConfig;
   /** The caller's useful JSON output, excluding any reasoning reserve. */
   jsonBudget: number;
+  /** Minimum capacity for configured reasoning; does not alter its effort level. */
+  reasoningReserveTokens?: number;
   temperature?: number;
   signal?: AbortSignal;
   /**
@@ -246,6 +251,7 @@ function buildReasoningPlan(params: {
   authMode?: ModelProviderAuthMode;
   providerProtocol?: ProviderProtocol;
   profileOverride?: ModelProfileOverride;
+  reasoning?: ReasoningConfig;
 }): UtilityReasoningPlan | null {
   const capabilities = getModelCapabilities({
     model: params.model,
@@ -264,6 +270,33 @@ function buildReasoningPlan(params: {
     params.providerProtocol,
   );
   const reasoning = capabilities.reasoning;
+
+  const planForOption = (
+    option: ReasoningCapabilityOption,
+    selectedProvider: ReasoningProvider,
+  ): UtilityReasoningPlan => {
+    const level = normalize(option.id) as ReasoningLevel;
+    return {
+      reasoning: { provider: selectedProvider, level },
+      reserveTokens: isDisabledOption(option)
+        ? 0
+        : (numericReserveFromControls(option) ??
+          (capabilities.provider === "gemini"
+            ? numericGeminiReserve(params.model, level)
+            : undefined) ??
+          REASONING_RESERVE_BY_LEVEL[level] ??
+          1024),
+    };
+  };
+  const configured =
+    params.reasoning?.provider === provider
+      ? reasoning.options.find(
+          (option) =>
+            option.enabled !== false &&
+            normalize(option.id) === params.reasoning?.level,
+        )
+      : undefined;
+  if (configured && provider) return planForOption(configured, provider);
 
   // Anthropic's bounded utility requests deliberately never inherit manual or
   // adaptive thinking. A profile-authored disabled control is still honored.
@@ -288,17 +321,7 @@ function buildReasoningPlan(params: {
 
   const option = findLowestSupportedOption(reasoning);
   if (option && provider) {
-    const level = normalize(option.id) as ReasoningLevel;
-    return {
-      reasoning: { provider, level },
-      reserveTokens:
-        numericReserveFromControls(option) ??
-        (capabilities.provider === "gemini"
-          ? numericGeminiReserve(params.model, level)
-          : undefined) ??
-        REASONING_RESERVE_BY_LEVEL[level] ??
-        1_024,
-    };
+    return planForOption(option, provider);
   }
 
   // A live catalog can say that reasoning is enabled without publishing its
@@ -362,6 +385,7 @@ export async function callUtilityLLM(
     authMode: params.authMode,
     providerProtocol: params.providerProtocol,
     profileOverride: params.profileOverride,
+    reasoning: params.reasoning,
   });
   if (!plan) {
     return {
@@ -372,7 +396,14 @@ export async function callUtilityLLM(
   }
 
   const jsonBudget = Math.max(1, Math.floor(params.jsonBudget));
-  const requiredBudget = jsonBudget + plan.reserveTokens;
+  const reasoningReserve =
+    plan.reserveTokens > 0
+      ? Math.max(
+          plan.reserveTokens,
+          Math.floor(params.reasoningReserveTokens || 0),
+        )
+      : 0;
+  const requiredBudget = jsonBudget + reasoningReserve;
   const outputPolicy = resolveOutputRequestPolicy({
     setting: { mode: "custom", tokens: requiredBudget },
     model,
@@ -392,7 +423,7 @@ export async function callUtilityLLM(
     return {
       ok: false,
       reason: "budget_unavailable",
-      detail: `${model} caps output at ${maxTokens} tokens, below the ${requiredBudget} this call needs (${jsonBudget} JSON + ${plan.reserveTokens} reasoning reserve)`,
+      detail: `${model} caps output at ${maxTokens} tokens, below the ${requiredBudget} this call needs (${jsonBudget} JSON + ${reasoningReserve} reasoning reserve)`,
     };
   }
 
@@ -413,6 +444,16 @@ export async function callUtilityLLM(
       systemMessages: params.systemMessages,
       llmCall: params.llmCall,
     });
+    if (
+      outcome.completion.status === "incomplete" &&
+      outcome.completion.reason === "output_limit"
+    ) {
+      return {
+        ok: false,
+        reason: "output_limit",
+        detail: `Structured utility call exhausted its ${maxTokens}-token output budget.`,
+      };
+    }
     const text =
       outcome.completion.status === "complete"
         ? outcome.text

@@ -7,7 +7,7 @@ export function buildApprovedPlanExecutionInstructions(
   approvedContract?: PlanContract | null,
 ): string {
   const taskProgressInstruction = planRequiresModelTaskUpdates(ledger)
-    ? "The host has already started the first pending task and owns the full ledger. It automatically advances tasks verified by research_update or submit_document; never call task_update for tasks whose requirements are only verified_read, research_coverage, document_integrity, or document_published. For other active tasks, call task_update with only the task whose status changes, using its exact taskId, after its required evidence exists. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks."
+    ? "The host has already started the first pending task and owns the full ledger. It automatically advances tasks verified by research_update or submit_document; never call task_update for tasks whose requirements are only verified_read, material_integrity, research_coverage, document_integrity, or document_published. For other active tasks, call task_update with only the task whose status changes, using its exact taskId, after its required evidence exists. The host automatically starts the next pending task. Do not rename, delete, reorder, or silently skip approved tasks."
     : "The host automatically advances these research and document tasks from verified evidence produced by research_update and submit_document. Do not call task_update for these tasks, including tasks already shown as completed; continue with the active scholarly or document tool instead.";
   const deliverableLines = approvedContract
     ? approvedContract.deliverable.kind === "document"
@@ -34,6 +34,12 @@ export function buildApprovedPlanExecutionInstructions(
         `${index + 1}. [${task.status}] taskId=${task.taskId}\n` +
         `   ${task.content}\n` +
         `   While active: ${task.activeForm}\n` +
+        (task.materialOutputId
+          ? `   Generate materialOutputId=${task.materialOutputId} with submit_document.\n`
+          : "") +
+        (task.actionIndexes
+          ? `   Fulfill semantic actionIndexes=${JSON.stringify(task.actionIndexes)}.\n`
+          : "") +
         `   Acceptance: ${task.acceptanceCriteria
           .map((criterion) =>
             typeof criterion === "string" ? criterion : criterion.description,

@@ -1,3 +1,8 @@
+import {
+  semanticContractFixture,
+  classifiedFixture,
+  semanticResponseFixture,
+} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
@@ -48,12 +53,12 @@ describe("workflow: native source-note copy", function () {
       registry.register(
         (Zotero as any).LLMForZotero.api.agent.getToolDefinition("note_write"),
       );
-      const contract: AgentActionContract = {
+      const contract: AgentActionContract = semanticContractFixture({
         version: 3,
         id: "native-copy",
         hardConstraints: [],
         writeDisposition: "required",
-        interpretationSource: "classifier",
+        interpretationSource: "semantic",
         obligations: [
           {
             id: "copy",
@@ -65,7 +70,7 @@ describe("workflow: native source-note copy", function () {
             parameters: { noteMode: "create" },
           },
         ],
-      };
+      });
       const context: AgentToolContext = {
         request: {
           conversationKey: source.id,

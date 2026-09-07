@@ -1,3 +1,7 @@
+import { semanticWorkflow } from "./semanticWorkflow";
+import { SemanticIntentService } from "../src/agent/model/semanticIntentService";
+import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
+import { getAllSkills } from "../src/agent/skills";
 import type { AgentRuntimeRequestInput } from "../src/agent/types";
 import { assertExact, check, type StepOutcome } from "./core";
 import { catalog } from "./catalog";
@@ -93,7 +97,9 @@ export async function executeJourneyStep(
   ) => driver.turn(id, prompt, spec.mode, request, expected);
   let outcome: StepOutcome | void = undefined;
   try {
-    if (id === "paper.conversation") {
+    if (id === "semantic.compound" || id === "semantic.compound-plan") {
+      await semanticWorkflow(id, ctx);
+    } else if (id === "paper.conversation") {
       await harness.openStandaloneForItem(f.items.primary.id);
       await harness.clickStandaloneTab("paper");
       const reasoningOption = getRuntimeReasoningOptionsForModel(
@@ -398,6 +404,82 @@ export async function executeJourneyStep(
         ),
       );
       requireReceipt(turn);
+    } else if (id === "semantic.transport") {
+      const item = f.items.geometry;
+      const request = resolveAgentRuntimeRequest({
+        conversationKey: item.id,
+        mode: "agent",
+        libraryID: item.libraryID,
+        authMode: "api_key",
+        model: driver.creds.model,
+        apiBase: driver.creds.apiBase,
+        apiKey: driver.creds.apiKey,
+        providerProtocol: driver.creds
+          .providerProtocol as AgentRuntimeRequestInput["providerProtocol"],
+        reasoning: {
+          provider: "deepseek",
+          level: driver.creds.reasoningLevel || "high",
+        } as AgentRuntimeRequestInput["reasoning"],
+        userText: `Move the paper titled "${item.getField("title")}" from "${f.collections.geometry.name}" to "${f.collections.destination.name}". Preserve membership in "${f.collections.unrelated.name}".`,
+      });
+      const started = Date.now();
+      const result = await new SemanticIntentService().interpret(
+        request,
+        getAllSkills(),
+        { timeoutMs: 180000 },
+      );
+      const elapsedMs = Date.now() - started;
+      await write(`${id}/transport.json`, {
+        diagnostic: true,
+        timeoutMs: 180000,
+        elapsedMs,
+        model: request.model,
+        reasoning: request.reasoning,
+        result,
+      });
+      onlyChanges(before, await snapshot(), () => false);
+      return {
+        status: "REVIEW_REQUIRED",
+        detail: `Read-only timing diagnostic: ${result.degraded ? "unavailable" : "interpreted"} in ${elapsedMs} ms under a 180-second per-attempt limit. This is not production action acceptance.`,
+      };
+    } else if (id === "semantic.filing") {
+      const item = f.items.geometry;
+      const destination = f.collections.destination;
+      const prompts = [
+        `move this paper to ${destination.name} folder`,
+        `move this paper to ${destination.name} collection`,
+        `请把这篇论文放进 ${destination.name} 文件夹，保留它在其他集合中的归属。`,
+      ];
+      const membership = Array.from(
+        new Set([...before[itemKey(item)].collections, destination.key]),
+      ).sort();
+      for (const [index, prompt] of prompts.entries()) {
+        const turn = await run(prompt, {
+          ...paperRequest(item),
+          conversationKey: item.id + index * 1000000,
+        });
+        exactFieldChange(
+          before,
+          await snapshot(),
+          item,
+          "collections",
+          membership,
+        );
+        requireReceipt(turn);
+        if (index > 0)
+          check(
+            turn.events.some(
+              (event) =>
+                event.type === "tool_result" &&
+                event.actionReceipts.some(
+                  (receipt) =>
+                    receipt.status === "already_satisfied" &&
+                    receipt.verification === "verified",
+                ),
+            ),
+            "Repeated filing needs verified already-satisfied evidence",
+          );
+      }
     } else if (id === "library.add" || id === "library.move") {
       const item = f.items.geometry;
       const moving = id === "library.move";

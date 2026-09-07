@@ -57,6 +57,13 @@ export function getAbortController(): typeof AbortController | undefined {
       ? (ztoolkit.getGlobal("AbortController") as
           | typeof AbortController
           | undefined)
+      : undefined) ||
+    (typeof Zotero !== "undefined"
+      ? (
+          Zotero.getMainWindow?.() as unknown as
+            | { AbortController?: typeof AbortController }
+            | undefined
+        )?.AbortController
       : undefined)
   );
 }

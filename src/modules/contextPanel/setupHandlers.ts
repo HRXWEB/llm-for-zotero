@@ -335,7 +335,7 @@ import {
   type PaperSearchSlashToken,
 } from "./paperSearch";
 import {
-  resolvePaperScopedCommandInput,
+  resolvePaperScopedDefaultInput,
   type PaperScopedActionCollectionCandidate,
   type PaperScopedActionProfile,
 } from "./paperScopeCommand";

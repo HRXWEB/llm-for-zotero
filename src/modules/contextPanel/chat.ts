@@ -423,6 +423,7 @@ import {
 import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
 import {
   appendAgentRunEventAfterLatest,
+  createAgentRunEventJournal,
   getAgentRunTrace,
   saveAgentRunTraceSnapshot,
 } from "../../agent/store/traceStore";
@@ -3770,6 +3771,7 @@ function createStreamUsageHandler(params: {
 
 type CodexNativeTurnCallbacks = Pick<
   Parameters<typeof runCodexAppServerNativeTurn>[0],
+  | "eventJournal"
   | "onSkillActivated"
   | "onDelta"
   | "onAgentMessageDelta"
@@ -3782,9 +3784,11 @@ type CodexNativeTurnCallbacks = Pick<
   | "onPlanArtifact"
   | "onPlanExecutionUpdated"
   | "onMcpToolActivity"
+  | "onHostEvent"
   | "onMcpSetupWarning"
   | "onDiagnostics"
   | "onApprovalRequest"
+  | "onHostInteraction"
 >;
 
 /**
@@ -3810,6 +3814,9 @@ function buildCodexNativeTurnCallbacks(ctx: {
   conversationGeneration: number;
   planContext?: import("../../agent/plans/types").PlanRuntimeContext;
   actionContract?: AgentActionContract;
+  classifiedIntent?: import("../../agent/types").ClassifiedTurnIntent;
+  skillRoutingReceipt?: import("../../agent/types").AgentRuntimeRequest["skillRoutingReceipt"];
+  actionPreparation?: import("../../agent/contracts/actionPreparation").ActionPreparation;
 }): CodexNativeTurnCallbacks {
   const {
     body,
@@ -3837,6 +3844,11 @@ function buildCodexNativeTurnCallbacks(ctx: {
       },
     });
   return {
+    eventJournal: createAgentRunEventJournal({
+      conversationKey: ctx.conversationKey,
+      conversationGeneration: ctx.conversationGeneration,
+      model: assistantMessage.modelName,
+    }),
     onSkillActivated: (skillId) => {
       if (!isLive()) return;
       flushResponseStream("event");
@@ -3902,6 +3914,11 @@ function buildCodexNativeTurnCallbacks(ctx: {
         type: "plan_execution_updated",
         ledger,
       });
+    },
+    onHostEvent: (event) => {
+      if (!isLive()) return;
+      flushResponseStream("event");
+      codexActivityTrace?.appendPlanEvent(event);
     },
     onMcpToolActivity: (event) => {
       if (!isLive()) return;
@@ -3976,6 +3993,14 @@ function buildCodexNativeTurnCallbacks(ctx: {
         formatCodexNativeDiagnosticsStatus(diagnostics),
         "sending",
       );
+    },
+    onHostInteraction: async (action) => {
+      if (!isLive()) return { approved: false };
+      const requestId = `host-review-${Date.now()}-${++codexNativeApprovalRequestCounter}`;
+      codexActivityTrace?.noteMcpConfirmationRequired?.(requestId, action);
+      const resolution = await showNativeMcpActionCard(body, requestId, action);
+      codexActivityTrace?.noteMcpConfirmationResolved?.(requestId, resolution);
+      return isLive() ? resolution : { approved: false };
     },
     onApprovalRequest: async (request) => {
       if (!isLive())
@@ -5089,15 +5114,11 @@ function shouldRequireBodyEvidenceQuoteSearch(params: {
     countQuoteScopedPapers(params.pairedUserMessage, params.runtimeRequest) > 1,
   );
   if (!hasScopedPool) return false;
-  const userText = [
-    params.pairedUserMessage?.text,
-    params.runtimeRequest?.userText,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  if (/\b(?:abstract|title|front\s+matter)\b/i.test(userText)) {
+  if (
+    params.runtimeRequest?.classifiedIntent?.semantic?.reading.source ===
+    "metadata"
+  )
     return false;
-  }
   return true;
 }
 
@@ -6403,6 +6424,7 @@ type CodexNativeMcpToolActivityEvent = {
   error?: string;
   quoteCitations?: QuoteCitation[];
   artifacts?: AgentToolArtifact[];
+  actionReceipts?: import("../../agent/contracts/types").AgentActionReceipt[];
 };
 
 type CodexToolActivityEventPayload = Extract<
@@ -6777,6 +6799,7 @@ function createCodexNativeActivityTraceController(
       text?: string;
       codeBlock?: string;
       artifacts?: AgentToolArtifact[];
+      actionReceipts?: import("../../agent/contracts/types").AgentActionReceipt[];
     },
     options: { matchRecentUnknown?: boolean } = {},
   ): string | null => {
@@ -6797,6 +6820,9 @@ function createCodexNativeActivityTraceController(
       ...(activity.text ? { text: activity.text } : {}),
       ...(activity.codeBlock ? { codeBlock: activity.codeBlock } : {}),
       ...(activity.artifacts?.length ? { artifacts: activity.artifacts } : {}),
+      ...(activity.actionReceipts?.length
+        ? { actionReceipts: activity.actionReceipts }
+        : {}),
     });
     const matchedUnknown =
       options.matchRecentUnknown && (cleanToolName || cleanToolLabel)
@@ -7150,6 +7176,7 @@ function createCodexNativeActivityTraceController(
         ok: event.ok,
         text: event.error,
         artifacts: event.artifacts,
+        actionReceipts: event.actionReceipts,
       },
       { matchRecentUnknown: !existingItemId },
     );
@@ -7222,10 +7249,7 @@ function createCodexNativeActivityTraceController(
   };
 
   const appendPlanEvent = (event: AgentEvent): void => {
-    if (
-      event.type === "provider_event" &&
-      event.providerType === "codex_plan_context"
-    ) {
+    if (event.type === "provider_event") {
       events.push(createEvent(event));
       sync();
       return;
@@ -8407,7 +8431,7 @@ export async function editLatestUserMessageAndRetry(
         agentRunId: retryPair.userMessage.agentRunId,
         selectedText: retryPair.userMessage.selectedText,
         selectedTextContexts: retryPair.userMessage.selectedTextContexts,
-        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTexts: retryPair.userMessage.selectedTexts || [],
         selectedTextSources: retryPair.userMessage.selectedTextSources,
         selectedTextPaperContexts:
           retryPair.userMessage.selectedTextPaperContexts,
@@ -8738,7 +8762,7 @@ export async function retryLatestAssistantResponse(
   );
   const retrySelectedTextContexts = synthesizeSelectedTextContexts({
     selectedTextContexts: retryPair.userMessage.selectedTextContexts,
-    selectedTexts: retryPair.userMessage.selectedTexts,
+    selectedTexts: retryPair.userMessage.selectedTexts || [],
     legacySelectedText: retryPair.userMessage.selectedText,
     selectedTextSources: retryPair.userMessage.selectedTextSources,
     selectedTextPaperContexts: retryPair.userMessage.selectedTextPaperContexts,
@@ -8854,7 +8878,7 @@ export async function retryLatestAssistantResponse(
         agentRunId: retryPair.userMessage.agentRunId,
         selectedText: retryPair.userMessage.selectedText,
         selectedTextContexts: retryPair.userMessage.selectedTextContexts,
-        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTexts: retryPair.userMessage.selectedTexts || [],
         selectedTextSources: retryPair.userMessage.selectedTextSources,
         selectedTextPaperContexts:
           retryPair.userMessage.selectedTextPaperContexts,
@@ -9165,6 +9189,41 @@ export async function retryLatestAssistantResponse(
           }),
         )
       : null;
+    const codexSemanticRequest = isCodexNativeTurn
+      ? await initAgentSubsystem().then(async (runtime) =>
+          runtime.prepareSemanticRequest(
+            await buildAgentRuntimeRequest({
+              conversationKey,
+              conversationGeneration,
+              sourceMessageTimestamp: retryPair.userMessage.timestamp,
+              item,
+              userText: question,
+              selectedTextContexts: retrySelectedTextContexts,
+              resolvedSelectedTextAnchors: retryResolvedSelectedTextAnchors,
+              selectedTexts: retryPair.userMessage.selectedTexts || [],
+              selectedTextSources: retryPair.userMessage.selectedTextSources,
+              selectedTextPaperContexts:
+                retryPair.userMessage.selectedTextPaperContexts,
+              selectedTextNoteContexts:
+                retryPair.userMessage.selectedTextNoteContexts,
+              paperContexts: contextPlan.paperContexts,
+              pdfPaperContexts: retryPair.userMessage.pdfPaperContexts,
+              fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              citationPaperContexts:
+                retryPair.userMessage.citationPaperContexts,
+              selectedCollectionContexts,
+              selectedTagContexts,
+              attachments,
+              localDocuments: retryLocalDocuments,
+              screenshots: allImages,
+              forcedSkillIds: retryPair.userMessage.forcedSkillIds,
+              effectiveRequestConfig,
+              history: llmHistory,
+            }),
+            { signal: getAbortController(conversationKey)?.signal },
+          ),
+        )
+      : undefined;
     if (stopRetryPreparation()) return;
     if (
       !notifyProviderDispatch(
@@ -9179,11 +9238,9 @@ export async function retryLatestAssistantResponse(
     const modelOutcome: ModelTurnOutcome = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
+            semanticRequest: codexSemanticRequest!,
             scope: codexScope!,
             conversationGeneration,
-            sourceMessageTimestamp: retryPair.userMessage.timestamp,
-            planContext: retryPlanContext,
-            actionContract: retryActionContract,
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -9195,7 +9252,7 @@ export async function retryLatestAssistantResponse(
               forcedSkillIds: retryPair.userMessage.forcedSkillIds,
               selectedTextContexts: retrySelectedTextContexts,
               resolvedSelectedTextAnchors: retryResolvedSelectedTextAnchors,
-              selectedTexts: retryPair.userMessage.selectedTexts,
+              selectedTexts: retryPair.userMessage.selectedTexts || [],
               selectedTextSources: retryPair.userMessage.selectedTextSources,
               selectedTextPaperContexts:
                 retryPair.userMessage.selectedTextPaperContexts,
@@ -9227,6 +9284,7 @@ export async function retryLatestAssistantResponse(
               actionContract: retryActionContract,
             }),
           });
+          assistantMessage.agentRunId = result.agentRunId;
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
@@ -12094,38 +12152,40 @@ export async function sendQuestion(
           }),
         )
       : null;
-    const codexPlanActionContract =
-      isCodexNativeTurn && opts.planContext
-        ? await initAgentSubsystem().then(async (runtime) => {
-            const planRequest = await buildAgentRuntimeRequest({
-              conversationKey,
-              conversationGeneration,
-              sourceMessageTimestamp: userMessage.timestamp,
-              item,
-              userText: shownQuestion,
-              selectedTextContexts: selectedTextContextsForMessage,
-              resolvedSelectedTextAnchors,
-              selectedTexts: selectedTextsForMessage,
-              selectedTextSources: selectedTextSourcesForMessage,
-              selectedTextPaperContexts: selectedTextPaperContextsForMessage,
-              selectedTextNoteContexts: selectedTextNoteContextsForMessage,
-              paperContexts: contextPlan.paperContexts,
-              pdfPaperContexts: normalizedPdfPaperContexts,
-              fullTextPaperContexts: contextPlan.fullTextPaperContexts,
-              citationPaperContexts: userMessage.citationPaperContexts,
-              selectedCollectionContexts: selectedCollectionContextsForMessage,
-              selectedTagContexts: selectedTagContextsForMessage,
-              attachments: modelAttachments || attachments,
-              localDocuments,
-              screenshots: allSendImages,
-              forcedSkillIds: opts.forcedSkillIds,
-              planContext: opts.planContext,
-              effectiveRequestConfig,
-              history: llmHistory,
-            });
-            return runtime.createActionContractForRequest(planRequest);
-          })
-        : undefined;
+    const codexSemanticRequest = isCodexNativeTurn
+      ? await initAgentSubsystem().then(async (runtime) => {
+          const planRequest = await buildAgentRuntimeRequest({
+            conversationKey,
+            conversationGeneration,
+            sourceMessageTimestamp: userMessage.timestamp,
+            item,
+            userText: shownQuestion,
+            selectedTextContexts: selectedTextContextsForMessage,
+            resolvedSelectedTextAnchors,
+            selectedTexts: selectedTextsForMessage,
+            selectedTextSources: selectedTextSourcesForMessage,
+            selectedTextPaperContexts: selectedTextPaperContextsForMessage,
+            selectedTextNoteContexts: selectedTextNoteContextsForMessage,
+            paperContexts: contextPlan.paperContexts,
+            pdfPaperContexts: normalizedPdfPaperContexts,
+            fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+            citationPaperContexts: userMessage.citationPaperContexts,
+            selectedCollectionContexts: selectedCollectionContextsForMessage,
+            selectedTagContexts: selectedTagContextsForMessage,
+            attachments: modelAttachments || attachments,
+            localDocuments,
+            screenshots: allSendImages,
+            forcedSkillIds: opts.forcedSkillIds,
+            planContext: opts.planContext,
+            effectiveRequestConfig,
+            history: llmHistory,
+          });
+          return runtime.prepareSemanticRequest(planRequest, {
+            signal: getAbortController(conversationKey)?.signal,
+          });
+        })
+      : undefined;
+    const codexPlanActionContract = codexSemanticRequest?.actionContract;
     if (await stopInactiveRequest()) return;
     if (
       !notifyProviderDispatch(
@@ -12141,14 +12201,12 @@ export async function sendQuestion(
     const modelOutcome: ModelTurnOutcome = isCodexNativeTurn
       ? await (async () => {
           const result = await runCodexAppServerNativeTurn({
+            semanticRequest: codexSemanticRequest!,
             scope: codexScope!,
             conversationGeneration,
-            sourceMessageTimestamp: userMessage.timestamp,
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
-            planContext: opts.planContext,
-            actionContract: codexPlanActionContract,
             signal: getAbortController(conversationKey)?.signal,
             codexPath: getEffectiveCodexAppServerBinaryPath(
               effectiveRequestConfig.apiBase,
@@ -12185,8 +12243,12 @@ export async function sendQuestion(
               conversationGeneration,
               planContext: opts.planContext,
               actionContract: codexPlanActionContract,
+              classifiedIntent: codexSemanticRequest?.classifiedIntent,
+              skillRoutingReceipt: codexSemanticRequest?.skillRoutingReceipt,
+              actionPreparation: codexSemanticRequest?.actionPreparation,
             }),
           });
+          assistantMessage.agentRunId = result.agentRunId;
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }

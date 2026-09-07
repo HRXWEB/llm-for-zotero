@@ -1,3 +1,9 @@
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import {
+  classifiedFixture,
+  semanticFixture,
+  actionContractFixture,
+} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import {
   addZoteroMcpToolActivityObserver,
@@ -104,6 +110,22 @@ async function invokeMcpEndpoint(params: {
 }
 
 describe("Zotero MCP server", function () {
+  it("exposes only the owning live scope revision to host finalization", function () {
+    const old = registerScopedZoteroMcpScope(
+      { conversationKey: 7001, libraryID: 1, kind: "global" },
+      { token: "scope-finalization-fixture" },
+    );
+    const current = registerScopedZoteroMcpScope(
+      { conversationKey: 7001, libraryID: 1, kind: "global", runId: "current" },
+      { token: "scope-finalization-fixture" },
+    );
+    assert.isNull(old.getState());
+    old.clear();
+    assert.equal(current.getState()?.runId, "current");
+    current.clear();
+    assert.isNull(current.getState());
+  });
+
   const originalZotero = globalThis.Zotero;
   const prefStore = new Map<string, unknown>();
   let selectedLibraryID: number | undefined;
@@ -149,7 +171,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("uses Zotero's configured HTTP port and rejects unauthenticated calls", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_search"));
     registerMcpServer({
       toolRegistry: registry,
@@ -178,7 +202,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("lists curated read tools and built-in write tools without self-confirmation", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_search"));
     registry.register(createWriteTool("library_update"));
     registry.register(createWriteTool("file_io"));
@@ -236,7 +262,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("shows submit_document only for a host-required document outcome", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_search"));
     registry.register(createReadTool("submit_document"));
     registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
@@ -278,7 +306,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {
     let executionCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     for (const tool of [
       createReadTool("library_search"),
       createReadTool("literature_search"),
@@ -400,7 +430,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("accepts the MCP initialized notification without a JSON-RPC response", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_search"));
     registerMcpServer({
       toolRegistry: registry,
@@ -420,7 +452,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("executes curated read tools through the tool registry", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_search"));
     registerMcpServer({
       toolRegistry: registry,
@@ -441,7 +475,7 @@ describe("Zotero MCP server", function () {
     });
     const payload = JSON.parse(response[2]);
     const content = JSON.parse(payload.result.content[0].text);
-    assert.equal(content.ok, true);
+    assert.equal(content.ok, true, JSON.stringify(content));
     assert.deepEqual(content.result, {
       name: "library_search",
       input: { entity: "items" },
@@ -450,7 +484,9 @@ describe("Zotero MCP server", function () {
 
   it("blocks exact, implicit, and same-parent sibling reads for a raw PDF", async function () {
     let executionCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     const paperRead = createReadTool("paper_read");
     paperRead.execute = async (input) => {
       executionCount += 1;
@@ -584,7 +620,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps exact Text retrieval available in a mixed direct-PDF scope", async function () {
     let executedInput: unknown;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     const paperRead = createReadTool("paper_read");
     paperRead.execute = async (input) => {
       executedInput = input;
@@ -669,7 +707,9 @@ describe("Zotero MCP server", function () {
 
   it("fails closed for global library retrieval and recognizes scope.itemIds", async function () {
     let executionCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     const libraryRetrieve = createReadTool("library_retrieve");
     libraryRetrieve.execute = async (input) => {
       executionCount += 1;
@@ -754,7 +794,9 @@ describe("Zotero MCP server", function () {
 
   it("blocks library attachment enumeration for raw parents without suppressing metadata and notes", async function () {
     const executed: unknown[] = [];
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     const libraryRead = createReadTool("library_read");
     libraryRead.execute = async (input) => {
       executed.push(input);
@@ -870,7 +912,9 @@ describe("Zotero MCP server", function () {
     const modeLabel = backend === "codex_responses" ? "Codex" : "Claude Code";
     it(`prevents native filesystem and Zotero-script PDF bypasses in ${modeLabel} raw-PDF scope`, async function () {
       const executed: Array<{ name: string; input: unknown }> = [];
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(
+        new ActionContractService({ getItem: () => null } as never),
+      );
       for (const name of ["run_command", "file_io", "zotero_script"]) {
         registry.register({
           spec: {
@@ -1009,7 +1053,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps local filesystem tools out of MCP while retaining Zotero scripts", async function () {
     const executed: string[] = [];
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     for (const name of ["run_command", "file_io", "zotero_script"]) {
       registry.register({
         spec: {
@@ -1082,7 +1128,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("emits exact MCP tool activity for native Codex trace fallback", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(createReadTool("library_read"));
     registerMcpServer({
       toolRegistry: registry,
@@ -1161,7 +1209,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("includes paper_read quote citations in completed MCP activity", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -1221,7 +1271,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("uses explicit MCP scope args as context defaults without passing them to validators", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_search",
@@ -1263,7 +1315,7 @@ describe("Zotero MCP server", function () {
     });
     const payload = JSON.parse(response[2]);
     const content = JSON.parse(payload.result.content[0].text);
-    assert.equal(content.ok, true);
+    assert.equal(content.ok, true, JSON.stringify(content));
     assert.deepEqual(content.result.input, {
       entity: "items",
       mode: "list",
@@ -1276,7 +1328,9 @@ describe("Zotero MCP server", function () {
 
   it("snapshots the selected Zotero library for headerless MCP reads", async function () {
     selectedLibraryID = 7;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_search",
@@ -1309,12 +1363,14 @@ describe("Zotero MCP server", function () {
     });
     const payload = JSON.parse(response[2]);
     const content = JSON.parse(payload.result.content[0].text);
-    assert.equal(content.ok, true);
+    assert.equal(content.ok, true, JSON.stringify(content));
     assert.equal(content.result.libraryID, 7);
   });
 
   it("binds MCP tool context to the exact scoped token", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -1386,7 +1442,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result.request, {
         conversationKey: 123,
         libraryID: 7,
@@ -1433,7 +1489,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("passes scoped selected, full-text, and pinned paper contexts with source metadata", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -1515,7 +1573,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(
         content.result.request.turnPaperScope.papers.map(
           (entry: { paper: unknown; roles: string[] }) => ({
@@ -1535,7 +1593,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("passes selected tags to scoped library_retrieve MCP calls", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_retrieve",
@@ -1586,7 +1646,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result.input, {
         query: "what papers are here?",
         intent: "enumerate",
@@ -1656,7 +1716,9 @@ describe("Zotero MCP server", function () {
       listPaperContexts: () => [paper],
       resolvePaperContextTarget: () => paper,
     } as never;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(
       createPaperReadTool(
         {
@@ -1686,6 +1748,7 @@ describe("Zotero MCP server", function () {
       activeItemId: paper.itemId,
       activeContextItemId: paper.contextItemId,
       userText: "Use the actual PDF/full text to explain the method.",
+      classifiedIntent: classifiedFixture({ retrievalIntent: "topic" }),
       turnPaperScope: {
         libraryID: 1,
         conversationKind: "paper",
@@ -1739,7 +1802,7 @@ describe("Zotero MCP server", function () {
         },
       });
       const payload = JSON.parse(response[2]);
-      assert.isNotTrue(payload.result.isError);
+      assert.isNotTrue(payload.result.isError, JSON.stringify(payload.result));
       assert.deepEqual(ensuredPaper, paper);
     } finally {
       scoped.clear();
@@ -1748,7 +1811,9 @@ describe("Zotero MCP server", function () {
 
   it("deduplicates repeated same-turn semantic read calls", async function () {
     let executeCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -1816,7 +1881,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps explicit library IDs distinct in scoped read deduplication", async function () {
     let executeCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_search",
@@ -1884,7 +1951,9 @@ describe("Zotero MCP server", function () {
 
   it("rejects conflicting top-level and library_retrieve scope IDs", async function () {
     let executed = false;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_retrieve",
@@ -1927,7 +1996,9 @@ describe("Zotero MCP server", function () {
 
   it("does not deduplicate semantic reads without a scoped MCP token", async function () {
     let executeCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -1974,7 +2045,9 @@ describe("Zotero MCP server", function () {
 
   it("clears semantic read dedupe when the scoped MCP turn is cleared", async function () {
     let executeCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -2051,7 +2124,9 @@ describe("Zotero MCP server", function () {
   it("invalidates semantic read dedupe after successful writes", async function () {
     let readExecuteCount = 0;
     let writeExecuteCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_search",
@@ -2102,6 +2177,7 @@ describe("Zotero MCP server", function () {
         libraryID: 1,
         kind: "global",
         userText: "move and verify",
+        actionContract: actionContractFixture("settings_update"),
         runtimeAuthority: "codex",
       },
       { token: "dedupe-write-scope-token" },
@@ -2163,7 +2239,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("binds MCP tool context from the scoped header", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_search",
@@ -2221,7 +2299,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result.request, {
         conversationKey: 456,
         libraryID: 7,
@@ -2238,7 +2316,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps raw-PDF restrictions token-local for headerless standalone reads", async function () {
     let executionCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     const paperRead = createReadTool("paper_read");
     paperRead.execute = async (input, context) => {
       executionCount += 1;
@@ -2321,9 +2401,12 @@ describe("Zotero MCP server", function () {
       itemId: 91,
       contextItemId: 92,
       title: "Claude-only paper",
+      libraryID: 1,
     };
     let ensurePaperContextCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(
       createPaperReadTool(
         {
@@ -2347,6 +2430,12 @@ describe("Zotero MCP server", function () {
     const scoped = registerScopedZoteroMcpScope(
       {
         profileSignature: "claude-profile",
+        classifiedIntent: classifiedFixture({
+          paperTargetIntent: "all_visible",
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
         conversationKey: 457,
         libraryID: 1,
         kind: "paper",
@@ -2393,7 +2482,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("does not add a plugin-side prompt to a native MCP read", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "paper_read",
@@ -2441,7 +2532,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, {
         delivered: true,
         input: { attachFile: true },
@@ -2453,7 +2544,9 @@ describe("Zotero MCP server", function () {
 
   it("accepts native-runtime authorization without a duplicate Zotero prompt", async function () {
     let executeCount = 0;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_update",
@@ -2486,6 +2579,7 @@ describe("Zotero MCP server", function () {
         conversationKey: 456,
         libraryID: 1,
         kind: "global",
+        actionContract: actionContractFixture("settings_update"),
         runtimeAuthority: "codex",
       },
       { token: "deny-scope-token" },
@@ -2507,7 +2601,7 @@ describe("Zotero MCP server", function () {
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
       assert.isUndefined(payload.result.isError);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, { applied: true });
       assert.equal(executeCount, 1);
     } finally {
@@ -2517,7 +2611,9 @@ describe("Zotero MCP server", function () {
 
   it("rejects run_command and file_io at the native MCP boundary", async function () {
     const executed: string[] = [];
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     for (const name of ["run_command", "file_io"]) {
       registry.register({
         spec: {
@@ -2595,7 +2691,9 @@ describe("Zotero MCP server", function () {
   });
 
   it("creates standalone notes through the note_write review card path", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "note_write",
@@ -2646,6 +2744,11 @@ describe("Zotero MCP server", function () {
         conversationKey: 789,
         libraryID: 1,
         kind: "global",
+        actionContract: actionContractFixture("settings_update"),
+        requestInteraction: async (action) => {
+          assert.equal(action.title, "Review new note");
+          return { approved: true };
+        },
         runtimeAuthority: "codex",
       },
       { token: "note-scope-token" },
@@ -2670,7 +2773,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, {
         status: "created",
         noteId: 99,
@@ -2698,7 +2801,9 @@ describe("Zotero MCP server", function () {
         get: (id: number) => (id === 501 ? noteItem : null),
       },
     } as unknown as typeof Zotero;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "note_write",
@@ -2754,6 +2859,11 @@ describe("Zotero MCP server", function () {
         activeNoteId: 501,
         activeNoteKind: "standalone",
         activeNoteTitle: "Active Note",
+        actionContract: actionContractFixture("settings_update"),
+        requestInteraction: async (action) => {
+          assert.equal(action.fields[0].type, "diff_preview");
+          return { approved: true };
+        },
         runtimeAuthority: "codex",
       },
       { token: "active-note-scope-token" },
@@ -2777,7 +2887,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, {
         status: "updated",
         noteId: 501,
@@ -2789,7 +2899,9 @@ describe("Zotero MCP server", function () {
 
   it("keeps a conversation scope token usable across turns and rebinds it to the newest turn", async function () {
     let seenActiveItemId: number | undefined;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_read",
@@ -2923,7 +3035,9 @@ describe("Zotero MCP server", function () {
 
   it("rejects stale cached MCP write headers instead of rebinding them", async function () {
     let pendingConversationKey: number | undefined;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "library_update",
@@ -2990,7 +3104,9 @@ describe("Zotero MCP server", function () {
 
   it("runs zotero_script through MCP without forcing a confirmation", async function () {
     let executed = false;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register({
       spec: {
         name: "zotero_script",
@@ -3024,6 +3140,7 @@ describe("Zotero MCP server", function () {
     const scoped = registerScopedZoteroMcpScope(
       {
         profileSignature: "profile-script",
+        actionContract: actionContractFixture("zotero_script_execute"),
         conversationKey: 5020,
         libraryID: 1,
         kind: "global",
@@ -3054,7 +3171,7 @@ describe("Zotero MCP server", function () {
       });
       const payload = JSON.parse(response[2]);
       const content = JSON.parse(payload.result.content[0].text);
-      assert.equal(content.ok, true);
+      assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, { status: "ran" });
       assert.isTrue(executed);
     } finally {

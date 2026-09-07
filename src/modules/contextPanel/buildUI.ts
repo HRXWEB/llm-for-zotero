@@ -17,8 +17,7 @@ import {
   type SlashBaseMenuItem,
 } from "./slashMenuBehavior";
 import {
-  getPaperPortalBaseItemID,
-  isPaperPortalItem,
+  resolveConversationBaseItem,
   resolveActiveNoteSession,
   resolveDisplayConversationKind,
   resolvePreferredConversationSystem,
@@ -64,13 +63,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const basePaperItemId =
     hasItem && item
       ? activeNoteSession?.parentItemId ||
-        (isPaperPortalItem(item)
-          ? getPaperPortalBaseItemID(item) || 0
-          : item.isAttachment() && item.parentID
-            ? item.parentID
-            : isPaperMode
-              ? item.id
-              : 0)
+        (isPaperMode ? Number(resolveConversationBaseItem(item)?.id || 0) : 0)
       : 0;
   const hasPaperContext = basePaperItemId > 0;
 

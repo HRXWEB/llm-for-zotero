@@ -1,3 +1,12 @@
+import {
+  bumpConversationWriteGeneration,
+  getConversationWriteGeneration,
+} from "../src/shared/conversationWriteFence";
+import { declaredSemanticInterpreter } from "./helpers/semanticIntent";
+import { actionFixture } from "./helpers/semanticIntent";
+import { classifiedFixture } from "./helpers/semanticIntent";
+import { semanticContractFixture } from "./helpers/semanticIntent";
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { stripNoteHtml } from "../src/utils/noteText";
 import { renderMarkdownForNote } from "../src/utils/markdown";
@@ -9,6 +18,7 @@ import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
+  createAgentRunEventJournal,
   getAgentRunTrace,
   initAgentTraceStore,
   INTERRUPTED_AGENT_RUN_MARKER,
@@ -127,22 +137,25 @@ function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
 
 function createRequiredMoveActionContractService(): ActionContractService {
   const service = createTestActionContractService();
-  service.createContract = async () => ({
-    version: 3,
-    id: "required-move-contract",
-    writeDisposition: "required",
-    interpretationSource: "classifier",
-    obligations: [
-      {
-        id: "required-move-contract:obligation:0",
-        capability: "zotero.collections",
-        operation: "move_to_collection",
-        proofDomain: "zotero_state",
-        coverage: "all",
-        targetKind: "items",
-      },
-    ],
-  });
+  service.createContract = async () =>
+    semanticContractFixture(
+      semanticContractFixture({
+        version: 3,
+        id: "required-move-contract",
+        writeDisposition: "required",
+        interpretationSource: "classifier",
+        obligations: [
+          {
+            id: "required-move-contract:obligation:0",
+            capability: "zotero.collections",
+            operation: "move_to_collection",
+            proofDomain: "zotero_state",
+            coverage: "all",
+            targetKind: "items",
+          },
+        ],
+      }),
+    );
   return service;
 }
 
@@ -374,6 +387,196 @@ describe("AgentRuntime", function () {
     clearAgentToolResultHandleStore();
   });
 
+  it("does not end a compound action when its document is finalized before the library effect", async function () {
+    const restore = installMockDb();
+    let steps = 0;
+    try {
+      const registry = new AgentToolRegistry(
+        createRequiredMoveActionContractService(),
+      );
+      registry.register({
+        spec: {
+          name: "submit_document",
+          description: "Finalize material",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({
+          documentId: "durable-before-filing",
+          visibleMarkdown: "Finalized material.",
+        }),
+        resolveTerminalResult: () => ({
+          documentId: "durable-before-filing",
+          finalText: "Finalized material.",
+          providerTranscript: "tool_only",
+        }),
+      });
+      const runtime = new AgentRuntime({
+        registry,
+        semanticInterpreter: declaredSemanticInterpreter,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            steps++;
+            if (steps === 1)
+              return {
+                kind: "tool_calls",
+                calls: [
+                  { id: "finalize", name: "submit_document", arguments: {} },
+                ],
+                assistantMessage: { role: "assistant", content: "" },
+              };
+            return {
+              kind: "final",
+              text: "The document is ready; filing is not done.",
+              assistantMessage: {
+                role: "assistant",
+                content: "The document is ready; filing is not done.",
+              },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 998802,
+          mode: "agent",
+          userText: "Prepare a report and file the paper",
+          model: "gpt-4o-mini",
+          apiKey: "test",
+          apiBase: "https://example.invalid",
+          libraryID: 1,
+          classifiedIntent: classifiedFixture({
+            deliverableIntent: "document",
+            documentKind: "report",
+          }),
+        },
+      });
+      assert.isAbove(
+        steps,
+        1,
+        "Finalizing material must leave the unfinished action available to execute",
+      );
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.documentId, "durable-before-filing");
+      assert.include(outcome.text, "Finalized material.");
+      assert.equal(
+        (await getAgentRunTrace(outcome.runId)).run?.status,
+        "failed",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("durably orders immutable native authority snapshots before finalization", async function () {
+    const restore = installMockDb();
+    try {
+      const journal = createAgentRunEventJournal({
+        conversationKey: 991001,
+        conversationGeneration: getConversationWriteGeneration(991001),
+      });
+      const event: AgentEvent = {
+        type: "provider_event",
+        providerType: "agent_action_contract",
+        payload: { progress: { status: "staged" } },
+      };
+      const first = journal.append(event);
+      (event.payload as { progress: { status: string } }).progress.status =
+        "applied";
+      const second = journal.append(event);
+      await Promise.all([first, second]);
+      await journal.finish("completed", "Verified");
+      const trace = await getAgentRunTrace(journal.runId);
+      assert.equal(trace.run?.status, "completed");
+      assert.deepEqual(
+        trace.events.map((entry) => entry.seq),
+        [1, 2, 3],
+      );
+      assert.include(JSON.stringify(trace.events[0]), "staged");
+      assert.include(JSON.stringify(trace.events[1]), "applied");
+      let lateError = "";
+      try {
+        await journal.append(event);
+      } catch (error) {
+        lateError = String(error);
+      }
+      assert.include(lateError, "finalized");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps failed native authority persistence terminal and never publishes a later success", async function () {
+    const restore = installMockDb();
+    const query = Zotero.DB.queryAsync;
+    try {
+      const journal = createAgentRunEventJournal({
+        conversationKey: 991003,
+        conversationGeneration: getConversationWriteGeneration(991003),
+      });
+      Zotero.DB.queryAsync = (async (sql: string, ...args: any[]) => {
+        if (sql.startsWith("INSERT INTO llm_for_zotero_agent_run_events"))
+          throw new Error("disk write failed");
+        return (query as any)(sql, ...args);
+      }) as typeof query;
+      for (const operation of [
+        () => journal.append({ type: "status", text: "staged authority" }),
+        () => journal.append({ type: "status", text: "execution" }),
+        () => journal.finish("completed", "Done"),
+      ]) {
+        let failure = "";
+        try {
+          await operation();
+        } catch (error) {
+          failure = String(error);
+        }
+        assert.include(failure, "disk write failed");
+      }
+      const trace = await getAgentRunTrace(journal.runId);
+      assert.equal(trace.run?.status, "running");
+      assert.isEmpty(trace.events);
+    } finally {
+      Zotero.DB.queryAsync = query;
+      restore();
+    }
+  });
+
+  it("invalidates queued native execution authority when the conversation changes", async function () {
+    const restore = installMockDb();
+    try {
+      const key = 991002;
+      const journal = createAgentRunEventJournal({
+        conversationKey: key,
+        conversationGeneration: getConversationWriteGeneration(key),
+      });
+      const pending = journal.append({
+        type: "provider_event",
+        providerType: "agent_semantic_intent",
+        payload: {},
+      });
+      bumpConversationWriteGeneration(key);
+      let failure = "";
+      try {
+        await pending;
+      } catch (error) {
+        failure = String(error);
+      }
+      assert.include(failure, "no longer current");
+      assert.isNull((await getAgentRunTrace(journal.runId)).run);
+    } finally {
+      restore();
+    }
+  });
+
   it("source-checks a single-paper draft even when no library-wide retrieval is requested", async function () {
     const restoreDb = installMockDb();
     const draft = "Shuffled accuracy of 0.52 is near chance for a binary task.";
@@ -383,6 +586,7 @@ describe("AgentRuntime", function () {
     const events: AgentEvent[] = [];
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -417,6 +621,8 @@ describe("AgentRuntime", function () {
           apiKey: "test",
           apiBase: "",
           classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
             retrievalIntent: "none",
             wantedSections: ["results"],
             actionIntents: [],
@@ -440,6 +646,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter([], {
@@ -451,6 +658,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -477,7 +685,8 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(),
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(createTestActionContractService()),
         adapterFactory: () =>
           new MockAdapter([], {
             streaming: false,
@@ -489,6 +698,10 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture({
+              deliverableIntent: "document",
+              documentKind: "report",
+            }),
             conversationKey: 2,
             libraryID: 1,
             mode: "agent",
@@ -521,7 +734,7 @@ describe("AgentRuntime", function () {
           ...(id === 20 ? { parentID: 10 } : {}),
         }),
       };
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(createTestActionContractService());
       registry.register({
         spec: {
           name: "paper_read",
@@ -546,6 +759,7 @@ describe("AgentRuntime", function () {
       let observed: AgentRuntimeRequest["documentReadObservations"];
       let calls = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           supportsTools: () => true,
@@ -579,6 +793,10 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture({
+              deliverableIntent: "document",
+              documentKind: "report",
+            }),
             conversationKey: 421,
             libraryID: 1,
             mode: "agent",
@@ -612,6 +830,7 @@ describe("AgentRuntime", function () {
     };
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -630,6 +849,7 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 3,
             libraryID: 1,
             mode: "agent",
@@ -717,6 +937,7 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -753,6 +974,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 393,
           libraryID: 1,
           conversationKind: "paper",
@@ -789,6 +1011,7 @@ describe("AgentRuntime", function () {
     );
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -813,6 +1036,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -870,6 +1094,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -887,6 +1112,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 2,
           mode: "agent",
           userText: "Hello",
@@ -1013,6 +1239,7 @@ describe("AgentRuntime", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -1058,6 +1285,9 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcomePromise = runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("note_create", undefined, {
+            noteDestination: "zotero",
+          }),
           conversationKey: 1,
           mode: "agent",
           userText: "create a standalone note with hello",
@@ -1176,6 +1406,7 @@ describe("AgentRuntime", function () {
 
       let sawArtifactUserMessage = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -1234,6 +1465,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "Explain the figure",
@@ -1320,6 +1552,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       let continuationMessages: AgentModelMessage[] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -1372,6 +1605,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 98,
           mode: "agent",
           userText: "inspect the figure",
@@ -1434,6 +1668,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       let continuationMessages: AgentModelMessage[] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -1481,6 +1716,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 99,
           mode: "agent",
           userText: "inspect the figure",
@@ -1518,6 +1754,7 @@ describe("AgentRuntime", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -1564,6 +1801,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -1638,6 +1876,7 @@ describe("AgentRuntime", function () {
         },
       );
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -1660,6 +1899,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 171,
           mode: "agent",
           userText: "read every distinct chunk and synthesize",
@@ -1767,6 +2007,7 @@ describe("AgentRuntime", function () {
         );
         const events: AgentEvent[] = [];
         const runtime = new AgentRuntime({
+          semanticInterpreter: declaredSemanticInterpreter,
           registry,
           adapterFactory: () =>
             new MockAdapter(steps, {
@@ -1777,6 +2018,7 @@ describe("AgentRuntime", function () {
         });
         const outcome = await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 9010 + failingRounds,
             mode: "agent",
             userText: "Read these papers and answer from their evidence.",
@@ -1841,6 +2083,7 @@ describe("AgentRuntime", function () {
         },
       );
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(repeatedSteps, {
@@ -1852,6 +2095,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 172,
           mode: "agent",
           userText: "keep reading until done",
@@ -1895,6 +2139,7 @@ describe("AgentRuntime", function () {
       let initialMessages: AgentModelMessage[] = [];
       const overLimitCallCount = MAX_AGENT_TOOL_CALLS_PER_ROUND + 1;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -1997,6 +2242,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -2041,6 +2287,7 @@ describe("AgentRuntime", function () {
         },
       });
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2080,6 +2327,7 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 2,
             mode: "agent",
             userText: "Read safely",
@@ -2106,6 +2354,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2131,6 +2380,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "hello",
@@ -2167,6 +2417,7 @@ describe("AgentRuntime", function () {
         let modelSteps = 0;
         let continuationMessages: AgentModelMessage[] = [];
         const runtime = new AgentRuntime({
+          semanticInterpreter: declaredSemanticInterpreter,
           registry: new AgentToolRegistry(),
           adapterFactory: () => ({
             getCapabilities: () => ({
@@ -2207,6 +2458,7 @@ describe("AgentRuntime", function () {
 
         const outcome = await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 1_909,
             mode: "agent",
             userText: "finish this task",
@@ -2245,6 +2497,7 @@ describe("AgentRuntime", function () {
     try {
       let calls = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2266,6 +2519,7 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 19091,
           mode: "agent",
           userText: "finish this task",
@@ -2285,6 +2539,7 @@ describe("AgentRuntime", function () {
     try {
       let modelSteps = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2308,6 +2563,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1_910,
           mode: "agent",
           userText: "finish this task",
@@ -2337,6 +2593,7 @@ describe("AgentRuntime", function () {
     const split = Math.floor(rawPath.length / 2);
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2371,6 +2628,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 7_940_001,
           libraryID: 1,
           mode: "agent",
@@ -2432,6 +2690,7 @@ describe("AgentRuntime", function () {
       });
       let stepIndex = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2469,6 +2728,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey,
           libraryID: 1,
           mode: "agent",
@@ -2533,6 +2793,7 @@ describe("AgentRuntime", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2566,6 +2827,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize",
@@ -2624,6 +2886,7 @@ describe("AgentRuntime", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2661,6 +2924,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "what is this paper about?",
@@ -2788,6 +3052,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       let sawCorrectivePrompt = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2861,6 +3126,9 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("file_write", undefined, {
+            noteDestination: "file",
+          }),
           conversationKey: 1,
           mode: "agent",
           userText: "help me write an explanation of figure 2 to my obsidian",
@@ -2894,6 +3162,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       let sawCorrection = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2932,6 +3201,8 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
             retrievalIntent: "none",
             wantedSections: [],
             actionIntents: [],
@@ -3075,6 +3346,7 @@ describe("AgentRuntime", function () {
       ];
       let modelSteps = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -3104,6 +3376,8 @@ describe("AgentRuntime", function () {
           apiKey: "test",
           libraryID: 1,
           classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
             retrievalIntent: "targeted",
             wantedSections: [],
             writeDisposition: "none",
@@ -3117,7 +3391,11 @@ describe("AgentRuntime", function () {
         },
       });
 
-      assert.equal(confirmations, 2);
+      assert.equal(
+        confirmations,
+        0,
+        "Unrelated effects are blocked before review.",
+      );
       assert.equal(
         paperReads,
         1,
@@ -3179,6 +3457,7 @@ describe("AgentRuntime", function () {
       let step = 0;
       let restoredContent: Record<string, unknown> | undefined;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -3271,6 +3550,8 @@ describe("AgentRuntime", function () {
           apiKey: "test",
           libraryID: 1,
           classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
             retrievalIntent: "targeted",
             wantedSections: [],
             writeDisposition: "none",
@@ -3309,7 +3590,7 @@ describe("AgentRuntime", function () {
   it("requires paper_read full before completing an explicit Agent full-text request", async function () {
     const restoreDb = installMockDb();
     try {
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(createTestActionContractService());
       const reads: unknown[] = [];
       registry.register({
         spec: {
@@ -3337,6 +3618,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       let sawCorrection = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -3402,6 +3684,9 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("read_full", undefined, {
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
           conversationKey: 9,
           mode: "agent",
           conversationKind: "paper",
@@ -3427,7 +3712,7 @@ describe("AgentRuntime", function () {
   it("continues a rejected final without replaying the preceding tool result", async function () {
     const restoreDb = installMockDb();
     try {
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(createTestActionContractService());
       registry.register({
         spec: {
           name: "paper_read",
@@ -3451,6 +3736,7 @@ describe("AgentRuntime", function () {
       let stepIndex = 0;
       const continuationDeltas: AgentModelMessage[][] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -3534,6 +3820,9 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("read_full", undefined, {
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
           conversationKey: 10,
           mode: "agent",
           conversationKind: "paper",
@@ -3700,6 +3989,7 @@ describe("AgentRuntime", function () {
       let sawInitialFileRule = false;
       let sawCorrectivePrompt = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -3719,10 +4009,10 @@ describe("AgentRuntime", function () {
               .join("\n");
             if (stepIndex === 1) {
               sawInitialZoteroRule = allText.includes(
-                "The user is asking for a Zotero note workflow",
+                "Semantic intent specifies a Zotero note",
               );
               sawInitialFileRule = allText.includes(
-                "The user is asking for an Obsidian/file-based note",
+                "Semantic intent specifies a file export",
               );
               return {
                 kind: "tool_calls",
@@ -3771,6 +4061,9 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("note_create", undefined, {
+            noteDestination: "zotero",
+          }),
           conversationKey: 1,
           mode: "agent",
           userText:
@@ -3868,6 +4161,7 @@ describe("AgentRuntime", function () {
       const registry = new AgentToolRegistry(createTestActionContractService());
       registry.register(createFileIOTool());
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -3924,6 +4218,9 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("file_write", undefined, {
+            noteDestination: "file",
+          }),
           conversationKey: 1,
           mode: "agent",
           userText: "write this figure note to my Obsidian",
@@ -3968,6 +4265,7 @@ describe("AgentRuntime", function () {
 
       let stepIndex = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4022,6 +4320,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -4064,6 +4363,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4100,6 +4400,7 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4161,6 +4462,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4192,6 +4494,7 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4220,6 +4523,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
+        classifiedIntent: classifiedFixture(),
         conversationKey: 501,
         mode: "agent",
         userText: "summarize this paper",
@@ -4236,6 +4540,7 @@ describe("AgentRuntime", function () {
       };
 
       const firstRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -4282,6 +4587,7 @@ describe("AgentRuntime", function () {
 
       let secondInitialUserMessage = "";
       const secondRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4314,6 +4620,7 @@ describe("AgentRuntime", function () {
       const secondEvents: AgentEvent[] = [];
       await secondRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what about the methods?",
         },
@@ -4340,6 +4647,7 @@ describe("AgentRuntime", function () {
       assert.include(secondInitialUserMessage, 'title="Lifecycle Paper"');
 
       const failingRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -4366,6 +4674,7 @@ describe("AgentRuntime", function () {
       const failedEvents: AgentEvent[] = [];
       await failingRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "this will fail",
@@ -4375,6 +4684,7 @@ describe("AgentRuntime", function () {
         },
       });
       const retryRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -4400,6 +4710,7 @@ describe("AgentRuntime", function () {
       const retryEvents: AgentEvent[] = [];
       await retryRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "retry",
@@ -4462,6 +4773,7 @@ describe("AgentRuntime", function () {
       });
 
       const request: AgentRuntimeRequest = {
+        classifiedIntent: classifiedFixture(),
         conversationKey: 601,
         mode: "agent",
         userText: "read the abstract",
@@ -4478,6 +4790,7 @@ describe("AgentRuntime", function () {
       };
 
       const firstRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -4537,6 +4850,7 @@ describe("AgentRuntime", function () {
 
       let secondInitialUserMessage = "";
       const secondRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4568,6 +4882,7 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "use what you read",
         },
@@ -4605,6 +4920,7 @@ describe("AgentRuntime", function () {
       });
       let step = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4674,6 +4990,7 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey,
             mode: "agent",
             userText: "persist this before inference",
@@ -4732,6 +5049,7 @@ describe("AgentRuntime", function () {
         }),
       });
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -4781,6 +5099,7 @@ describe("AgentRuntime", function () {
       });
       const run = runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("command_execute"),
           conversationKey,
           mode: "agent",
           userText: "run command after asking for confirmation",
@@ -4815,6 +5134,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
+        classifiedIntent: classifiedFixture(),
         conversationKey: 7,
         mode: "agent",
         userText: "remember alpha",
@@ -4825,6 +5145,7 @@ describe("AgentRuntime", function () {
       const registry = new AgentToolRegistry();
       registry.register(createToolResultReadTool());
       const firstRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -4861,6 +5182,7 @@ describe("AgentRuntime", function () {
       let secondMessages: AgentModelMessage[] = [];
       let secondToolNames: string[] = [];
       const secondRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -4887,6 +5209,7 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what did I ask you to remember?",
         },
@@ -4962,6 +5285,7 @@ describe("AgentRuntime", function () {
       });
       let firstStep = 0;
       const firstRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5005,6 +5329,9 @@ describe("AgentRuntime", function () {
       try {
         await firstRuntime.runTurn({
           request: {
+            classifiedIntent: actionFixture("command_execute", undefined, {
+              continuation: "resume",
+            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command once",
@@ -5030,6 +5357,7 @@ describe("AgentRuntime", function () {
 
       let continuedMessages: AgentModelMessage[] = [];
       const continuedRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5055,6 +5383,9 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
+          classifiedIntent: actionFixture("command_execute", undefined, {
+            continuation: "resume",
+          }),
           conversationKey,
           mode: "agent",
           userText: "continue",
@@ -5125,6 +5456,7 @@ describe("AgentRuntime", function () {
       });
       let step = 0;
       const interruptedRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5168,6 +5500,9 @@ describe("AgentRuntime", function () {
       try {
         await interruptedRuntime.runTurn({
           request: {
+            classifiedIntent: actionFixture("command_execute", undefined, {
+              continuation: "resume",
+            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command to preserve this original goal",
@@ -5202,6 +5537,7 @@ describe("AgentRuntime", function () {
 
       let continuedMessages: AgentModelMessage[] = [];
       const continuedRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5227,6 +5563,9 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
+          classifiedIntent: actionFixture("command_execute", undefined, {
+            continuation: "resume",
+          }),
           conversationKey,
           mode: "agent",
           userText: "continue after the model change",
@@ -5257,6 +5596,7 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
+        classifiedIntent: classifiedFixture(),
         conversationKey: 8,
         mode: "agent",
         userText: "seed",
@@ -5287,6 +5627,7 @@ describe("AgentRuntime", function () {
       });
       let seedStep = 0;
       const seedRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: seedRegistry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5335,12 +5676,14 @@ describe("AgentRuntime", function () {
       });
       await seedRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "seed tool result",
         },
       });
       for (let index = 0; index < 3; index += 1) {
         const runtime = new AgentRuntime({
+          semanticInterpreter: declaredSemanticInterpreter,
           registry: seedRegistry,
           adapterFactory: () =>
             new MockAdapter(
@@ -5365,6 +5708,7 @@ describe("AgentRuntime", function () {
         });
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             ...request,
             userText: `seed ${index}`,
           },
@@ -5373,6 +5717,7 @@ describe("AgentRuntime", function () {
 
       const compactEvents: AgentEvent[] = [];
       const compactRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: seedRegistry,
         adapterFactory: () =>
           new MockAdapter([], {
@@ -5385,6 +5730,7 @@ describe("AgentRuntime", function () {
       });
       const compactOutcome = await compactRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "/compact",
         },
@@ -5403,6 +5749,7 @@ describe("AgentRuntime", function () {
 
       let followupMessages: AgentModelMessage[] = [];
       const followupRuntime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: seedRegistry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -5428,6 +5775,7 @@ describe("AgentRuntime", function () {
       });
       await followupRuntime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "continue",
         },
@@ -5528,12 +5876,14 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 11,
           mode: "agent",
           userText: "list my library",
@@ -5663,12 +6013,14 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 13,
           mode: "agent",
           userText: "list my library",
@@ -5872,11 +6224,13 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 15,
           mode: "agent",
           userText: "list my library, then inspect omitted rows",
@@ -6062,11 +6416,13 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 14,
           mode: "agent",
           userText: "find evidence",
@@ -6170,11 +6526,13 @@ describe("AgentRuntime", function () {
         },
       };
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 12,
           mode: "agent",
           userText: "current request",
@@ -6259,6 +6617,7 @@ describe("AgentRuntime", function () {
       let messagesAfterBatch: AgentModelMessage[] = [];
       const events: AgentEvent[] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -6327,6 +6686,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1213,
           mode: "agent",
           userText: "Read every paper and persist each completed group.",
@@ -6385,6 +6745,7 @@ describe("AgentRuntime", function () {
       let secondStepMessages: AgentModelMessage[] = [];
       const events: AgentEvent[] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -6437,6 +6798,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1212,
           mode: "agent",
           userText: "Use the small result.",
@@ -6509,6 +6871,7 @@ describe("AgentRuntime", function () {
       let initialMessages: AgentModelMessage[] = [];
       let firstCheckpointHandle = "";
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -6592,6 +6955,7 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1213,
           mode: "agent",
           userText: "Use both small results.",
@@ -6716,6 +7080,7 @@ describe("web attribution runtime guard", function () {
       registry.register(createWebSearchTool(() => countingProvider));
       let step = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => capabilities,
@@ -6787,6 +7152,7 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 920,
           mode: "agent",
           userText: "What is current?",
@@ -6822,6 +7188,7 @@ describe("web attribution runtime guard", function () {
       let step = 0;
       const modelInputs: AgentModelMessage[][] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => capabilities,
@@ -6853,6 +7220,7 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 921,
           mode: "agent",
           userText: "What is current?",
@@ -6906,6 +7274,7 @@ describe("web attribution runtime guard", function () {
       const registry = new AgentToolRegistry();
       registry.register(createWebSearchTool(() => provider));
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -6933,6 +7302,7 @@ describe("web attribution runtime guard", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 922,
           mode: "agent",
           userText: "What is current?",
@@ -6972,6 +7342,7 @@ describe("shallow library answer guard", function () {
     reasoning: true,
   };
   const GUARD_REQUEST = {
+    classifiedIntent: classifiedFixture({ retrievalIntent: "summarize" }),
     conversationKey: 1,
     mode: "agent" as const,
     userText: "What methods do these papers share?",
@@ -7029,6 +7400,7 @@ describe("shallow library answer guard", function () {
       ];
       let stepIndex = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => ({
           getCapabilities: () => GUARD_CAPS,
@@ -7066,6 +7438,7 @@ describe("shallow library answer guard", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter(
@@ -7090,6 +7463,7 @@ describe("shallow library answer guard", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter([finalStep("Direct answer.")], GUARD_CAPS),
@@ -7097,7 +7471,12 @@ describe("shallow library answer guard", function () {
       const outcome = await runtime.runTurn({
         request: {
           ...GUARD_REQUEST,
-          classifiedIntent: { retrievalIntent: "none", wantedSections: [] },
+          classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
+            retrievalIntent: "none",
+            wantedSections: [],
+          },
         },
         onEvent: () => {},
       });
@@ -7114,6 +7493,7 @@ describe("shallow library answer guard", function () {
     const restoreDb = installMockDb();
     try {
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry: new AgentToolRegistry(),
         adapterFactory: () =>
           new MockAdapter([finalStep("Direct answer.")], GUARD_CAPS),
@@ -7142,6 +7522,7 @@ describe("shallow library answer guard", function () {
         warnings: [],
       });
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -7158,6 +7539,8 @@ describe("shallow library answer guard", function () {
         request: {
           ...GUARD_REQUEST,
           classifiedIntent: {
+            ...classifiedFixture(),
+            semantic: semanticFixture(),
             retrievalIntent: "summarize",
             wantedSections: [],
           },
@@ -7220,6 +7603,7 @@ describe("shallow guard round-limit safety", function () {
         },
       });
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(steps, {
@@ -7232,6 +7616,7 @@ describe("shallow guard round-limit safety", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "What methods do these papers share?",
@@ -7277,6 +7662,7 @@ describe("shallow guard round-limit safety", function () {
       let resolvedRequest: AgentRuntimeRequest | undefined;
       let correctionRequestMessages: AgentModelMessage[] = [];
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: (request) => {
           resolvedRequest = request;
@@ -7348,6 +7734,7 @@ describe("shallow guard round-limit safety", function () {
       }> = [];
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 991,
           mode: "agent",
           userText: "file these two papers into Neuroscience",
@@ -7466,6 +7853,7 @@ describe("shallow guard round-limit safety", function () {
       let modelStep = 0;
       let transcriptAttemptsAtRollback = 0;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: (request) => {
           resolvedRequest = request;
@@ -7515,6 +7903,7 @@ describe("shallow guard round-limit safety", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 993,
             mode: "agent",
             userText: "file these two papers into Neuroscience",
@@ -7561,6 +7950,7 @@ describe("shallow guard round-limit safety", function () {
       let modelStep = 0;
       let rollbackObserved = false;
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: (request) => {
           resolvedRequest = request;
@@ -7611,6 +8001,7 @@ describe("shallow guard round-limit safety", function () {
       try {
         await runtime.runTurn({
           request: {
+            classifiedIntent: classifiedFixture(),
             conversationKey: 994,
             mode: "agent",
             userText: "file these two papers into Neuroscience",
@@ -7691,6 +8082,7 @@ describe("shallow guard round-limit safety", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -7729,6 +8121,7 @@ describe("shallow guard round-limit safety", function () {
       let denials = 0;
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: actionFixture("command_execute"),
           conversationKey: 992,
           mode: "agent",
           userText: "run command after confirmation",
@@ -7873,6 +8266,7 @@ describe("shallow guard round-limit safety", function () {
       });
 
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () =>
           new MockAdapter(
@@ -7894,6 +8288,18 @@ describe("shallow guard round-limit safety", function () {
 
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: {
+            ...actionFixture("apply_tags", { tags: ["reviewed"] }),
+            paperTargetIntent: "all_visible",
+            actionIntents: [
+              {
+                ...actionFixture("apply_tags", { tags: ["reviewed"] })
+                  .actionIntents[0],
+                coverage: "some",
+                targetKind: "papers",
+              },
+            ],
+          },
           conversationKey: 993,
           mode: "agent",
           userText: 'Add the tag "reviewed" to these papers.',

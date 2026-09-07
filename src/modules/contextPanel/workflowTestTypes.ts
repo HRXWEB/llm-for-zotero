@@ -554,7 +554,11 @@ export type WorkflowTestApi = {
   renderToolResultForPanel: (
     panelId: string,
     result: import("../../agent/types").AgentToolResult,
-    options?: { documentId?: string; userText?: string },
+    options?: {
+      documentId?: string;
+      userText?: string;
+      actionContract?: import("../../agent/types").AgentActionContract;
+    },
   ) => HTMLElement | null;
   renderPendingActionForPanel: (
     panelId: string,

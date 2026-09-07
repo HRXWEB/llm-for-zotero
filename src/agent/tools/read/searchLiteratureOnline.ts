@@ -53,17 +53,14 @@ type SearchLiteratureOnlineInput = {
   libraryID?: number;
 };
 
-const LITERATURE_SEARCH_FALLBACK_PATTERN =
-  /\b(?:(?:related|similar)\s+(?:papers?|studies|articles?)|(?:find|discover|recommend|search|look up)(?:\s+\S+){0,8}\s+(?:papers?|studies|scholarly articles?|academic literature|research literature)|(?:search|review)\s+(?:the\s+)?literature|literature search|scholarly search|citations?|references?|papers?\s+(?:by|from)|publications?\s+(?:by|from)|doi|arxiv)\b/i;
-
 export function matchesLiteratureSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "userText" | "classifiedIntent">,
+  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
 ): boolean {
   const intent = request.classifiedIntent?.externalSearchIntent;
   if (intent !== undefined) {
     return intent === "literature" || intent === "both";
   }
-  return LITERATURE_SEARCH_FALLBACK_PATTERN.test(request.userText || "");
+  return false;
 }
 
 function readTraceString(value: unknown): string | undefined {
@@ -378,12 +375,12 @@ export function createSearchLiteratureOnlineTool(
           : { results }) as object),
       };
       if (input.mode === "metadata") return content;
-      const text = context.request.userText || "";
       return identifyLiteratureCandidates(
         content,
         context,
-        !isExplicitLiteratureImport(text) &&
-          (isLiteratureDiscovery(text) || input.workflow === "review"),
+        !isExplicitLiteratureImport(context.request) &&
+          (isLiteratureDiscovery(context.request) ||
+            input.workflow === "review"),
       );
     },
     createResultReviewAction: (input, result, context) =>

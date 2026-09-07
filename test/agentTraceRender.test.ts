@@ -596,6 +596,67 @@ const obsidianStyleMermaidFixture = [
   "    D --> O4",
 ].join("\n");
 
+describe("native host authority trace", function () {
+  it("loads durable history while retaining temporary native activity during the handoff", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "temporary",
+        seq: 1,
+        eventType: "status",
+        createdAt: 1000,
+        payload: { type: "status", text: "Verified native activity" },
+      },
+    ];
+    const message: any = {
+      role: "assistant",
+      text: "Done",
+      timestamp: 2000,
+      runMode: "agent",
+      agentRunId: "durable",
+      streaming: false,
+      pendingAgentTraceEvents: events,
+    };
+    let loads = 0;
+    const first = renderAgentTrace({
+      doc: fakeDocument,
+      message,
+      events,
+      onTraceMissing: () => {
+        loads++;
+      },
+    })!;
+    assert.equal(
+      loads,
+      1,
+      "temporary events must not prevent loading the durable run",
+    );
+    const next = renderAgentTrace({
+      doc: fakeDocument,
+      message,
+      events: [],
+      previous: first,
+    }) as unknown as FakeElement;
+    assert.notInclude(collectFakeText(next), "Loading agent activity");
+    assert.lengthOf(next.findAllByClass("llm-agent-activity-details"), 1);
+  });
+  it("retains semantic events instead of discarding them as non-Plan events", function () {
+    const message: any = { role: "assistant", text: "", timestamp: 1 };
+    const trace = createCodexNativeActivityTraceControllerForTests(
+      message,
+      () => {},
+    );
+    trace.appendPlanEvent({
+      type: "provider_event",
+      providerType: "agent_semantic_intent",
+      payload: { intent: { id: "intent-1" } },
+    });
+    assert.equal(
+      message.pendingAgentTraceEvents?.[0].payload.providerType,
+      "agent_semantic_intent",
+    );
+  });
+});
+
 describe("Mermaid rendering helpers", function () {
   it("quotes flowchart labels with punctuation that Mermaid parses poorly", function () {
     const source = [
@@ -3313,6 +3374,48 @@ describe("agentTrace render", function () {
       "Used Read Paper",
       "Used Read Paper",
     ]);
+  });
+
+  it("preserves host-verified Zotero receipts when native tool events coalesce", function () {
+    const assistantMessage = {
+      role: "assistant" as const,
+      text: "",
+      timestamp: 1,
+      runMode: "agent" as const,
+    };
+    const controller = createCodexNativeActivityTraceControllerForTests(
+      assistantMessage,
+      () => undefined,
+    );
+    const receipt = {
+      id: "host-receipt",
+      operation: "move_to_collection",
+      status: "applied",
+    };
+    controller.noteMcpToolActivity({
+      requestId: "jsonrpc:filing",
+      phase: "completed",
+      toolName: "update_library",
+      arguments: { kind: "collections", action: "add" },
+      ok: true,
+      actionReceipts: [receipt],
+    } as any);
+    controller.appendItemStatus(
+      {
+        id: "native-filing",
+        type: "tool_call",
+        name: "mcp__llm_for_zotero__update_library",
+        arguments: { kind: "collections", action: "add" },
+      },
+      "completed",
+    );
+    const events = (assistantMessage as any).pendingAgentTraceEvents || [];
+    assert.deepEqual(
+      events
+        .filter((entry: any) => entry.payload.type === "codex_tool_activity")
+        .flatMap((entry: any) => entry.payload.actionReceipts || []),
+      [receipt],
+    );
   });
 
   it("coalesces duplicate Codex native and MCP activity before rendering", function () {

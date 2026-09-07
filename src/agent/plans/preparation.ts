@@ -1,3 +1,4 @@
+import { isActionIndexList } from "../contracts/workflowDependencies";
 import {
   areConversationWritesFrozen,
   isConversationWriteGenerationCurrent,
@@ -24,6 +25,8 @@ export type UpdatePlanInput = {
   contract?: unknown;
   steps: Array<{
     planStepId?: string;
+    actionIndexes?: number[];
+    materialOutputId?: string;
     content: string;
     activeForm: string;
     acceptanceCriteria: PlanAcceptanceCriterion[];
@@ -43,30 +46,12 @@ const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
   "verified_read",
   "bounded_reasoning",
   "research_coverage",
+  "material_integrity",
   "document_integrity",
   "document_published",
   "mutation_receipts",
   "user_decision",
 ]);
-
-/**
- * Preserve an explicit user-selected corpus size without treating a separate
- * deep-read count as the scope boundary.
- */
-export function extractExplicitResearchScopeCount(
-  requestText: string,
-): number | undefined {
-  const patterns = [
-    /\b(?:use|using|cover|covering|screen|screening|review|reviewing)\s+exactly\s+(?:the\s+)?(?:first\s+)?(\d+)\s+(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
-    /\bexactly\s+the\s+first\s+(\d+)\s+(?:alphabetically\s+(?:listed|sorted)\s+)?(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
-  ];
-  for (const pattern of patterns) {
-    const matched = requestText.match(pattern);
-    const count = matched ? Number(matched[1]) : Number.NaN;
-    if (Number.isSafeInteger(count) && count > 0) return count;
-  }
-  return undefined;
-}
 
 export function validateUpdatePlanInput(
   args: unknown,
@@ -118,7 +103,19 @@ export function validateUpdatePlanInput(
     ) {
       return fail(`steps[${index}].acceptanceCriteria is invalid`);
     }
+    if (
+      raw.actionIndexes !== undefined &&
+      !isActionIndexList(raw.actionIndexes)
+    )
+      return fail(
+        `steps[${index}].actionIndexes must be unique nonnegative action indexes`,
+      );
     steps.push({
+      actionIndexes: raw.actionIndexes as number[] | undefined,
+      materialOutputId:
+        typeof raw.materialOutputId === "string"
+          ? raw.materialOutputId.trim() || undefined
+          : undefined,
       planStepId:
         typeof raw.planStepId === "string" && raw.planStepId.trim()
           ? raw.planStepId.trim()
@@ -350,9 +347,8 @@ async function preparePlanExecutionUnlocked(
     revision: plan.revision,
     conversationKey: context.request.conversationKey,
   });
-  const explicitScopeCount = extractExplicitResearchScopeCount(
-    context.request.userText,
-  );
+  const explicitScopeCount =
+    context.request.classifiedIntent?.semantic?.researchScopeCount;
   if (
     freeze &&
     explicitScopeCount !== undefined &&

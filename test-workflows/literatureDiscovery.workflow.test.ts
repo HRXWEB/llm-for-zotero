@@ -1,3 +1,7 @@
+import {
+  classifiedFixture,
+  semanticFixture,
+} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
@@ -25,6 +29,13 @@ describe("workflow: expandable ranked discovery", function () {
           libraryID: Zotero.Items.get(fixture.parentItemId).libraryID,
           mode: "agent",
           userText: "Find three relevant papers for me",
+          classifiedIntent: classifiedFixture({
+            externalSearchIntent: "literature",
+            semantic: semanticFixture({
+              literature: "discover",
+              requestedCount: 3,
+            }),
+          }),
         }),
         runId: `discovery-workflow-${fixture.parentItemId}`,
         resourceSignature: `paper-${fixture.parentItemId}`,
@@ -147,7 +158,7 @@ describe("workflow: expandable ranked discovery", function () {
       await api.cleanupFixture(fixture);
     }
   });
-  it("runs the slash shortcut directly with three tabs, the original limits, and preserved selections on Load more", async function () {
+  it("runs the empty slash shortcut and structured custom limit with three tabs and preserved selections on Load more", async function () {
     const addonApi = (Zotero as any).LLMForZotero.api;
     const api = addonApi.workflowTest as WorkflowTestApi;
     const agent = addonApi.agent as ReturnType<
@@ -186,7 +197,7 @@ describe("workflow: expandable ranked discovery", function () {
       throw new Error(`Timed out waiting for ${description}`);
     };
     try {
-      await api.renderPanelForItem(fixture.parentItemId);
+      const panel = await api.renderPanelForItem(fixture.parentItemId);
       const libraryID = Zotero.Items.get(fixture.parentItemId).libraryID;
       const before = (await Zotero.Items.getAll(libraryID))
         .map((item) => item.id)
@@ -194,12 +205,33 @@ describe("workflow: expandable ranked discovery", function () {
       for (const limit of [20, 3]) {
         searches.length = 0;
         const input = doc.querySelector<HTMLTextAreaElement>("#llm-input")!;
-        input.value =
-          limit === 20 ? "/discover_related" : "/discover_related 3";
-        input.dispatchEvent(
-          new doc.defaultView!.Event("input", { bubbles: true }),
-        );
-        doc.querySelector<HTMLButtonElement>("#llm-send")!.click();
+        let structuredRun: Promise<unknown> | undefined;
+        if (limit === 20) {
+          input.value = "/discover_related";
+          input.dispatchEvent(
+            new doc.defaultView!.Event("input", { bubbles: true }),
+          );
+          doc.querySelector<HTMLButtonElement>("#llm-send")!.click();
+        } else {
+          structuredRun = agent.runAction(
+            "discover_related",
+            { limit, scope: "current" },
+            {
+              libraryID,
+              conversationKey: fixture.parentItemId,
+              requestContext: { activeItemId: fixture.parentItemId },
+              confirmationMode: "native_ui",
+              requestConfirmation: async (requestId, action) => {
+                const resolution = await api.renderPendingActionForPanel(
+                  panel.panelId,
+                  { requestId, action },
+                );
+                doc.querySelector(`[data-request-id="${requestId}"]`)?.remove();
+                return resolution;
+              },
+            },
+          );
+        }
         const card = await waitFor(
           () =>
             doc
@@ -243,8 +275,14 @@ describe("workflow: expandable ranked discovery", function () {
           const next = doc
             .querySelector<HTMLElement>(".llm-search-mode-tabs")
             ?.closest<HTMLElement>("[data-request-id]");
-          return next && next !== card ? next : null;
-        }, "expanded discovery card");
+          return next &&
+            next.querySelectorAll(
+              ".llm-search-results-list input[type=checkbox]",
+            ).length ===
+              limit + 20
+            ? next
+            : null;
+        }, `expanded discovery card at limit ${limit}`);
         assert.equal(
           expanded.querySelector(".llm-search-mode-tab-active")?.textContent,
           "References",
@@ -286,6 +324,7 @@ describe("workflow: expandable ranked discovery", function () {
           () => (!doc.querySelector(".llm-search-mode-tabs") ? true : null),
           "cancel to close discovery",
         );
+        await structuredRun;
       }
       assert.deepEqual(
         (await Zotero.Items.getAll(libraryID)).map((item) => item.id).sort(),

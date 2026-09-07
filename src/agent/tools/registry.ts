@@ -1,3 +1,4 @@
+import { preparationEffectBlock } from "../contracts/actionPreparation";
 import type {
   AgentToolArtifact,
   AgentActionEvidence,
@@ -26,11 +27,7 @@ import {
   createFallbackToolReceipts,
   createUnverifiedReceipt,
 } from "../contracts/actionEvaluation";
-import {
-  hasExplicitNoWriteConstraint,
-  normalizeStoredActionConstraints,
-  parseActionConstraints,
-} from "../authorization/policy";
+import {} from "../authorization/policy";
 import { authorizeOriginalAction } from "../authorization/policy";
 import {
   buildActionCallDigest,
@@ -300,31 +297,16 @@ export class AgentToolRegistry {
     if (this.actionContracts) {
       return this.actionContracts.createContract(request);
     }
-    const intents = request.classifiedIntent?.actionIntents || [];
-    if (intents.some((intent) => intent.scope)) {
+    if (
+      request.classifiedIntent?.actionIntents.some(
+        (intent) => intent.operation !== "read_full",
+      )
+    ) {
       throw new Error(
-        "A collection-scoped action requires the Zotero scope resolver.",
+        "Action execution requires the native action contract resolver.",
       );
     }
-    const id = `action-contract:${request.conversationKey}:${Date.now()}`;
-    return {
-      version: 3,
-      id,
-      hardConstraints: parseActionConstraints(request.userText || ""),
-      writeDisposition:
-        request.classifiedIntent?.writeDisposition ||
-        (intents.length ? "required" : "none"),
-      interpretationSource:
-        request.classifiedIntent?.actionInterpretationSource ||
-        "deterministic_fallback",
-      obligations: intents.map((intent, index) => {
-        const { scope: _scope, ...unscoped } = intent;
-        return {
-          ...unscoped,
-          id: `${id}:obligation:${index}`,
-        };
-      }),
-    };
+    return null;
   }
 
   createActionProgress(
@@ -518,8 +500,19 @@ export class AgentToolRegistry {
       ? "action"
       : options.callerKind || "model";
     const writeMode = getOriginalAgentPermissionMode();
+    const preparationBlock =
+      callerKind !== "action"
+        ? preparationEffectBlock(context.request, invocationPlan)
+        : null;
+    if (preparationBlock)
+      return createSyntheticErrorResult(call, preparationBlock);
+
+    const preparedAuthority = canonicalJson(
+      context.request.actionContract || null,
+    );
     const enforceActionContract =
-      callerKind === "model" || Boolean(context.journalActionScope);
+      (callerKind !== "action" || Boolean(context.journalActionScope)) &&
+      invocationPlan.impact !== "read_only";
     const hasExternalEffect =
       tool.spec.executionClass === "external_effect" &&
       invocationPlan.impact !== "read_only";
@@ -597,8 +590,10 @@ export class AgentToolRegistry {
         actionImpact: assessedPlan.impact,
         riskSignals: assessedPlan.riskSignals,
         hasHardConstraints: Boolean(
-          normalizeStoredActionConstraints(
-            context.request.actionContract?.hardConstraints,
+          (
+            context.request.actionContract?.intent?.semantic?.constraints ||
+            context.request.classifiedIntent?.semantic?.constraints ||
+            []
           ).length,
         ),
       }) || {
@@ -635,6 +630,7 @@ export class AgentToolRegistry {
       }
     };
     if (
+      enforceActionContract &&
       preparedAction &&
       context.request.actionContract &&
       this.actionContracts
@@ -945,6 +941,7 @@ export class AgentToolRegistry {
         };
       }
       if (
+        enforceActionContract &&
         executionPrepared &&
         context.request.actionContract &&
         this.actionContracts
@@ -1003,20 +1000,17 @@ export class AgentToolRegistry {
         }
       }
       const executionAuthorization =
-        callerKind === "model"
+        callerKind !== "action"
           ? authorizeOriginalAction(executionProposal, {
               hasApprovedPlanAuthority:
                 context.request.planContext?.phase === "executing",
               mode: writeMode,
-              userText: context.request.userText || "",
-              hasExplicitNoWrite: hasExplicitNoWriteConstraint(
-                context.request.userText || "",
-              ),
+              semantic: context.request.classifiedIntent?.semantic,
               constraints: [
-                ...normalizeStoredActionConstraints(
-                  context.request.actionContract?.hardConstraints,
-                ),
-                ...parseActionConstraints(context.request.userText || ""),
+                ...(context.request.actionContract?.intent?.semantic
+                  ?.constraints ||
+                  context.request.classifiedIntent?.semantic?.constraints ||
+                  []),
               ],
               hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
                 request: context.request,
@@ -1050,7 +1044,11 @@ export class AgentToolRegistry {
             >["authorizationGrants"]
           >[number]
         | undefined;
-      if (callerKind === "model" && hasExternalEffect && context.runId) {
+      if (
+        (callerKind === "model" || callerKind === "mcp") &&
+        hasExternalEffect &&
+        context.runId
+      ) {
         const progress = context.request.actionProgress;
         if (!progress || !context.checkpointActionProgress) {
           await failActivePlanScopeAmendment(
@@ -1130,7 +1128,14 @@ export class AgentToolRegistry {
         }
       }
       const execute = async () => {
-        if (options.isExecutionAllowed && !options.isExecutionAllowed()) {
+        if (
+          context.signal?.aborted ||
+          (callerKind !== "action" &&
+            (preparationEffectBlock(context.request, executionInvocationPlan) ||
+              canonicalJson(context.request.actionContract || null) !==
+                preparedAuthority)) ||
+          (options.isExecutionAllowed && !options.isExecutionAllowed())
+        ) {
           if (activePlanAmendmentGrant && this.planAmendments) {
             activePlanAmendmentGrant = await this.planAmendments.markFailed(
               activePlanAmendmentGrant,
@@ -1425,6 +1430,7 @@ export class AgentToolRegistry {
       let confirmedScopeFailure: ScopeValidationFailure | null = null;
       let confirmedScopeValidated = false;
       if (
+        enforceActionContract &&
         confirmedInvocation.preparedAction &&
         context.request.actionContract &&
         this.actionContracts
@@ -1478,20 +1484,17 @@ export class AgentToolRegistry {
         }
       }
       const confirmedAuthorization =
-        callerKind === "model"
+        callerKind !== "action"
           ? authorizeOriginalAction(confirmedInvocation.proposal, {
               hasApprovedPlanAuthority:
                 context.request.planContext?.phase === "executing",
               mode: writeMode,
-              userText: context.request.userText || "",
-              hasExplicitNoWrite: hasExplicitNoWriteConstraint(
-                context.request.userText || "",
-              ),
+              semantic: context.request.classifiedIntent?.semantic,
               constraints: [
-                ...normalizeStoredActionConstraints(
-                  context.request.actionContract?.hardConstraints,
-                ),
-                ...parseActionConstraints(context.request.userText || ""),
+                ...(context.request.actionContract?.intent?.semantic
+                  ?.constraints ||
+                  context.request.classifiedIntent?.semantic?.constraints ||
+                  []),
               ],
               hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
                 request: context.request,
@@ -1607,20 +1610,17 @@ export class AgentToolRegistry {
           )) ?? tool.spec.requiresConfirmation)
         : false;
     const authorization =
-      callerKind === "model"
+      callerKind !== "action"
         ? authorizeOriginalAction(proposal, {
             hasApprovedPlanAuthority:
               context.request.planContext?.phase === "executing",
             mode: writeMode,
-            userText: context.request.userText || "",
-            hasExplicitNoWrite: hasExplicitNoWriteConstraint(
-              context.request.userText || "",
-            ),
+            semantic: context.request.classifiedIntent?.semantic,
             constraints: [
-              ...normalizeStoredActionConstraints(
-                context.request.actionContract?.hardConstraints,
-              ),
-              ...parseActionConstraints(context.request.userText || ""),
+              ...(context.request.actionContract?.intent?.semantic
+                ?.constraints ||
+                context.request.classifiedIntent?.semantic?.constraints ||
+                []),
             ],
             hasMatchingActionIntent: scopeMatchedExplicitActionIntent({
               request: context.request,
@@ -1647,7 +1647,7 @@ export class AgentToolRegistry {
             planRequiresConfirmation ||
             (tool.spec.interaction === "user_input" && toolWantsConfirmation)
           : callerKind === "mcp"
-            ? false
+            ? planRequiresConfirmation || toolWantsConfirmation
             : toolWantsConfirmation;
     if (shouldRequireConfirmation) {
       const requestId = createRequestId();

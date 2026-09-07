@@ -5,7 +5,6 @@ import {
   upsertAgentToolResultHandles,
   type AgentToolResultHandleRecord,
 } from "../store/toolResultHandles";
-import { requestedLiteratureCount } from "../model/literatureIntent";
 import {
   areConversationWritesFrozen,
   isConversationWriteGenerationCurrent,
@@ -56,26 +55,13 @@ export type LiteratureDiscoverySession = {
 };
 
 export function resolveLiteratureDiscoveryRequest(
-  text: string,
+  request: AgentToolContext["request"],
 ): LiteratureDiscoveryRequest {
+  const semantic = request.classifiedIntent?.semantic;
   return {
-    batchSize: requestedLiteratureCount(text) || 5,
-    mode: /\b(?:references|papers\s+(?:cited|referenced)\s+(?:by|in))\b/i.test(
-      text,
-    )
-      ? "references"
-      : /\b(?:citing\s+(?:this|the|that)|papers\s+(?:that\s+)?cite\b|citations\s+(?:of|to))\b/i.test(
-            text,
-          )
-        ? "citations"
-        : undefined,
-    source: /\barxiv\b/i.test(text)
-      ? "arxiv"
-      : /\beurope\s*pmc\b/i.test(text)
-        ? "europepmc"
-        : /\bopenalex\b/i.test(text)
-          ? "openalex"
-          : undefined,
+    batchSize: semantic?.requestedCount || 5,
+    mode: semantic?.literatureMode,
+    source: semantic?.literatureSource,
   };
 }
 
@@ -105,7 +91,7 @@ function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
     kind: "literature_discovery",
     runId: context.runId,
     libraryID: context.request.libraryID,
-    request: resolveLiteratureDiscoveryRequest(context.request.userText || ""),
+    request: resolveLiteratureDiscoveryRequest(context.request),
     revision: 0,
     phase: "gathering",
     candidateSetIds: [],

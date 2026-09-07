@@ -80,3 +80,57 @@ describe("request_user_input planning card contract", function () {
     }
   });
 });
+
+describe("semantic integration", function () {
+  it("keeps native MCP clarification pending until a real answer arrives", async function () {
+    const { AgentToolRegistry } = await import("../src/agent/tools/registry");
+    const { classifiedFixture } = await import("./helpers/semanticIntent");
+    const { resolvedAgentRequest } =
+      await import("./helpers/resolvedAgentRequest");
+    const registry = new AgentToolRegistry();
+    registry.register(createRequestUserInputTool());
+    const result = await registry.prepareExecution(
+      {
+        id: "native-question",
+        name: "request_user_input",
+        arguments: {
+          questions: [
+            {
+              id: "destination",
+              question: "Which collection?",
+              options: [
+                { id: "a", label: "First" },
+                { id: "b", label: "Second" },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        request: resolvedAgentRequest({
+          conversationKey: 1,
+          mode: "agent",
+          libraryID: 1,
+          userText: "File the paper",
+          classifiedIntent: classifiedFixture(),
+        }),
+        item: null,
+        currentAnswerText: "",
+        modelName: "test",
+      },
+      { callerKind: "mcp" },
+    );
+    assert.equal(result.kind, "confirmation");
+    if (result.kind !== "confirmation") return;
+    const completed = await result.execute({
+      approved: true,
+      actionId: "continue",
+      data: { destination: { kind: "option", optionId: "b" } },
+    });
+    assert.equal(completed.kind, "result");
+    if (completed.kind === "result")
+      assert.deepInclude(completed.execution.result.content, {
+        answers: [{ id: "destination", answer: "b" }],
+      });
+  });
+});

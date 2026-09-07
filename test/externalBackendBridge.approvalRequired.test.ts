@@ -1,3 +1,8 @@
+import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
+import { semanticInputDigest } from "../src/agent/model/semanticTransport";
+import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
+import { getConversationWriteGeneration } from "../src/shared/conversationWriteFence";
+import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { describe, it } from "mocha";
 import { createExternalBackendBridgeRuntime } from "../src/agent/externalBackendBridge";
@@ -10,8 +15,9 @@ import {
 
 describe("external bridge action approval handling", function () {
   function createRuntime() {
-    return createExternalBackendBridgeRuntime({
+    const runtime = createExternalBackendBridgeRuntime({
       coreRuntime: {
+        createActionContractForRequest: async () => undefined,
         listTools: () => [],
         getToolDefinition: () => null,
         unregisterTool: () => undefined,
@@ -35,7 +41,115 @@ describe("external bridge action approval handling", function () {
       } as any,
       getBridgeUrl: () => "http://127.0.0.1:19787",
     });
+    const runTurn = runtime.runTurn.bind(runtime);
+    runtime.runTurn = async (params) => {
+      const request = resolveAgentRuntimeRequest(params.request);
+      request.conversationGeneration = getConversationWriteGeneration(
+        request.conversationKey,
+      );
+      if (request.classifiedIntent?.semantic)
+        request.classifiedIntent.semantic.inputDigest =
+          await semanticInputDigest(request);
+      request.actionPreparation = { state: "ready", issues: [] };
+      return runTurn({ ...params, request });
+    };
+    return runtime;
   }
+
+  it("preserves finalized document identity and content when final Plan verification fails", async function () {
+    const originalFetch = globalThis.fetch;
+    const originalZotero = (globalThis as any).Zotero;
+    const evaluate = PlanExecutionRunSession.prototype.evaluateFinal;
+    const document = {
+      version: 2,
+      documentId: "durable-result",
+      documentVersion: 1,
+      conversationKey: 998801,
+      documentKind: "report",
+      integrityPolicy: "authored",
+      origin: { kind: "direct", runId: "r1", sourceMessageTimestamp: 1 },
+      title: "Final report",
+      visibleMarkdown: "The finalized research material survives.",
+      visibleHtml: "<p>Finalized material</p>",
+      citationBundle: {
+        clusters: [],
+        bibliographyEntries: [],
+        style: { id: "apa", title: "APA" },
+        locale: "en-US",
+      },
+      verifiedQuotes: [],
+      assets: [],
+      coverageItems: [],
+      validation: {
+        integrityValidated: true,
+        groundingReviewed: "not_run",
+        quoteVerified: "not_applicable",
+        issues: [],
+      },
+      contentHash: "sha256:fixture",
+      createdAt: 1,
+    };
+    (globalThis as any).Zotero = {
+      Prefs: {
+        get: (key: string) =>
+          key.endsWith("enableClaudeCodeMode")
+            ? true
+            : key.endsWith("conversationSystem")
+              ? "claude_code"
+              : key.endsWith("codexAppServerZoteroMcpToolsEnabled")
+                ? false
+                : "",
+      },
+      Profile: { dir: "/tmp/llm-for-zotero-test-profile" },
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (
+            sql.includes(
+              "SELECT document_id AS documentId FROM llm_for_zotero_plan_documents",
+            )
+          )
+            return [{ documentId: document.documentId }];
+          if (
+            sql.includes(
+              "SELECT payload_json AS payloadJson FROM llm_for_zotero_plan_documents",
+            )
+          )
+            return [{ payloadJson: JSON.stringify(document) }];
+          return [];
+        },
+      },
+    };
+    globalThis.fetch = (async () =>
+      new Response(
+        '{"type":"outcome","outcome":{"kind":"completed","runId":"r1","text":"done","usedFallback":false}}\n',
+        { status: 200 },
+      )) as typeof fetch;
+    PlanExecutionRunSession.prototype.evaluateFinal = async () => ({
+      kind: "fail",
+      failure: "The requested filing has no verified receipt.",
+    });
+    try {
+      const outcome = await createRuntime().runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 998801,
+          mode: "agent",
+          userText: "Complete the report and filing",
+          model: "claude-sonnet",
+          libraryID: 1,
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.documentId, document.documentId);
+      assert.include(outcome.text, document.visibleMarkdown);
+      assert.include(outcome.text, "no verified receipt");
+    } finally {
+      globalThis.fetch = originalFetch;
+      (globalThis as any).Zotero = originalZotero;
+      PlanExecutionRunSession.prototype.evaluateFinal = evaluate;
+    }
+  });
 
   it("fails closed to a fresh session when cleanup readiness cannot be read", async function () {
     const originalFetch = globalThis.fetch;
@@ -88,6 +202,7 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 99,
           metadata: { conversationInstanceID: "instance-99" },
           mode: "agent",
@@ -157,6 +272,7 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 100,
           mode: "agent",
           userText: "hello",
@@ -431,6 +547,7 @@ describe("external bridge action approval handling", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 77,
           mode: "agent",
           userText: "write this to my Obsidian",
@@ -612,6 +729,7 @@ describe("external bridge action approval handling", function () {
 
       await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 88,
           mode: "agent",
           userText: "hello",
@@ -769,6 +887,7 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       const outcome = await runtime.runTurn({
         request: {
+          classifiedIntent: classifiedFixture(),
           conversationKey: 8901,
           mode: "agent",
           userText: "Read the selected PDF.",

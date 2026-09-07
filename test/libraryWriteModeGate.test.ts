@@ -1,3 +1,5 @@
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { actionFixture, actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -35,6 +37,8 @@ describe("Original Agent permission gate", function () {
   const context: AgentToolContext = {
     request: {
       conversationKey: 1,
+      actionContract: actionContractFixture("settings_update"),
+      classifiedIntent: actionFixture("settings_update"),
       mode: "agent",
       userText: "run the library batch",
       libraryID: 1,
@@ -45,7 +49,9 @@ describe("Original Agent permission gate", function () {
   };
 
   function makeRegistry() {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let ran = false;
     registry.register({
       spec: {
@@ -127,7 +133,9 @@ describe("Original Agent permission gate", function () {
 
   it("reviews ordinary writes in safe mode from the same mutation plan", async function () {
     await installMode("safe");
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let ran = false;
     registry.register({
       spec: {

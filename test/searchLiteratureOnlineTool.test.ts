@@ -1,3 +1,4 @@
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
 import type { AgentToolContext } from "../src/agent/types";
@@ -360,6 +361,13 @@ describe("search_literature_online tool", function () {
         conversationKey: 11,
         mode: "agent",
         userText: "can you find related papers from internet to me",
+        classifiedIntent: {
+          semantic: semanticFixture(),
+          retrievalIntent: "none",
+          externalSearchIntent: "literature",
+          wantedSections: [],
+          actionIntents: [],
+        },
       }) || false,
     );
     assert.include(tool.guidance?.instruction || "", "workflow:'answer'");
@@ -369,6 +377,13 @@ describe("search_literature_online tool", function () {
         conversationKey: 12,
         mode: "agent",
         userText: "search the web for the latest Zotero release notes",
+        classifiedIntent: {
+          semantic: semanticFixture(),
+          retrievalIntent: "none",
+          externalSearchIntent: "web",
+          wantedSections: [],
+          actionIntents: [],
+        },
       }) || false,
     );
     assert.isTrue(
@@ -377,6 +392,7 @@ describe("search_literature_online tool", function () {
         mode: "agent",
         userText: "查找论文并核对当前官方文档",
         classifiedIntent: {
+          semantic: semanticFixture(),
           retrievalIntent: "none",
           externalSearchIntent: "both",
           wantedSections: [],

@@ -1,3 +1,8 @@
+import {
+  classifiedFixture,
+  semanticFixture,
+  actionContractFixture,
+} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import {
@@ -80,6 +85,7 @@ describe("semantic tool surface", function () {
 
   const baseContext: AgentToolContext = {
     request: {
+      classifiedIntent: classifiedFixture(),
       conversationKey: 77,
       mode: "agent",
       userText: "summarize this paper",
@@ -142,6 +148,7 @@ describe("semantic tool surface", function () {
     fields: Partial<import("../src/agent/types").AgentRuntimeRequestInput>,
   ) {
     return resolveAgentRuntimeRequest({
+      classifiedIntent: classifiedFixture(),
       conversationKey: 1,
       mode: "agent",
       userText: "",
@@ -271,6 +278,7 @@ describe("semantic tool surface", function () {
       "note_write",
       "note_write_batch",
       "paper_read",
+      "request_user_input",
       "revert_changes",
       "run_command",
       "saved_search_update",
@@ -560,6 +568,7 @@ describe("semantic tool surface", function () {
     );
 
     const request = resolvedAgentRequest({
+      classifiedIntent: classifiedFixture(),
       ...baseContext.request,
       userText: "Use the actual PDF/full text to explain the method.",
       conversationKind: "paper",
@@ -1548,6 +1557,15 @@ describe("semantic tool surface", function () {
       request: {
         ...baseContext.request,
         userText: "Explain Table 1",
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({
+            figures: {
+              kind: "tables",
+              labels: ["Table 1"],
+              includeSupplementary: false,
+            },
+          }),
+        }),
         selectedPaperContexts: [paperContext],
       },
     })) as Record<string, unknown>;
@@ -1998,7 +2016,7 @@ describe("semantic tool surface", function () {
       assert.exists(tool);
       const validated = tool!.validate({
         mode: "figures",
-        query: "Explain Figure 1",
+        query: "Explain Figure 2",
       });
       assert.equal(validated.ok, true);
       if (!validated.ok) return;
@@ -2008,6 +2026,17 @@ describe("semantic tool surface", function () {
         request: resolvedAgentRequest({
           ...baseContext.request,
           userText: "Explain Figure 1",
+          classifiedIntent: classifiedFixture({
+            semantic: semanticFixture({
+              figures: {
+                labels: ["Figure 1"],
+                kind: "figures",
+                includeSupplementary: false,
+              },
+            }),
+          }),
+          conversationKind: "paper",
+          activeItemId: paperContext.itemId,
           selectedPaperContexts: [paperContext],
         }),
       })) as {
@@ -2315,6 +2344,12 @@ describe("semantic tool surface", function () {
       request: {
         ...baseContext.request,
         userText: "Read the complete text.",
+        activeItemId: paperContext.itemId,
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
       },
     })) as {
       results?: Array<{ quoteAnchors?: string[] }>;
@@ -2460,6 +2495,7 @@ describe("semantic tool surface", function () {
       itemId: 51,
       contextItemId: 52,
       title: "Agent Full Read Paper",
+      libraryID: 1,
     };
     const chunks = Array.from(
       { length: 6 },
@@ -2510,6 +2546,12 @@ describe("semantic tool surface", function () {
       request: {
         ...baseContext.request,
         userText: "Read the complete text.",
+        activeItemId: paperContext.itemId,
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
       },
     })) as {
       mode: string;
@@ -2542,6 +2584,7 @@ describe("semantic tool surface", function () {
       itemId: 53,
       contextItemId: 54,
       title: "Native Full Read Paper",
+      libraryID: 1,
     };
     const chunks = ["Native evidence zero.", "Native evidence one."];
     let appServerSpawnCount = 0;
@@ -2635,6 +2678,13 @@ describe("semantic tool surface", function () {
         request: resolvedAgentRequest({
           ...baseContext.request,
           userText: "Read the complete text.",
+          activeItemId: paperContext.itemId,
+          classifiedIntent: classifiedFixture({
+            semantic: semanticFixture({
+              reading: { source: "document_text", coverage: "exhaustive" },
+            }),
+          }),
+          conversationKind: "paper",
           authMode: "codex_app_server",
           model: "gpt-5.5",
           apiBase: "/tmp/codex",
@@ -2749,6 +2799,20 @@ describe("semantic tool surface", function () {
           activeItemId: activePaper.itemId,
           selectedPaperContexts: [activePaper, firstPaper],
           userText: "Read the complete first selected paper.",
+          classifiedIntent: classifiedFixture({
+            semantic: semanticFixture({
+              reading: { source: "document_text", coverage: "exhaustive" },
+            }),
+          }),
+          actionContract: {
+            ...actionContractFixture("read_full"),
+            obligations: [
+              {
+                ...actionContractFixture("read_full").obligations[0],
+                targetSelectors: [{ kind: "item_id", value: 61 }],
+              },
+            ],
+          },
         },
       });
       assert.fail("Expected a conflicting model-supplied target to fail");
@@ -2775,7 +2839,7 @@ describe("semantic tool surface", function () {
     } catch (error) {
       assert.match(
         error instanceof Error ? error.message : String(error),
-        /requires an explicit affirmative user request/,
+        /requires a resolved semantic reading intent/,
       );
     }
     assert.deepEqual(prepared, []);
@@ -2788,6 +2852,11 @@ describe("semantic tool surface", function () {
         activeItemId: activePaper.itemId,
         selectedPaperContexts: [firstPaper, activePaper],
         userText: "Read the complete paper before answering.",
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
       },
     });
     assert.deepEqual(prepared, [activePaper.title]);
@@ -2801,6 +2870,20 @@ describe("semantic tool surface", function () {
         activeItemId: activePaper.itemId,
         selectedPaperContexts: [activePaper, firstPaper],
         userText: "Read the complete first selected paper.",
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
+        actionContract: {
+          ...actionContractFixture("read_full"),
+          obligations: [
+            {
+              ...actionContractFixture("read_full").obligations[0],
+              targetSelectors: [{ kind: "item_id", value: 61 }],
+            },
+          ],
+        },
       },
     });
     assert.deepEqual(prepared, [firstPaper.title]);
@@ -2814,10 +2897,16 @@ describe("semantic tool surface", function () {
         activeItemId: activePaper.itemId,
         selectedPaperContexts: [firstPaper, activePaper],
         userText: "Read all selected papers in full.",
+        classifiedIntent: classifiedFixture({
+          paperTargetIntent: "all_visible",
+          semantic: semanticFixture({
+            reading: { source: "document_text", coverage: "exhaustive" },
+          }),
+        }),
       },
     })) as { coverageReceipt: { paperCount: number } };
-    assert.deepEqual(prepared, [firstPaper.title]);
-    assert.equal(allSelectedOutput.coverageReceipt.paperCount, 1);
+    assert.deepEqual(prepared, [firstPaper.title, activePaper.title]);
+    assert.equal(allSelectedOutput.coverageReceipt.paperCount, 2);
   });
 
   it("paper_read targeted honors explicit pages even when a query is present", async function () {
@@ -3188,6 +3277,7 @@ describe("semantic tool surface", function () {
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
           userText: "can you help me understand this ppaer",
           selectedPaperContexts: [
             { itemId: 1, contextItemId: 2, title: "Paper" },
@@ -3222,6 +3312,7 @@ describe("semantic tool surface", function () {
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
           userText: "compare the methods of all papers in this folder",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3240,6 +3331,7 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         skill,
         resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
           userText: "",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3256,6 +3348,7 @@ describe("semantic tool surface", function () {
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
           userText: "find evidence in these papers for this claim",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3274,6 +3367,7 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         skill,
         resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
           userText: "",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3293,14 +3387,20 @@ describe("semantic tool surface", function () {
     assert.deepEqual(
       getSkillContextEligibility(
         evidenceSkill,
-        resolvedSkillRequest({ userText: "" }),
+        resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
+          userText: "",
+        }),
       ).eligible,
       false,
     );
     assert.deepEqual(
       getSkillContextEligibility(
         compareSkill,
-        resolvedSkillRequest({ userText: "" }),
+        resolvedSkillRequest({
+          classifiedIntent: classifiedFixture(),
+          userText: "",
+        }),
       ).eligible,
       false,
     );

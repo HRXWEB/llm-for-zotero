@@ -1270,8 +1270,10 @@ export function createZoteroScriptTool(
 
     guidance: {
       matches: (request) =>
-        /\b(rename.*all|batch|bulk|all.*attachments|all.*items|every.*paper|for\s+each|iterate|loop|procedural|custom.*script|scan.*all|check.*every|find.*all.*that)\b/i.test(
-          request.userText || "",
+        Boolean(
+          request.classifiedIntent?.semantic?.supportTools?.includes(
+            "zotero_script",
+          ),
         ),
       instruction: ZOTERO_SCRIPT_GUIDANCE,
     },

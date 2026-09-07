@@ -80,8 +80,10 @@ export function createImportLocalFilesTool(
 
     guidance: {
       matches: (request) =>
-        /\b(import.*file|import.*pdf|import.*from.*(desktop|download|folder|directory|disk)|local.*file|add.*file.*library)\b/i.test(
-          request.userText || "",
+        Boolean(
+          request.classifiedIntent?.actionIntents.some(
+            (action) => action.operation === "import_local_files",
+          ),
         ),
       instruction:
         "Use import_local_files to import local files (PDFs, etc.) from the user's filesystem into Zotero. " +

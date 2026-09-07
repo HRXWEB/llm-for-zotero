@@ -166,8 +166,10 @@ export function createUpdateMetadataTool(
 
     guidance: {
       matches: (request) =>
-        /\b(fix|correct|update|enrich|complete|sync)\b.*\b(metadata|fields?|title|authors?|doi|year|date|abstract)\b/i.test(
-          request.userText,
+        Boolean(
+          request.classifiedIntent?.actionIntents.some(
+            (action) => action.operation === "update_metadata",
+          ),
         ),
       instruction:
         "When the user asks to fix, correct, or enrich metadata from external sources, " +

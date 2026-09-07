@@ -1,3 +1,6 @@
+import { loadWorkflowMaterial } from "./documents/workflowMaterial";
+import { evaluatePreparedActionContract } from "./contracts/actionEvaluation";
+import { hasCurrentSemanticIntent } from "./model/semanticTransport";
 import { config } from "../../package.json";
 import {
   MAX_FULL_TEXT_PAPER_CONTEXTS,
@@ -86,10 +89,7 @@ import {
 } from "./context/turnPaperScope";
 import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
 import { RAW_PDF_TRANSPORT_POLICY_BLOCK } from "./context/rawPdfTransportPolicy";
-import {
-  inferPlanStepEffect,
-  planExecutionCoordinator,
-} from "./plans/coordinator";
+import { planExecutionCoordinator } from "./plans/coordinator";
 import { loadPlanArtifact, loadPlanExecutionLedger } from "./plans/store";
 import { loadResearchJobForExecution } from "./research/store";
 import {
@@ -99,7 +99,7 @@ import {
 import {
   detectTurnIntent,
   resolvePlanSkillRoutingReceipt,
-} from "./model/skillClassifier";
+} from "./model/semanticIntentService";
 import { getAllSkills, getMatchedSkillIds } from "./skills";
 import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import {
@@ -1040,14 +1040,9 @@ async function runExternalBridgeTurn(
   const debugModeEnabled = false;
 
   const userTextRaw = params.request.userText || "";
-  const probeMatch = userTextRaw.match(
-    /^\s*\/(?:debug-)?permission-probe\b\s*(.*)$/i,
-  );
-  const probeRequested = Boolean(probeMatch && debugModeEnabled);
-  const probeStrippedText = probeMatch?.[1]?.trim() || "";
-  const userTextForBridge = probeRequested
-    ? probeStrippedText || "Permission probe run."
-    : userTextRaw;
+  const probeRequested =
+    debugModeEnabled && params.request.metadata?.testPermissionProbe === true;
+  const userTextForBridge = userTextRaw;
 
   const requestMetadata =
     params.request.metadata && typeof params.request.metadata === "object"
@@ -1314,11 +1309,17 @@ function buildClaudeZoteroMcpScope(
     sourceMessageTimestamp: Number(request.metadata?.sourceMessageTimestamp),
     planContext: request.planContext,
     actionContract: request.actionContract,
+    actionProgress: request.actionProgress,
+    clarificationHistory: request.clarificationHistory,
+    classifiedIntent: request.classifiedIntent,
+    actionPreparation: request.actionPreparation,
+    semanticProvider: request.semanticProvider,
     documentOutcomePolicy: request.documentOutcomePolicy,
     documentReadObservations: request.documentReadObservations,
     documentArtifactObservations: request.documentArtifactObservations,
     skillRoutingReceipt: request.skillRoutingReceipt,
     profileSignature,
+    conversationGeneration: request.conversationGeneration,
     conversationKey: normalizePositiveInt(request.conversationKey),
     libraryID,
     kind,
@@ -2881,8 +2882,14 @@ export function createExternalBackendBridgeRuntime(options: {
     runTurn: async (rawParams: RunTurnParams): Promise<AgentRuntimeOutcome> => {
       const params: ResolvedRunTurnParams = {
         ...rawParams,
-        request: resolveAgentRuntimeRequest(rawParams.request),
+        request:
+          "turnPaperScope" in rawParams.request
+            ? (rawParams.request as AgentRuntimeRequest)
+            : resolveAgentRuntimeRequest(rawParams.request),
       };
+      params.request.conversationGeneration ??= getConversationWriteGeneration(
+        params.request.conversationKey,
+      );
       const requestMetadata =
         params.request.metadata && typeof params.request.metadata === "object"
           ? params.request.metadata
@@ -3039,16 +3046,32 @@ export function createExternalBackendBridgeRuntime(options: {
             );
           }
           routedSkillIds = reused.skillIds;
+          params.request.classifiedIntent =
+            approvedPlanArtifact?.actionContract?.intent;
+        } else if (await hasCurrentSemanticIntent(params.request)) {
+          routedSkillIds =
+            params.request.skillRoutingReceipt?.skills.map(
+              (skill) => skill.id,
+            ) || [];
         } else {
+          params.request.actionContract = undefined;
+          params.request.actionProgress = undefined;
+          params.request.semanticProvider = {
+            kind: "claude",
+            baseUrl: getBridgeUrl(),
+          };
           const intent = await detectTurnIntent(
             params.request,
             getAllSkills(),
             { signal: params.signal },
           );
           routedSkillIds = intent.skillIds;
-          if (!params.request.classifiedIntent && intent.classifiedIntent) {
-            params.request.classifiedIntent = intent.classifiedIntent;
-          }
+          params.request.classifiedIntent =
+            intent.classifiedIntent || undefined;
+          if (!params.request.classifiedIntent?.semantic)
+            throw new Error(
+              "Semantic interpretation is unavailable. No actions were authorized.",
+            );
           params.request.skillRoutingReceipt = intent.routingReceipt;
           if (intent.degraded) {
             const degradedEvent: AgentEvent = {
@@ -3073,12 +3096,15 @@ export function createExternalBackendBridgeRuntime(options: {
             : undefined;
         params.request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
           request: params.request,
-          matchedSkillIds,
           plannedDocumentKind: plannedSpec?.kind,
           plannedResearch: Boolean(
             approvedPlanArtifact?.contract?.investigation,
           ),
         });
+        if (!params.request.actionContract) {
+          params.request.actionContract =
+            await coreRuntime.createActionContractForRequest(params.request);
+        }
         const contextEnvelope = buildContextEnvelope(params.request);
         await appendPersistedEvent(
           makeProfilingEvent("frontend.context_envelope.ready"),
@@ -3086,10 +3112,6 @@ export function createExternalBackendBridgeRuntime(options: {
         await notifyIfLive(
           makeProfilingEvent("frontend.context_envelope.ready"),
         );
-        if (params.request.planContext && !params.request.actionContract) {
-          params.request.actionContract =
-            await coreRuntime.createActionContractForRequest(params.request);
-        }
         const runtimeRequest = await buildBridgeRuntimeRequest(params.request);
         await appendPersistedEvent(
           makeProfilingEvent("frontend.bridge_runtime_request.ready"),
@@ -3167,37 +3189,18 @@ export function createExternalBackendBridgeRuntime(options: {
                 await notifyIfLive(planEvent);
                 return;
               }
-              const artifact = await planExecutionCoordinator.updateDraft({
-                planId: planning.planId,
-                conversationKey: params.request.conversationKey,
-                provider: "claude",
-                revision: planning.revision,
-                explanation: "Claude Code plan",
-                steps: steps.map((content, index) => ({
-                  planStepId: `${planning.planId}:r${planning.revision}:s${index + 1}`,
-                  content,
-                  activeForm: content,
-                  acceptanceCriteria: [
-                    {
-                      criterionId: `${planning.planId}:r${planning.revision}:s${index + 1}:criterion`,
-                      description: `Verify: ${content}`,
-                      verifier:
-                        inferPlanStepEffect(content) === "mutation"
-                          ? "mutation_receipts"
-                          : inferPlanStepEffect(content) === "read"
-                            ? "verified_read"
-                            : "bounded_reasoning",
-                    },
-                  ],
-                  expectedEffect: inferPlanStepEffect(content),
-                })),
-                actionContractId: params.request.actionContract?.id,
-                actionContract: params.request.actionContract,
-                ready: true,
-              });
-              const planEvent: AgentEvent = { type: "plan_ready", artifact };
-              await appendPersistedEvent(planEvent);
-              await notifyIfLive(planEvent);
+              const progressEvent: AgentEvent = {
+                type: "provider_event",
+                providerType: "native_plan_progress",
+                payload: {
+                  provider: "claude",
+                  text: planText,
+                  authority: "none",
+                  requiredTool: "update_plan",
+                },
+              };
+              await appendPersistedEvent(progressEvent);
+              await notifyIfLive(progressEvent);
             }
           }
           if (
@@ -3264,12 +3267,15 @@ export function createExternalBackendBridgeRuntime(options: {
         if (planInitialization.kind === "failed") {
           throw new Error(planInitialization.userMessage);
         }
-        const pendingPlanEvidence = new Set<Promise<void>>();
+        const pendingPlanEvidence: Promise<void>[] = [];
         let mcpServers: ClaudeMcpServersConfig | undefined;
         let allowedTools: string[] | undefined;
         let clearScopedMcpScope: () => void = () => undefined;
         let unregisterMcpToolActivity: () => void = () => undefined;
         let scopedMcpToken = "";
+        let currentMcpScope: (() => ZoteroMcpActiveScope | null) | undefined;
+        const hostReceipts: import("./contracts/types").AgentActionReceipt[] =
+          [];
         try {
           if (isNativeZoteroMcpToolsEnabled()) {
             const rawPdfMode = requestLocalDocuments(params.request).length > 0;
@@ -3278,19 +3284,56 @@ export function createExternalBackendBridgeRuntime(options: {
               params.request,
               profileSignature,
             );
+            mcpScope.publishHostEvent = emitTurnEvent;
+            mcpScope.requestInteraction = async (action) => {
+              if (!writeAllowed() || params.signal?.aborted)
+                return { approved: false };
+              const requestId = `host-review-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const pending = new Promise<AgentConfirmationResolution>(
+                (resolve) =>
+                  coreRuntime.registerPendingConfirmation(requestId, resolve),
+              );
+              const abort = () =>
+                coreRuntime.resolveConfirmation(requestId, false);
+              params.signal?.addEventListener("abort", abort, { once: true });
+              try {
+                const event: AgentEvent = {
+                  type: "confirmation_required",
+                  requestId,
+                  action,
+                };
+                await appendPersistedEvent(event);
+                await notifyIfLive(event);
+                const resolution = await pending;
+                const settled: AgentEvent = {
+                  type: "confirmation_resolved",
+                  requestId,
+                  ...resolution,
+                };
+                await appendPersistedEvent(settled);
+                await notifyIfLive(settled);
+                return writeAllowed() ? resolution : { approved: false };
+              } finally {
+                params.signal?.removeEventListener("abort", abort);
+                coreRuntime.resolveConfirmation(requestId, false);
+              }
+            };
             const scopedMcp = registerScopedZoteroMcpScope(mcpScope);
             scopedMcpToken = scopedMcp.token;
+            currentMcpScope = scopedMcp.getState;
             clearScopedMcpScope = scopedMcp.clear;
             unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
               (event) => {
-                const sameConversation =
-                  !event.conversationKey ||
-                  event.conversationKey === params.request.conversationKey;
-                const sameProfile =
-                  !event.profileSignature ||
-                  !profileSignature ||
-                  event.profileSignature === profileSignature;
-                if (!sameConversation || !sameProfile) return;
+                if (
+                  event.conversationKey !== params.request.conversationKey ||
+                  event.profileSignature !== profileSignature ||
+                  event.runId !== persistedRunId ||
+                  event.conversationGeneration !==
+                    params.request.conversationGeneration
+                )
+                  return;
+                if (event.phase === "completed")
+                  hostReceipts.push(...(event.actionReceipts || []));
                 if (
                   event.phase === "completed" &&
                   event.ok &&
@@ -3368,8 +3411,10 @@ export function createExternalBackendBridgeRuntime(options: {
                     });
                   }
                 })();
-                pendingPlanEvidence.add(pending);
-                void pending.finally(() => pendingPlanEvidence.delete(pending));
+                pendingPlanEvidence.push(pending);
+                // Observe rejection immediately, but retain the original promise until
+                // the turn drains all evidence before reporting completion.
+                void pending.catch(() => undefined);
               },
             );
             const mcpConfig = buildClaudeZoteroMcpServerConfig({
@@ -3481,14 +3526,16 @@ export function createExternalBackendBridgeRuntime(options: {
               resolveExternalConfirmation,
             });
           const loadFinalizedDocument = async () =>
-            params.request.planContext?.phase === "executing"
-              ? loadLatestPlanDocumentForExecution(
-                  params.request.planContext.executionId,
-                )
-              : loadLatestDocumentForRun(persistedRunId);
+            params.request.classifiedIntent?.semantic?.materialOutputs?.length
+              ? loadWorkflowMaterial(params.request)
+              : params.request.planContext?.phase === "executing"
+                ? loadLatestPlanDocumentForExecution(
+                    params.request.planContext.executionId,
+                  )
+                : loadLatestDocumentForRun(persistedRunId);
 
           let outcome = await runBridge(params.request, runtimeRequest);
-          await Promise.all(Array.from(pendingPlanEvidence));
+          await Promise.all(pendingPlanEvidence);
           let terminalRunStatus: "completed" | "failed" =
             outcome.kind === "completed" ? "completed" : "failed";
           let finalizedDocument = null;
@@ -3517,7 +3564,7 @@ export function createExternalBackendBridgeRuntime(options: {
             );
             terminalRunStatus =
               outcome.kind === "completed" ? "completed" : "failed";
-            await Promise.all(Array.from(pendingPlanEvidence));
+            await Promise.all(pendingPlanEvidence);
             if (outcome.kind === "completed") {
               finalizedDocument = await loadFinalizedDocument();
             }
@@ -3532,6 +3579,33 @@ export function createExternalBackendBridgeRuntime(options: {
               };
             }
           }
+          const actionEvaluation = evaluatePreparedActionContract(
+            currentMcpScope ? currentMcpScope() || {} : params.request,
+            hostReceipts,
+          );
+          if (
+            actionEvaluation.state !== "satisfied" &&
+            actionEvaluation.state !== "cancelled"
+          ) {
+            terminalRunStatus = "failed";
+            const failure =
+              actionEvaluation.failure ||
+              "The requested action has no verified completion evidence.";
+            await emitTurnEvent({
+              type: "provider_event",
+              providerType: "agent_completion_unverified",
+              payload: { reason: failure },
+            });
+            outcome = {
+              kind: "completed",
+              runId: outcome.runId,
+              text: finalizedDocument
+                ? `${finalizedDocument.visibleMarkdown}\n\n${failure}`
+                : failure,
+              documentId: finalizedDocument?.documentId,
+              usedFallback: false,
+            };
+          }
           const planDecision = await planSession.evaluateFinal({
             canCorrect: false,
           });
@@ -3540,7 +3614,10 @@ export function createExternalBackendBridgeRuntime(options: {
             outcome = {
               kind: "completed",
               runId: outcome.runId,
-              text: planDecision.failure,
+              text: finalizedDocument
+                ? `${finalizedDocument.visibleMarkdown}\n\n${planDecision.failure}`
+                : planDecision.failure,
+              documentId: finalizedDocument?.documentId,
               usedFallback: false,
             };
           }

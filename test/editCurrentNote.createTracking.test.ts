@@ -1,3 +1,5 @@
+import { classifiedFixture } from "./helpers/semanticIntent";
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
@@ -29,7 +31,7 @@ import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createRenamedTool } from "../src/agent/tools/facade";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
-import { inferActionIntentsFromRequest } from "../src/agent/model/actionIntent";
+import { actionFixture } from "./helpers/semanticIntent";
 
 describe("editCurrentNote create tracking", function () {
   it("only defers notes that contain supported visual figure fences", function () {
@@ -47,6 +49,7 @@ describe("editCurrentNote create tracking", function () {
 
   const baseContext: AgentToolContext = {
     request: {
+      classifiedIntent: classifiedFixture(),
       conversationKey: 91,
       mode: "agent",
       userText: "save this note",
@@ -484,13 +487,25 @@ describe("editCurrentNote create tracking", function () {
         }),
       );
       const request = resolvedAgentRequest({
+        classifiedIntent: classifiedFixture(),
         ...baseContext.request,
         userText: `Replace the content of existing note 60 with this exact HTML: ${html}. Do not create a new note.`,
       });
-      request.classifiedIntent = {
-        type: "note",
-        actionIntents: inferActionIntentsFromRequest(request),
-      };
+      request.classifiedIntent = actionFixture(
+        "note_edit",
+        { targetNoteId: 60 },
+        {
+          constraints: [
+            {
+              kind: "deny_effects",
+              effects: ["create"],
+              domains: ["zotero_library"],
+              operations: ["note_create", "save_note", "save_notes_batch"],
+              description: "No new notes",
+            },
+          ],
+        },
+      );
       request.actionContract = await contracts.createContract(request);
       request.actionProgress = contracts.createProgress(request.actionContract);
       let execution = await registry.prepareExecution(
@@ -556,6 +571,7 @@ describe("editCurrentNote create tracking", function () {
         userText:
           'In note 60, replace only the first occurrence of "copper-limitation" with "copper-limitation (reviewed)". Preserve every other character and section.',
         classifiedIntent: {
+          semantic: semanticFixture(),
           type: "note",
           actionIntents: [
             {

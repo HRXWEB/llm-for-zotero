@@ -1,8 +1,16 @@
-import { createFinalizedZoteroNote } from "../../modules/contextPanel/notePersistence";
+import { sha256Text } from "../store/journalRecoveryBlobStore";
+import {
+  createFinalizedZoteroNote,
+  stripZoteroNoteWrapper,
+} from "../../modules/contextPanel/notePersistence";
 import { importNoteImageAsset } from "../../modules/contextPanel/noteImages";
 import { escapeNoteHtml } from "../../modules/contextPanel/textUtils";
 import { loadPlanArtifact } from "../plans/store";
-import { sha256Bytes } from "../store/journalRecoveryBlobStore";
+import {
+  prepareDocumentMarkdownExport,
+  readVerifiedAssetBytes,
+  pathParts,
+} from "./exportBundle";
 import {
   loadDocumentActionState,
   loadPlanDocument,
@@ -38,7 +46,36 @@ function citedItems(document: PlanDocument): Array<{
   return out;
 }
 
-export async function savePlanDocumentAsNote(documentId: string): Promise<{
+export type DocumentNoteTarget = { parentItemId: number; libraryID: number };
+
+const pendingDocumentSaves = new Map<string, Promise<unknown>>();
+
+/** Reserve a durable native key before saving; serialize concurrent saves of the same document. */
+export async function savePlanDocumentAsNote(
+  documentId: string,
+  target?: DocumentNoteTarget,
+) {
+  const previous = pendingDocumentSaves.get(documentId);
+  const operation = (previous || Promise.resolve())
+    .catch(() => undefined)
+    .then(() => saveDocumentNote(documentId, target));
+  pendingDocumentSaves.set(documentId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (pendingDocumentSaves.get(documentId) === operation)
+      pendingDocumentSaves.delete(documentId);
+  }
+}
+
+async function noteContentHash(html: string) {
+  return sha256Text(stripZoteroNoteWrapper(html));
+}
+
+async function saveDocumentNote(
+  documentId: string,
+  target?: DocumentNoteTarget,
+): Promise<{
   libraryID: number;
   itemKey: string;
   itemId: number;
@@ -48,12 +85,46 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
   const document = await loadPlanDocument(documentId);
   if (!document) throw new Error("Document not found");
   const prior = await loadDocumentActionState(documentId);
-  if (prior?.savedNote) {
-    const existing = resolveItemByKey(
-      prior.savedNote.libraryID,
-      prior.savedNote.itemKey,
-    );
+  const binding = prior?.savedNote || prior?.pendingNote;
+  if (binding) {
+    if (
+      (target &&
+        (binding.parentItemId !== target.parentItemId ||
+          binding.libraryID !== target.libraryID)) ||
+      (binding.contentHash && binding.contentHash !== document.contentHash) ||
+      (binding.documentVersion &&
+        binding.documentVersion !== document.documentVersion)
+    )
+      throw new Error(
+        "The reserved note identity belongs to different content or a different parent.",
+      );
+    const existing = resolveItemByKey(binding.libraryID, binding.itemKey);
     if (existing && existing.isNote() && !existing.deleted) {
+      await existing.reload(["primaryData", "note"], true);
+      const expectedHash =
+        binding.nativeContentHash ||
+        (await noteContentHash(document.visibleHtml));
+      if (
+        (target &&
+          (existing.parentID !== target.parentItemId ||
+            existing.libraryID !== target.libraryID)) ||
+        (binding.contentHash && binding.contentHash !== document.contentHash) ||
+        (binding.documentVersion &&
+          binding.documentVersion !== document.documentVersion) ||
+        (await noteContentHash(existing.getNote())) !== expectedHash ||
+        binding.finalized === false
+      ) {
+        throw new Error(
+          "The saved note no longer matches this exact document and parent, or its assets are incomplete. Resolve that note before saving again.",
+        );
+      }
+      if (!prior?.savedNote)
+        await saveDocumentActionState({
+          ...prior!,
+          savedNote: binding,
+          pendingNote: undefined,
+          updatedAt: Date.now(),
+        });
       return {
         libraryID: existing.libraryID,
         itemKey: existing.key,
@@ -62,6 +133,10 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
         warnings: [],
       };
     }
+    if (existing || prior?.savedNote)
+      throw new Error(
+        "The previously saved note was removed or changed. A retry cannot create a replacement automatically.",
+      );
   }
 
   const planned = getPlannedDocumentOrigin(document);
@@ -69,10 +144,22 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
     ? await loadPlanArtifact(planned.planId, planned.planRevision)
     : null;
   const cited = citedItems(document);
-  const singleParent =
-    cited.length === 1
+  const singleParent = target
+    ? Zotero.Items.get(target.parentItemId)
+    : cited.length === 1
       ? resolveItemByKey(cited[0].libraryID, cited[0].itemKey)
       : null;
+  if (
+    target &&
+    (!singleParent ||
+      singleParent.deleted ||
+      !singleParent.isRegularItem() ||
+      singleParent.libraryID !== target.libraryID)
+  ) {
+    throw new Error(
+      "The requested summary-note parent is unavailable in the frozen library.",
+    );
+  }
   const scope = artifact?.contract?.investigation?.scope;
   const libraryID =
     singleParent?.libraryID ||
@@ -81,6 +168,11 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
     Zotero.Libraries.userLibraryID;
   const note = new Zotero.Item("note");
   note.libraryID = libraryID;
+  note.key =
+    prior?.pendingNote?.itemKey || Zotero.Utilities.generateObjectKey();
+  // Assigning a key identifies a native object. Initialize its load state before
+  // setting note data; Zotero marks a missing reserved key as a new loaded item.
+  await note.loadPrimaryData(false);
   if (singleParent && !singleParent.deleted) {
     note.parentID = singleParent.id;
   } else if (
@@ -90,6 +182,25 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
   ) {
     note.addToCollection(scope.collectionIds[0]);
   }
+  let pendingNote: NonNullable<DocumentActionState["pendingNote"]> = {
+    libraryID,
+    itemKey: note.key,
+    parentItemId: note.parentID || undefined,
+    documentVersion: document.documentVersion,
+    contentHash: document.contentHash,
+    nativeContentHash: await noteContentHash(document.visibleHtml),
+    finalized: document.assets.length === 0,
+  };
+  const persistPending = () =>
+    saveDocumentActionState({
+      version: 1,
+      documentId,
+      ...prior,
+      savedNote: undefined,
+      pendingNote,
+      updatedAt: Date.now(),
+    });
+  await persistPending();
   const persisted = await createFinalizedZoteroNote({
     note,
     initialHtml: document.visibleHtml,
@@ -113,23 +224,39 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
               `<figure><img data-attachment-key="${escapeNoteHtml(imported.key)}" alt="${escapeNoteHtml(asset.caption)}" /><figcaption>${escapeNoteHtml(asset.caption)}</figcaption></figure>`,
             );
           }
-          return {
-            html: blocks.length
-              ? `${document.visibleHtml}<h2>Figures</h2>${blocks.join("")}`
-              : document.visibleHtml,
-            warnings,
+          const html = blocks.length
+            ? `${document.visibleHtml}<h2>Figures</h2>${blocks.join("")}`
+            : document.visibleHtml;
+          pendingNote = {
+            ...pendingNote,
+            nativeContentHash: await noteContentHash(html),
+            finalized: warnings.length === 0,
           };
+          await persistPending();
+          return { html, warnings };
         }
       : undefined,
     log: (message, error) => ztoolkit.log(message, error),
   });
   const created = Zotero.Items.get(persisted.noteId) || note;
   if (!created.key) throw new Error("Created note has no stable Zotero key");
+  if (!pendingNote.finalized)
+    throw new Error(
+      "The note text was preserved but its requested assets are incomplete.",
+    );
   const now = Date.now();
   const nextState: DocumentActionState = {
     version: 1,
     documentId,
-    savedNote: { libraryID: created.libraryID, itemKey: created.key },
+    savedNote: {
+      libraryID: created.libraryID,
+      itemKey: created.key,
+      documentVersion: document.documentVersion,
+      contentHash: document.contentHash,
+      nativeContentHash: await noteContentHash(created.getNote()),
+      finalized: true,
+      parentItemId: created.parentID || undefined,
+    },
     lastExportedAt: prior?.lastExportedAt,
     lastExportedName: prior?.lastExportedName,
     updatedAt: now,
@@ -142,52 +269,6 @@ export async function savePlanDocumentAsNote(documentId: string): Promise<{
     created: true,
     warnings: [...persisted.warnings],
   };
-}
-
-async function readVerifiedAssetBytes(
-  asset: PlanDocument["assets"][number],
-): Promise<Uint8Array> {
-  const io = (globalThis as unknown as { IOUtils?: any }).IOUtils;
-  if (typeof io?.read !== "function") {
-    throw new Error(
-      "Document asset storage is unavailable in this Zotero build",
-    );
-  }
-  const source = await io.read(asset.durablePath);
-  const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
-  const checksum = await sha256Bytes(bytes);
-  const expected = asset.contentHash.replace(/^sha256:/, "");
-  if (checksum !== expected || bytes.byteLength !== asset.byteLength) {
-    throw new Error(
-      `Document asset ${asset.assetId} failed integrity validation`,
-    );
-  }
-  return bytes;
-}
-
-function extensionForMime(mimeType: string): string {
-  switch (mimeType.toLowerCase()) {
-    case "image/png":
-      return "png";
-    case "image/jpeg":
-      return "jpg";
-    case "image/gif":
-      return "gif";
-    case "image/webp":
-      return "webp";
-    case "image/svg+xml":
-      return "svg";
-    default:
-      return "bin";
-  }
-}
-
-function pathParts(path: string): { directory: string; stem: string } {
-  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  const directory = slash >= 0 ? path.slice(0, slash) : ".";
-  const name = slash >= 0 ? path.slice(slash + 1) : path;
-  const stem = name.replace(/\.md$/i, "") || "plan-document";
-  return { directory, stem };
 }
 
 export async function exportPlanDocumentMarkdown(
@@ -203,21 +284,8 @@ export async function exportPlanDocumentMarkdown(
   if (typeof io?.write !== "function") {
     throw new Error("Atomic file export is unavailable in this Zotero build");
   }
-  const verifiedAssets: Array<{
-    asset: PlanDocument["assets"][number];
-    bytes: Uint8Array;
-    fileName: string;
-  }> = [];
-  if (document.assets.length) {
-    for (const asset of document.assets) {
-      const bytes = await readVerifiedAssetBytes(asset);
-      verifiedAssets.push({
-        asset,
-        bytes,
-        fileName: `${asset.assetId}.${extensionForMime(asset.mimeType)}`,
-      });
-    }
-  }
+  const bundle = await prepareDocumentMarkdownExport(document, outputPath);
+  const verifiedAssets = bundle.assets;
 
   const { directory, stem } = pathParts(outputPath);
   const separator = outputPath.includes("\\") ? "\\" : "/";
@@ -270,17 +338,7 @@ export async function exportPlanDocumentMarkdown(
       }
       installedAssets = true;
     }
-    const figureMarkdown = verifiedAssets.length
-      ? `\n\n## Figures\n\n${verifiedAssets
-          .map(
-            ({ asset, fileName }) =>
-              `![${asset.caption.replace(/\[|\]/g, "")}](${stem}_assets/${fileName})`,
-          )
-          .join("\n\n")}\n`
-      : "";
-    const bytes = new TextEncoder().encode(
-      `${document.visibleMarkdown.trimEnd()}${figureMarkdown || "\n"}`,
-    );
+    const bytes = bundle.bytes;
     await io.write(outputPath, bytes, { tmpPath: `${outputPath}.tmp` });
   } catch (error) {
     await io.remove?.(stagedAssetDirectory, {

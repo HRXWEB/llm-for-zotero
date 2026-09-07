@@ -1,3 +1,4 @@
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { evaluateActionContract } from "../src/agent/contracts/actionEvaluation";
@@ -13,7 +14,7 @@ import type {
   LibraryMutationState,
 } from "../src/agent/services/libraryMutation/contracts";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { inferActionIntentsFromRequest } from "../src/agent/model/actionIntent";
+import { parseActionIntents } from "../src/agent/model/actionIntent";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 
 type FakeItemState = {
@@ -224,6 +225,7 @@ function requestWithIntents(
         }))
       : [],
     classifiedIntent: {
+      semantic: semanticFixture(),
       retrievalIntent: "none",
       wantedSections: [],
       writeDisposition:
@@ -270,6 +272,79 @@ function mutationEvidence(
 }
 
 describe("Action Contract V2", function () {
+  it("executes the explicit non-permanent trash contract through the native operation adapter", async function () {
+    const { service, items } = createHarness();
+    items.set(41, { tags: [], collections: [], fields: {} });
+    for (const permanent of [false, true]) {
+      const request = requestWithIntents(
+        parseActionIntents([
+          {
+            operation: "trash_items",
+            coverage: "one",
+            targetKind: "papers",
+            parameters: { permanent },
+            targetSelectors: [{ kind: "item_id", value: 41 }],
+          },
+        ]),
+        {
+          selectedCollection: 0,
+          userText: "Trash the identified paper; preserve recovery.",
+        },
+      );
+      const contract = await service.createContract(request);
+      const prepared = await service.prepare(
+        mutationTool(),
+        {
+          operation: { type: "trash_items", itemIds: [41] },
+        },
+        request,
+      );
+      assert.equal(
+        (await service.validateScope(contract, prepared)) === null,
+        !permanent,
+      );
+    }
+  });
+  it("binds an explicit metadata value through interpretation, contract, and exact proposal validation", async function () {
+    const { service, items } = createHarness();
+    items.set(41, { tags: [], collections: [], fields: { title: "Old" } });
+    const decoded = parseActionIntents([
+      {
+        operation: "update_metadata",
+        coverage: "one",
+        targetKind: "papers",
+        parameters: { metadataValues: { title: "Requested title" } },
+        targetSelectors: [{ kind: "item_id", value: 41 }],
+      },
+    ]);
+    assert.lengthOf(decoded, 1);
+    const request = requestWithIntents(decoded, {
+      selectedCollection: 0,
+      userText: "Set the title to Requested title",
+    });
+    const contract = await service.createContract(request);
+    for (const [title, allowed] of [
+      ["Requested title", true],
+      ["Different title", false],
+    ] as const) {
+      const prepared = await service.prepare(
+        mutationTool(),
+        {
+          operation: {
+            type: "update_metadata",
+            itemId: 41,
+            metadata: { title },
+          },
+        },
+        request,
+      );
+      assert.equal(
+        (await service.validateScope(contract, prepared)) === null,
+        allowed,
+        title,
+      );
+    }
+  });
   it("allows separate requested operations to execute sequentially without weakening per-operation target coverage", async function () {
     const { service, items } = createHarness();
     for (const id of [41, 42])
@@ -411,8 +486,15 @@ describe("Action Contract V2", function () {
       selectedCollection: 0,
       userText: `Set exactly these three tags on only the papers with item keys ${keys.join(", ")} in My Library: coding, drift, memory. Replace their previous tags with this exact set; do not change any other item or field.`,
     });
-    request.classifiedIntent!.actionIntents =
-      inferActionIntentsFromRequest(request);
+    request.classifiedIntent!.actionIntents = parseActionIntents([
+      {
+        operation: "set_item_tags",
+        coverage: "some",
+        targetKind: "papers",
+        parameters: { tags: ["coding", "drift", "memory"] },
+        targetSelectors: keys.map((value) => ({ kind: "item_key", value })),
+      },
+    ]);
     request.classifiedIntent!.writeDisposition = "required";
     const contract = await service.createContract(request);
     assert.deepEqual(
@@ -515,8 +597,14 @@ describe("Action Contract V2", function () {
     const request = requestWithIntents([], { selectedCollection: 0 });
     request.userText =
       "Move to trash (do not permanently delete) only the paper with item key JBU4RMQ9.";
-    request.classifiedIntent!.actionIntents =
-      inferActionIntentsFromRequest(request);
+    request.classifiedIntent!.actionIntents = parseActionIntents([
+      {
+        operation: "trash_items",
+        coverage: "one",
+        targetKind: "items",
+        targetSelectors: [{ kind: "item_key", value: "JBU4RMQ9" }],
+      },
+    ]);
     request.classifiedIntent!.writeDisposition = "required";
     const contract = await service.createContract(request);
     assert.deepEqual(
@@ -526,7 +614,14 @@ describe("Action Contract V2", function () {
     request.userText =
       "Restore from trash only the paper with item key JBU4RMQ9.";
     assert.deepEqual(
-      inferActionIntentsFromRequest(request).map((intent) => intent.operation),
+      parseActionIntents([
+        {
+          operation: "restore_from_trash",
+          coverage: "one",
+          targetKind: "items",
+          targetSelectors: [{ kind: "item_key", value: "JBU4RMQ9" }],
+        },
+      ]).map((intent) => intent.operation),
       ["restore_from_trash"],
     );
   });
@@ -712,8 +807,16 @@ describe("Action Contract V2", function () {
     const request = requestWithIntents([], { selectedCollection: 0 });
     request.userText =
       'Create exactly one standalone version of note 3932 and file it in the collection named "Leaf". Preserve its complete content and all six sections.';
-    request.classifiedIntent!.actionIntents =
-      inferActionIntentsFromRequest(request);
+    request.classifiedIntent!.actionIntents = parseActionIntents([
+      {
+        operation: "note_create",
+        coverage: "one",
+        targetKind: "items",
+        scopeRole: "destination",
+        scope: { kind: "collection", path: "Leaf", includeDescendants: false },
+        parameters: { noteMode: "create" },
+      },
+    ]);
     request.classifiedIntent!.writeDisposition = "required";
     const contract = await service.createContract(request);
     const prepare = (destination: number) =>
@@ -742,7 +845,7 @@ describe("Action Contract V2", function () {
     assert.isNull(await service.validateScope(contract, await prepare(11)));
   });
 
-  it("permits bounded export preparation without treating a shell result as the exported document", async function () {
+  it("does not manufacture command authority from a file export obligation", async function () {
     const { service } = createHarness();
     const contract = await service.createContract(
       requestWithIntents(
@@ -770,7 +873,7 @@ describe("Action Contract V2", function () {
       'mkdir -p "/tmp/behavior-vault/assets" && cp "/tmp/crop.png" "/tmp/behavior-vault/assets/figure.png" && ls -l "/tmp/behavior-vault/assets/figure.png"',
       'mkdir -p "/tmp/behavior-vault/assets" && cp "/tmp/figure-1-p3.png" "/tmp/behavior-vault/assets/" && ls -la "/tmp/behavior-vault" "/tmp/behavior-vault/assets"',
     ]) {
-      assert.isNull(
+      assert.exists(
         await service.validateScope(contract, await prepare(command)),
         command,
       );
@@ -837,7 +940,15 @@ describe("Action Contract V2", function () {
       proofDomain: "zotero_state",
       coverage: "one",
       targetKind,
-      parameters: targetItemId ? { targetItemId } : undefined,
+      parameters:
+        operation === "move_to_collection"
+          ? {
+              destinationCollectionId: 10,
+              ...(targetItemId ? { targetItemId } : {}),
+            }
+          : targetItemId
+            ? { targetItemId }
+            : undefined,
     });
     const boundaryFor = async (
       intent: AgentActionIntent,
@@ -964,6 +1075,7 @@ describe("Action Contract V2", function () {
       proofDomain: "zotero_state",
       coverage: "one",
       targetKind: "items",
+      parameters: { destinationCollectionId: 10 },
     };
     for (const itemId of [701, 702]) {
       const contract = await service.createContract(
@@ -1131,6 +1243,44 @@ describe("Action Contract V2", function () {
     assert.deepEqual(receipts[0].requestedTargets, ["item:4", "item:3"]);
   });
 
+  it("rejects any ungranted source removal from an add-only filing contract", async function () {
+    const { service } = createHarness();
+    const contract = await service.createContract(
+      requestWithIntents([
+        {
+          capability: "zotero.collections",
+          operation: "move_to_collection",
+          proofDomain: "zotero_state",
+          coverage: "all",
+          targetKind: "items",
+          scopeRole: "source",
+          scope: {
+            kind: "collection",
+            path: "Parent/Leaf",
+            includeDescendants: false,
+          },
+          parameters: { destinationCollectionId: 10 },
+        },
+      ]),
+    );
+    for (const source of [11, "all"] as const) {
+      const prepared = await service.prepare(mutationTool(), {
+        operation: {
+          type: "move_to_collection",
+          itemIds: [1, 2, 3],
+          targetCollectionId: 10,
+          mode: "move",
+          from: source,
+        },
+      });
+      assert.isNotNull(
+        await service.validateScope(contract, prepared, {
+          progress: service.createProgress(contract),
+        }),
+      );
+    }
+  });
+
   it("keeps exact destination validation independent from source collection unioning", async function () {
     const { service, directMembers } = createHarness();
     directMembers.set(11, [1, 2]);
@@ -1155,9 +1305,12 @@ describe("Action Contract V2", function () {
       },
     };
     const contract = await service.createContract(
-      requestWithIntents([sourceIntent, destinationIntent], {
-        selectedCollections: [11, 12],
-      }),
+      requestWithIntents(
+        [{ ...sourceIntent, parameters: { destinationCollectionId: 10 } }],
+        {
+          selectedCollections: [11, 12],
+        },
+      ),
     );
     const operation: LibraryMutationOperation = {
       type: "move_to_collection",
@@ -1180,7 +1333,7 @@ describe("Action Contract V2", function () {
           progress: service.createProgress(contract),
         })
       )?.message || "",
-      "destination must be exact collection 10",
+      "does not match",
     );
   });
 
@@ -1264,7 +1417,7 @@ describe("Action Contract V2", function () {
     }
   });
 
-  it("leaves effect constraints to pre-execution authorization", async function () {
+  it("does not grant mutations when no action obligation exists", async function () {
     const { service } = createHarness();
     const contract = await service.createContract(
       requestWithIntents([], { disposition: "none" }),
@@ -1279,7 +1432,10 @@ describe("Action Contract V2", function () {
         tags: ["topic:drift"],
       },
     });
-    assert.isNull(await service.validateScope(contract, prepared));
+    assert.equal(
+      (await service.validateScope(contract, prepared))?.code,
+      "different_operation",
+    );
   });
 
   it("binds top-level and explicitly nested collection creation precisely", async function () {
@@ -1312,8 +1468,10 @@ describe("Action Contract V2", function () {
               proofDomain: "zotero_state",
               coverage: "one",
               targetKind: "items",
-              parameters: { collectionName: testCase.collectionName },
-              scope: testCase.scope,
+              parameters: {
+                collectionName: testCase.collectionName,
+                parentCollectionId: testCase.expectedParentId,
+              },
             },
           ],
           testCase,
@@ -1353,7 +1511,7 @@ describe("Action Contract V2", function () {
     );
   });
 
-  it("treats a classifier no-write prediction as a hint when issue #413 later produces an exact metadata proposal", async function () {
+  it("blocks an exact metadata proposal without semantic mutation authority", async function () {
     const { service } = createHarness();
     const contract = await service.createContract(
       requestWithIntents([], {
@@ -1382,7 +1540,7 @@ describe("Action Contract V2", function () {
 
     assert.equal(contract.writeDisposition, "none");
     assert.deepEqual(contract.hardConstraints, []);
-    assert.isNull(
+    assert.isNotNull(
       await service.validateScope(contract, prepared, {
         concreteWrite: true,
       }),

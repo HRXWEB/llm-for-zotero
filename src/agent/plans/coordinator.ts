@@ -1,3 +1,7 @@
+import {
+  validatePlanWorkflowBindings,
+  planStepObligationIds,
+} from "./workflowBindings";
 import type {
   AgentActionContract,
   AgentActionReceipt,
@@ -49,6 +53,7 @@ function normalizedText(value: unknown, label: string): string {
 const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
   "verified_read",
   "research_coverage",
+  "material_integrity",
   "document_integrity",
   "document_published",
   "mutation_receipts",
@@ -90,29 +95,6 @@ function normalizeAcceptanceCriteria(
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export function inferPlanStepEffect(
-  content: string,
-): PlanStep["expectedEffect"] {
-  const normalized = content.toLowerCase();
-  if (
-    /\b(?:create|write|edit|update|change|apply|delete|remove|move|import|upload|tag|organize|execute|run)\b/.test(
-      normalized,
-    )
-  ) {
-    return "mutation";
-  }
-  if (/\b(?:save|export|generate|produce)\b/.test(normalized))
-    return "artifact";
-  if (
-    /\b(?:read|inspect|search|research|collect|review|verify|validate|check|audit)\b/.test(
-      normalized,
-    )
-  ) {
-    return "read";
-  }
-  return "reasoning";
 }
 
 function taskStatusAfterTransition(
@@ -270,6 +252,14 @@ export function assertTaskCompletionEvidence(
                   (entry.payload.coverageStatus === "complete" ||
                     entry.payload.coverageStatus ===
                       "complete_with_limitations")
+                );
+              }
+              if (requirement.kind === "material_integrity") {
+                return (
+                  entry.kind === "material_integrity" &&
+                  entry.payload?.type === "material_integrity" &&
+                  entry.payload.integrityValidated &&
+                  entry.payload.materialOutputId === task.materialOutputId
                 );
               }
               if (requirement.kind === "document_integrity") {
@@ -601,6 +591,7 @@ function validatePlanStepContract(params: {
         : "A mutation plan step requires an approved library-mutation contract",
     );
   }
+  validatePlanWorkflowBindings(params.contract, params.steps);
   const requirementOwners = new Map<PlanCompletionRequirementKind, number[]>();
   params.steps.forEach((step, index) => {
     for (const requirement of step.completionRequirements || []) {
@@ -869,6 +860,8 @@ export class PlanExecutionCoordinator {
     explanation?: string;
     steps: ReadonlyArray<{
       planStepId?: string;
+      actionIndexes?: readonly number[];
+      materialOutputId?: string;
       content: string;
       activeForm?: string;
       acceptanceCriteria: readonly PlanAcceptanceCriterion[];
@@ -976,6 +969,8 @@ export class PlanExecutionCoordinator {
         acceptanceCriteria,
         expectedCapability: step.expectedCapability?.trim() || undefined,
         expectedEffect: step.expectedEffect,
+        actionIndexes: step.actionIndexes,
+        materialOutputId: step.materialOutputId,
         targetBoundary: step.targetBoundary,
       };
     });
@@ -1223,16 +1218,11 @@ export class PlanExecutionCoordinator {
       activeForm: step.activeForm,
       acceptanceCriteria: step.acceptanceCriteria,
       expectedEffect: step.expectedEffect,
+      actionIndexes: step.actionIndexes,
+      materialOutputId: step.materialOutputId,
       completionRequirements: step.completionRequirements,
       expectedCapability: step.expectedCapability,
-      obligationIds:
-        actionContract?.obligations
-          .filter(
-            (obligation) =>
-              !step.expectedCapability ||
-              obligation.capability === step.expectedCapability,
-          )
-          .map((obligation) => obligation.id) || [],
+      obligationIds: planStepObligationIds(step, actionContract),
       status: "pending",
       attemptCount: 0,
       evidenceIds: [],

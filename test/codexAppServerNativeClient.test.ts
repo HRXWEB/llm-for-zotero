@@ -1,7 +1,12 @@
+import { runCodexAppServerNativeTurn } from "./helpers/preparedNativeTurn";
 import {
   createNativeLifecycleTestProcess,
   installDirectPathTestPrefs,
 } from "./helpers/codexNativeLifecycle";
+import { classifiedFixture } from "./helpers/semanticIntent";
+import { buildCodexNativeSkillRequest } from "../src/codexAppServer/nativeSkills";
+import type { AgentRuntimeRequest } from "../src/agent/types";
+import { semanticContractFixture } from "./helpers/semanticIntent";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +26,7 @@ import {
   resolveCodexNativeApprovalRequest,
   resolveSafeCodexNativeApprovalRequest,
   resetCodexNativePathSafetyStateForTests,
-  runCodexAppServerNativeTurn,
+  runCodexAppServerNativeTurn as runPreparedNativeTurn,
 } from "../src/codexAppServer/nativeClient";
 import {
   buildCodexNativePriorReadContextBlock,
@@ -35,6 +40,7 @@ import {
 import {
   invokeRegisteredZoteroMcpEndpoint,
   registerMcpServer,
+  registerScopedZoteroMcpScope,
   resolveConversationScopeToken,
   unregisterMcpServer,
   ZOTERO_MCP_SCOPE_HEADER,
@@ -48,7 +54,6 @@ import {
   parseSkill,
   setUserSkills,
 } from "../src/agent/skills";
-import { clearCodexNativeSkillClassifierCache } from "../src/codexAppServer/nativeSkills";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -264,6 +269,198 @@ describe("Codex app-server native client", function () {
       destroyCachedCodexAppServerProcess("native-question-cancel", proc);
       CodexAppServerProcess.spawn = originalSpawn;
       (globalThis as any).Zotero.DB = originalDB;
+      restorePrefs();
+    }
+  });
+
+  it("does not lose a completed MCP evidence persistence failure before provider finalization", async function () {
+    const restorePrefs = installDirectPathTestPrefs();
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const originalZotero = (globalThis as any).Zotero;
+    const conversationKey = 6_000_000_191;
+    let observed = false;
+    let finished: unknown;
+    let response: any;
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "library_read",
+        description: "Read fixture",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      execute: async () => ({ content: { title: "Fixture" } }),
+    });
+    (globalThis as any).Zotero = {
+      ...originalZotero,
+      Server: { Endpoints: {} },
+      Prefs: {
+        ...originalZotero.Prefs,
+        get: (key: string) =>
+          key.endsWith("codexZoteroMcpBearerToken")
+            ? "evidence-test-bearer-0123456789abcdef"
+            : originalZotero.Prefs.get(key),
+      },
+    };
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const processKey = "native-evidence-failure";
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["evidence-thread"],
+      requests: [],
+      beforeTurnCompleted: async (turnId) => {
+        const scope = registerScopedZoteroMcpScope({
+          conversationKey,
+          runId: turnId,
+          conversationGeneration: 0,
+          profileSignature: getCodexProfileSignature(),
+          libraryID: 1,
+          kind: "global",
+          model: "gpt-5.6",
+        } as any);
+        try {
+          response = await invokeRegisteredZoteroMcpEndpoint({
+            method: "POST",
+            data: {
+              jsonrpc: "2.0",
+              id: 100,
+              method: "tools/call",
+              params: { name: "library_read", arguments: {} },
+            },
+            headers: {
+              [ZOTERO_MCP_SCOPE_HEADER]: scope.token,
+              Authorization: "Bearer evidence-test-bearer-0123456789abcdef",
+            },
+          });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        } finally {
+          scope.clear();
+        }
+      },
+    });
+    CodexAppServerProcess.spawn = async () => proc;
+    let failure = "";
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey,
+          libraryID: 1,
+          kind: "global",
+          title: "Read fixture",
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user", content: "Read fixture" }],
+        processKey,
+        eventJournal: {
+          runId: "host-evidence-run",
+          append: async (event) => {
+            if (event.type === "codex_tool_activity") {
+              observed = true;
+              throw new Error("Evidence storage unavailable");
+            }
+          },
+          finish: async (status) => {
+            finished = status;
+          },
+        },
+        hooks: {
+          loadProviderSessionId: async () => null,
+          persistProviderSession: async () => {},
+        },
+      });
+    } catch (error) {
+      failure = String(error);
+    } finally {
+      unregisterMcpServer();
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      restorePrefs();
+    }
+    assert.isTrue(
+      observed,
+      `MCP activity was not exercised: ${JSON.stringify(response)}`,
+    );
+    assert.include(failure, "Evidence storage unavailable");
+    assert.notEqual(finished, "completed");
+  });
+  it("rejects a provider's filing-completed narrative without host-verified effects", async function () {
+    const persisted: any[] = [];
+    let finished: unknown;
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["unverified-native-thread"],
+      requests,
+      deltaForTurn: () => "Done, the paper was filed.",
+    });
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const restorePrefs = installDirectPathTestPrefs();
+    const processKey = "semantic-native-completion";
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      const result = await runCodexAppServerNativeTurn({
+        eventJournal: {
+          runId: "host-native-run",
+          append: async (event) => {
+            persisted.push(event);
+          },
+          finish: async (status, text) => {
+            finished = { status, text };
+          },
+        },
+        scope: {
+          conversationKey: 6_000_000_190,
+          libraryID: 1,
+          kind: "global",
+          title: "File a paper",
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user", content: "File this paper in Bayesian" }],
+        processKey,
+        actionPreparation: { state: "ready", issues: [] },
+        actionContract: semanticContractFixture({
+          id: "native-filing-contract",
+          writeDisposition: "required",
+          obligations: [
+            {
+              id: "filing",
+              operation: "move_to_collection",
+              capability: "zotero.collections",
+              proofDomain: "zotero_state",
+              coverage: "one",
+              targetKind: "papers",
+              parameters: { destinationCollectionId: 5 },
+            },
+          ],
+        }),
+        hooks: {
+          loadProviderSessionId: async () => null,
+          persistProviderSession: async () => {},
+        },
+      });
+      assert.include(result.text, "could not verify");
+      assert.notInclude(result.text, "Done, the paper was filed");
+      assert.isString(result.verificationFailure);
+      assert.equal(result.agentRunId, "host-native-run");
+      assert.isTrue(
+        persisted.some(
+          (event) => event.providerType === "agent_semantic_intent",
+        ),
+      );
+      assert.isTrue(
+        persisted.some(
+          (event) => event.providerType === "provider_run_binding",
+        ),
+      );
+      assert.equal((finished as any)?.status, "failed");
+
+      assert.lengthOf(
+        requests.filter((request) => request.method === "turn/start"),
+        2,
+      );
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
       restorePrefs();
     }
   });
@@ -1385,7 +1582,6 @@ describe("Codex app-server native client", function () {
   afterEach(function () {
     resetCodexNativePathSafetyStateForTests();
     clearCodexNativeReadLedger();
-    clearCodexNativeSkillClassifierCache();
     setUserSkills([]);
   });
 

@@ -131,7 +131,10 @@ export async function runBehaviorSuite(requestPath: string): Promise<void> {
       platform: Zotero.platform,
       buildEnvironment: __env__,
     });
-    const creds = await resolveLiveAgentCredentials();
+    const creds = await resolveLiveAgentCredentials({
+      requestedModel: request.model,
+      profilePath: `${request.profile}/prefs.js`,
+    });
     check(
       creds && creds.model === request.model && creds.apiKey,
       `Missing configured credentials for ${request.model}; no live scenario ran`,

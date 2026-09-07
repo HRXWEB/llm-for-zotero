@@ -10,6 +10,48 @@ const completeOutcome = (text: string) => ({
 });
 
 describe("utility LLM policy", function () {
+  it("reports output exhaustion without returning partial structured authority", async function () {
+    const result = await callUtilityLLM({
+      prompt: "Return JSON",
+      model: "deepseek-v4-flash",
+      apiBase: "https://api.deepseek.com",
+      apiKey: "fixture",
+      jsonBudget: 5000,
+      timeoutMs: 180000,
+      llmCall: async () => ({
+        text: '{"actions":[',
+        completion: { status: "incomplete", reason: "output_limit" },
+      }),
+    });
+    assert.isFalse(result.ok);
+    assert.equal(result.ok ? "" : result.reason, "output_limit");
+    assert.notProperty(result, "text");
+  });
+
+  it("honors supported configured reasoning for semantic utility work", async function () {
+    let captured: any;
+    const result = await callUtilityLLM({
+      prompt: "Interpret intent",
+      model: "deepseek-v4-flash",
+      apiBase: "https://api.deepseek.com/anthropic",
+      apiKey: "fixture",
+      providerProtocol: "anthropic_messages",
+      reasoning: { provider: "deepseek", level: "high" },
+      jsonBudget: 500,
+      timeoutMs: 20000,
+      llmCall: async (params) => {
+        captured = params;
+        return completeOutcome("{}");
+      },
+    });
+    assert.isTrue(result.ok);
+    assert.deepEqual(captured.reasoning, {
+      provider: "deepseek",
+      level: "high",
+    });
+    assert.isAbove(captured.outputTokenLimit.tokens, 500);
+  });
+
   function capture(params: {
     model: string;
     apiBase: string;

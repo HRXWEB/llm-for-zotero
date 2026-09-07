@@ -4,6 +4,7 @@ export function createNativeLifecycleTestProcess(params: {
   newThreadIds: string[];
   requests: Array<{ method: string; params: Record<string, any> }>;
   deltaForTurn?: (turnNumber: number) => string;
+  beforeTurnCompleted?: (turnId: string) => Promise<void>;
   skillsListResult?: unknown;
   permissionProfilesResult?: unknown;
   resumeEffectiveSettings?: {
@@ -227,14 +228,13 @@ export function createNativeLifecycleTestProcess(params: {
               2,
             );
           }
-          setTimeout(
-            () =>
-              handleMessage({
-                method: "turn/completed",
-                params: { turn: { id: turnId, status: "completed" } },
-              }),
-            5,
-          );
+          setTimeout(async () => {
+            await params.beforeTurnCompleted?.(turnId);
+            handleMessage({
+              method: "turn/completed",
+              params: { turn: { id: turnId, status: "completed" } },
+            });
+          }, 5);
         }
       },
     },

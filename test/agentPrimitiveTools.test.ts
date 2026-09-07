@@ -1,3 +1,10 @@
+import { actionContractFixture } from "./helpers/semanticIntent";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import {
+  actionFixture,
+  classifiedFixture,
+  semanticFixture,
+} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { buildAgentInitialMessages as buildAgentInitialMessagesResolved } from "../src/agent/model/messageBuilder";
 import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../src/agent/services/zoteroGateway";
@@ -230,6 +237,28 @@ describe("primitive agent tools", function () {
     globalScope.Zotero = originalZotero;
   });
 
+  it("does not infer library scope or figure work from a forced skill when semantic intent requests chat", async function () {
+    const messages = await buildAgentInitialMessages(
+      {
+        conversationKey: 43_799,
+        mode: "agent",
+        conversationKind: "global",
+        userText: "Explain the available workflow without applying it",
+        model: "gpt-4o",
+        libraryID: 1,
+        forcedSkillIds: ["analyze-figures"],
+        classifiedIntent: classifiedFixture(),
+      },
+      [],
+      ["analyze-figures"],
+    );
+    const text = messages.map(messageText).join("\n");
+    assert.notInclude(
+      text,
+      "Treat the intended context as the whole Zotero library",
+    );
+    assert.notInclude(text, "This is a figure/table interpretation task");
+  });
   it("query_library searches items and enriches requested fields", async function () {
     const tool = createQueryLibraryTool({
       resolveLibraryID: () => 1,
@@ -2471,6 +2500,7 @@ describe("primitive agent tools", function () {
         conversationKey: 2,
         mode: "agent",
         userText: "can you help me tag these papers?",
+        classifiedIntent: actionFixture("apply_tags"),
       },
       registry.listToolDefinitions(),
       [],
@@ -3807,7 +3837,9 @@ describe("primitive agent tools", function () {
       },
       debug: () => undefined,
     };
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
     registry.register(
       createZoteroScriptTool({ allowUnsandboxedTestExecution: true }),
     );
@@ -3831,7 +3863,13 @@ env.log('updated');
 `,
         },
       },
-      baseContext,
+      {
+        ...baseContext,
+        request: {
+          ...baseContext.request,
+          actionContract: actionContractFixture("zotero_script_execute"),
+        },
+      },
     );
 
     assert.equal(prepared.kind, "result");

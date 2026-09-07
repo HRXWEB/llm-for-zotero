@@ -27,6 +27,37 @@ const contract = (
 
 export const catalog: Contract[] = [
   contract(
+    "semantic.compound",
+    "semantic",
+    "auto",
+    false,
+    "Move, summarize, and attach a finalized summary note with native evidence.",
+  ),
+  contract(
+    "semantic.compound-plan",
+    "semantic",
+    "auto",
+    false,
+    "Plan, approve, and execute the complete compound workflow with native evidence.",
+  ),
+  contract(
+    "semantic.transport",
+    "diagnostic",
+    "auto",
+    false,
+    "Read-only diagnostic: measure one semantic interpretation with the configured reasoning and a 180-second bounded transport; never execute its actions.",
+    [],
+    ["semantic-transport", "native-before", "native-after"],
+  ),
+  contract(
+    "semantic.filing",
+    "library",
+    "auto",
+    false,
+    "Folder, collection, and multilingual filing requests resolve the active paper and preserve all other memberships; repeated filing has a verified already-satisfied receipt.",
+  ),
+
+  contract(
     "paper.conversation",
     "paper",
     "auto",

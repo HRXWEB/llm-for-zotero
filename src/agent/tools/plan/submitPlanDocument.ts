@@ -1,3 +1,11 @@
+import {
+  requirePlanMaterialTask,
+  attachPlanMaterialEvidence,
+} from "../../plans/materialEvidence";
+import {
+  resolveMaterialOutput,
+  recordMaterialOutput,
+} from "../../documents/workflowMaterial";
 import type {
   AgentToolDefinition,
   AgentToolInputValidation,
@@ -219,6 +227,10 @@ function validateSubmitPlanDocument(
       return fail("groundingReviewed must record the completed model review");
     }
     return ok({
+      materialOutputId:
+        args.materialOutputId === undefined
+          ? undefined
+          : requiredString(args.materialOutputId, "materialOutputId"),
       title: requiredString(args.title, "title"),
       markdown: requiredString(args.markdown, "markdown"),
       citations: args.citations.map(parseCitation),
@@ -243,7 +255,7 @@ export function createSubmitDocumentTool(
     spec: {
       name: "submit_document",
       description:
-        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This terminal tool validates, persists, and publishes the exact document as the visible answer.",
+        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content. A workflow material output remains available for dependent save actions; a final document becomes the visible answer.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -257,6 +269,11 @@ export function createSubmitDocumentTool(
           "groundingIssues",
         ],
         properties: {
+          materialOutputId: {
+            type: "string",
+            description:
+              "The frozen material output ID when generating content for later workflow actions.",
+          },
           title: { type: "string" },
           markdown: { type: "string" },
           citations: {
@@ -426,7 +443,7 @@ export function createSubmitDocumentTool(
     guidance: {
       matches: (request) => request.documentOutcomePolicy?.required === true,
       instruction:
-        "This turn requires a document artifact, so do not stop with ordinary answer text. Finish the requested work and call submit_document exactly once. Write complete Markdown with natural headings. For a literature review include explicit scope and limitations coverage and put [[cite:C1]] tokens at supported claims. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. For other authored documents, citations are optional. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
+        "This turn requires durable authored content. For workflow material, first verify its prerequisite actions and read its source papers, then call submit_document with materialOutputId. Save the returned documentId through the authorized action without reconstructing its content. For a final document, finish the requested work and call submit_document once. Write complete Markdown with natural headings. For a literature review include explicit scope and limitations coverage and put [[cite:C1]] tokens at supported claims. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. For other authored documents, citations are optional. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
     planInvocation: () =>
@@ -441,8 +458,13 @@ export function createSubmitDocumentTool(
         throw new Error("submit_document is not authorized for this turn");
       }
       const plan = context.request.planContext;
+      const material = resolveMaterialOutput(
+        context.request,
+        input.materialOutputId,
+      );
+      if (material) await requirePlanMaterialTask(context.request, material.id);
       const { document } =
-        plan?.phase === "executing"
+        plan?.phase === "executing" && !material
           ? await (async () => {
               if (!plan.activeTaskId) {
                 throw new Error("No active plan task can accept the document");
@@ -464,6 +486,14 @@ export function createSubmitDocumentTool(
                 })(),
               input,
             });
+      if (material) {
+        recordMaterialOutput(context.request, material, document);
+        await attachPlanMaterialEvidence(
+          context.request,
+          material.id,
+          document,
+        );
+      }
       return {
         documentId: document.documentId,
         contentHash: document.contentHash,

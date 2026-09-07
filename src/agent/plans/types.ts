@@ -23,6 +23,7 @@ export type PlanCompletionRequirementKind =
   | "verified_read"
   | "bounded_reasoning"
   | "research_coverage"
+  | "material_integrity"
   | "document_integrity"
   | "document_published"
   | "mutation_receipts"
@@ -53,6 +54,8 @@ export type PlanStep = Readonly<{
   acceptanceCriteria: readonly (string | PlanAcceptanceCriterion)[];
   expectedCapability?: string;
   expectedEffect: PlanStepEffect;
+  actionIndexes?: readonly number[];
+  materialOutputId?: string;
   /** Authoritative for v3 plans. Legacy plans derive one requirement by effect. */
   completionRequirements?: readonly PlanCompletionRequirement[];
   targetBoundary?: Readonly<{
@@ -147,6 +150,7 @@ export type TaskEvidenceKind =
   | "validation"
   | "reasoning_assertion"
   | "research_coverage"
+  | "material_integrity"
   | "document_integrity"
   | "document_published"
   | "user_decision";
@@ -184,6 +188,13 @@ export type TaskEvidencePayload =
       candidateItems: number;
       deepReadCompleted: number;
       scopeLineageDigest?: string;
+    }>
+  | Readonly<{
+      type: "material_integrity";
+      materialOutputId: string;
+      documentId: string;
+      contentHash: string;
+      integrityValidated: true;
     }>
   | Readonly<{
       type: "document_integrity";
@@ -268,6 +279,8 @@ export type ExecutionTask = Readonly<{
   activeForm: string;
   acceptanceCriteria: readonly (string | PlanAcceptanceCriterion)[];
   expectedEffect: PlanStepEffect;
+  actionIndexes?: readonly number[];
+  materialOutputId?: string;
   completionRequirements?: readonly PlanCompletionRequirement[];
   expectedCapability?: string;
   obligationIds: readonly string[];

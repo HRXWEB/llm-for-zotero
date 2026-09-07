@@ -441,20 +441,7 @@ export function resolveDefaultTargets(
     )
     .map((entry) => entry.paper);
   const allPapers = scope.papers.map((entry) => entry.paper);
-  const userText = context.request.userText || "";
   const paperTargetIntent = context.request.classifiedIntent?.paperTargetIntent;
-  const requestsActivePaper =
-    /\b(?:this|the current|current|active)\s+(?:paper|article|study|document|pdf)\b/i.test(
-      userText,
-    );
-  const requestsAddedPapers =
-    /\b(?:the\s+)?(?:selected|added|attached)\s+(?:papers?|articles?|studies|documents?|pdfs?)\b/i.test(
-      userText,
-    );
-  const requestsAllVisiblePapers =
-    /\b(?:these|both|all(?:\s+of\s+the)?)\s+(?:papers?|articles?|studies|documents?|pdfs?)\b/i.test(
-      userText,
-    );
   const classifiedTargets =
     paperTargetIntent === "active"
       ? activePaper
@@ -471,28 +458,7 @@ export function resolveDefaultTargets(
               ? [activePaper]
               : allPapers
             : undefined;
-  const legacySummarizeTargets =
-    paperTargetIntent === undefined &&
-    context.request.classifiedIntent?.retrievalIntent === "summarize" &&
-    allPapers.length > 1
-      ? allPapers
-      : undefined;
-  // A failed classifier leaves classifiedIntent absent. In that degraded mode
-  // the English-only phrases above are the compatibility fallback, so requests
-  // expressed differently may require explicit target/targets selectors.
-  const heuristicTargets = requestsActivePaper
-    ? activePaper
-      ? [activePaper]
-      : []
-    : requestsAddedPapers
-      ? addedPapers
-      : requestsAllVisiblePapers
-        ? allPapers
-        : activePaper
-          ? [activePaper]
-          : allPapers;
-  const implicit =
-    classifiedTargets || legacySummarizeTargets || heuristicTargets;
+  const implicit = classifiedTargets || [];
   return dedupePaperContextRefs(implicit).slice(0, maxCount);
 }
 
@@ -502,15 +468,10 @@ export function resolveDefaultTargets(
 
 export type PdfVisualMode = "general" | "figure" | "equation";
 
-export function inferPdfMode(question: string | undefined): PdfVisualMode {
-  const text = `${question || ""}`.toLowerCase();
-  if (/\b(eq|equation|theorem|proof|formula|derivation)\b/.test(text)) {
-    return "equation";
-  }
-  if (/\b(fig|figure|table|diagram|chart|plot|graph|panel)\b/.test(text)) {
-    return "figure";
-  }
-  return "general";
+export function semanticPdfMode(
+  request: Pick<AgentToolContext["request"], "classifiedIntent">,
+): PdfVisualMode {
+  return request.classifiedIntent?.semantic?.visualMode || "general";
 }
 
 // ---------------------------------------------------------------------------

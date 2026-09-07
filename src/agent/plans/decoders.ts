@@ -1,3 +1,4 @@
+import { isActionIndexList } from "../contracts/workflowDependencies";
 import type {
   ExecutionTask,
   ExecutionTaskStatus,
@@ -88,6 +89,7 @@ const REQUIREMENT_KINDS = new Set<PlanCompletionRequirementKind>([
   "verified_read",
   "bounded_reasoning",
   "research_coverage",
+  "material_integrity",
   "document_integrity",
   "document_published",
   "mutation_receipts",
@@ -123,6 +125,7 @@ const EVIDENCE_KINDS = new Set<TaskEvidenceKind>([
   "validation",
   "reasoning_assertion",
   "research_coverage",
+  "material_integrity",
   "document_integrity",
   "document_published",
   "user_decision",
@@ -269,6 +272,15 @@ export function decodePlanStep(
     ),
     expectedCapability: optionalString(input.expectedCapability),
     expectedEffect: input.expectedEffect as PlanStepEffect,
+    actionIndexes:
+      input.actionIndexes === undefined
+        ? undefined
+        : (() => {
+            if (!isActionIndexList(input.actionIndexes))
+              throw new Error("Invalid plan action indexes");
+            return input.actionIndexes;
+          })(),
+    materialOutputId: optionalString(input.materialOutputId),
     completionRequirements: decodeRequirements(
       input.completionRequirements,
       `steps[${index}].completionRequirements`,
@@ -416,6 +428,15 @@ export function decodeExecutionTask(value: unknown): ExecutionTask {
       input.version === 2,
     ),
     expectedEffect: input.expectedEffect as PlanStepEffect,
+    actionIndexes:
+      input.actionIndexes === undefined
+        ? undefined
+        : (() => {
+            if (!isActionIndexList(input.actionIndexes))
+              throw new Error("Invalid plan action indexes");
+            return input.actionIndexes;
+          })(),
+    materialOutputId: optionalString(input.materialOutputId),
     completionRequirements: decodeRequirements(
       input.completionRequirements,
       "execution task completionRequirements",
@@ -731,6 +752,19 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
           rawPayload.deepReadCompleted,
           "evidence.payload.deepReadCompleted",
         ),
+      };
+    } else if (type === "material_integrity") {
+      if (rawPayload.integrityValidated !== true)
+        throw new Error("Workflow material integrity is not verified");
+      payload = {
+        type,
+        materialOutputId: requiredString(
+          rawPayload.materialOutputId,
+          "materialOutputId",
+        ),
+        documentId: requiredString(rawPayload.documentId, "documentId"),
+        contentHash: requiredString(rawPayload.contentHash, "contentHash"),
+        integrityValidated: true,
       };
     } else if (type === "document_integrity") {
       if (rawPayload.integrityValidated !== true) {

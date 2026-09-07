@@ -4,10 +4,6 @@ description: Structured scientific review with thematic synthesis and citations
 version: 6
 contexts: paper-set,library-corpus
 activation: auto
-match: /\b(literature review|lit review|review of (the )?literature)\b/i
-match: /\b(conduct|write|create|generate|draft)\b.*\b(review|synthesis|survey)\b.*\b(on|about|regarding|of)\b/i
-match: /\bconduct a literature review\b/i
-match: /\b(review|synthesize|survey)\b.*\b(research|papers?|studies|findings?|literature)\b/i
 ---
 
 <!--

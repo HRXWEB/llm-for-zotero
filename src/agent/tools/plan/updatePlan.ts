@@ -8,7 +8,6 @@ import {
 } from "../../plans/preparation";
 export {
   validateUpdatePlanInput,
-  extractExplicitResearchScopeCount,
   resolvePlanContract,
   type UpdatePlanInput,
 } from "../../plans/preparation";
@@ -287,6 +286,17 @@ export function createUpdatePlanTool(
               ],
               properties: {
                 planStepId: { type: "string" },
+                actionIndexes: {
+                  type: "array",
+                  items: { type: "integer", minimum: 0 },
+                  description:
+                    "For mutation steps, the exact zero-based requested action indexes this step fulfills.",
+                },
+                materialOutputId: {
+                  type: "string",
+                  description:
+                    "For an intermediate generated artifact, its ID from requested material outputs. Use verifier material_integrity; saving it is a later mutation step.",
+                },
                 content: {
                   type: "string",
                   description:
@@ -314,6 +324,7 @@ export function createUpdatePlanTool(
                         enum: [
                           "verified_read",
                           "research_coverage",
+                          "material_integrity",
                           "document_integrity",
                           "document_published",
                           "mutation_receipts",
@@ -343,7 +354,7 @@ export function createUpdatePlanTool(
     guidance: {
       matches: (request) => request.planContext?.phase === "planning",
       instruction:
-        "You are planning, not executing. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and three stable steps for an ordinary literature review: (1) read the frozen scope and build a durable understanding of every paper, (2) discover cross-paper relationships and construct the answer, and (3) publish the verified document. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. Use verifier verified_read on the reading step, research_coverage on the relationship-synthesis step, and document_integrity plus document_published on the final document step. When the user gives an exact bounded subset such as the first N sorted papers, resolve it with one bounded metadata query and use scope kind 'items' with exactly those itemKeys; library_search compact rows already contain itemKey, title, creator, and year, so omit include and never use zotero_script just to recover keys. Never freeze the containing collection or library instead. The frozen snapshot is authoritative, so do not add an execution step that re-enumerates or verifies it. For an ordinary literature review set reviewMode:'narrative', readingStrategy:'adaptive', criteria:[], requiredEvidenceDepth:'body', and estimatedDeepReadPapers:0. Adaptive means the host reads every accessible paper to the depth permitted by measured model capacity; never invent a paper quota. Use reviewMode:'scoping' when the user wants a field map. Use reviewMode:'systematic', readingStrategy:'selected', and explicit inclusion/exclusion criteria only when the user asks for formal eligibility screening, PRISMA-style selection, or another systematic method. Use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use mutation_receipts only on a mutation criterion and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
+        "You are planning, not executing. For an ordered workflow over known papers, omit investigation unless it requires open-ended research or corpus screening. Use deliverable completion_report, effects.libraryMutation:{approval:initial} (the host supplies the frozen contract), actionIndexes on mutation steps, and an intermediate artifact step with materialOutputId plus material_integrity before saving generated content. Do not recopy action parameters into effects. Use read-only Zotero/PDF/web/literature tools as needed. Never call a write, command, script, import, upload, or settings tool. Call update_plan with a composable contract and three stable steps for an ordinary literature review: (1) read the frozen scope and build a durable understanding of every paper, (2) discover cross-paper relationships and construct the answer, and (3) publish the verified document. Every acceptance criterion is {criterionId,description,verifier}; the host derives completion requirements, so never provide a separate requirement list. Use verifier verified_read on the reading step, research_coverage on the relationship-synthesis step, and document_integrity plus document_published on the final document step. When the user gives an exact bounded subset such as the first N sorted papers, resolve it with one bounded metadata query and use scope kind 'items' with exactly those itemKeys; library_search compact rows already contain itemKey, title, creator, and year, so omit include and never use zotero_script just to recover keys. Never freeze the containing collection or library instead. The frozen snapshot is authoritative, so do not add an execution step that re-enumerates or verifies it. For an ordinary literature review set reviewMode:'narrative', readingStrategy:'adaptive', criteria:[], requiredEvidenceDepth:'body', and estimatedDeepReadPapers:0. Adaptive means the host reads every accessible paper to the depth permitted by measured model capacity; never invent a paper quota. Use reviewMode:'scoping' when the user wants a field map. Use reviewMode:'systematic', readingStrategy:'selected', and explicit inclusion/exclusion criteria only when the user asks for formal eligibility screening, PRISMA-style selection, or another systematic method. Use deliverable:{kind:'document',spec:{kind:'literature_review',title,requiredSections,requiresReferences:true,requiresCoverageSection:true,allowFigures:false}}. Omit effects entirely unless the user explicitly requested a library write. A research-selected write must use effects.libraryMutation.approval='after_research' with summary, targetSelectionDescription, and action intents; never claim the initial plan authorizes unknown targets. Use mutation_receipts only on a mutation criterion and bounded_reasoning only for genuinely host-unverifiable bounded judgments. Set ready=true only after the plan is complete for review; the host freezes the exact Zotero corpus, research policy, and citation preferences.",
     },
     validate: validateUpdatePlanInput,
     planInvocation: () =>

@@ -19,6 +19,7 @@ const TERMINAL_TASK_STATUSES = new Set<ExecutionTaskStatus>([
  */
 const HOST_ADVANCED_REQUIREMENTS = new Set<PlanCompletionRequirementKind>([
   "verified_read",
+  "material_integrity",
   "research_coverage",
   "document_integrity",
   "document_published",

@@ -487,22 +487,43 @@ export function decodePlanDocument(value: unknown): PlanDocument {
   };
 }
 
+function decodeDocumentNoteBinding(
+  value: unknown,
+): DocumentActionState["savedNote"] {
+  if (value === undefined) return undefined;
+  const note = object(value, "document note binding");
+  return {
+    libraryID: number(note.libraryID, "note.libraryID"),
+    itemKey: string(note.itemKey, "note.itemKey"),
+    documentVersion:
+      note.documentVersion === undefined
+        ? undefined
+        : nonNegativeInteger(note.documentVersion, "note.documentVersion"),
+    contentHash:
+      note.contentHash === undefined
+        ? undefined
+        : string(note.contentHash, "note.contentHash"),
+    nativeContentHash:
+      note.nativeContentHash === undefined
+        ? undefined
+        : string(note.nativeContentHash, "note.nativeContentHash"),
+    parentItemId:
+      note.parentItemId === undefined
+        ? undefined
+        : number(note.parentItemId, "note.parentItemId"),
+    ...(note.finalized === undefined
+      ? {}
+      : { finalized: note.finalized === true }),
+  };
+}
 export function decodeDocumentActionState(value: unknown): DocumentActionState {
   const input = object(value, "document action state");
   if (input.version !== 1) throw new Error("Unsupported action state version");
-  const note =
-    input.savedNote === undefined
-      ? undefined
-      : object(input.savedNote, "savedNote");
   return {
     version: 1,
     documentId: string(input.documentId, "documentId"),
-    savedNote: note
-      ? {
-          libraryID: number(note.libraryID, "savedNote.libraryID"),
-          itemKey: string(note.itemKey, "savedNote.itemKey"),
-        }
-      : undefined,
+    savedNote: decodeDocumentNoteBinding(input.savedNote),
+    pendingNote: decodeDocumentNoteBinding(input.pendingNote),
     lastExportedAt:
       input.lastExportedAt === undefined
         ? undefined

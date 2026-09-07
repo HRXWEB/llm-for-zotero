@@ -1,8 +1,11 @@
+import {
+  classifiedFixture,
+  skillReceiptFixture,
+} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import {
   buildCodexNativeSkillInstructionBlock,
   buildCodexNativeSkillRequest,
-  clearCodexNativeSkillClassifierCache,
   resolveExplicitCodexNativeSkillIds,
   resolveCodexNativeSkills,
 } from "../src/codexAppServer/nativeSkills";
@@ -13,16 +16,12 @@ import {
 } from "../src/agent/skills";
 import type { AgentSkill } from "../src/agent/skills/skillLoader";
 
-function makeSkill(
-  id: string,
-  pattern: RegExp,
-  instruction: string,
-): AgentSkill {
+function makeSkill(id: string, instruction: string): AgentSkill {
   return {
     id,
     description: `${id} description`,
     version: 1,
-    patterns: [pattern],
+
     contexts: ["any"],
     activation: "auto",
     supersedes: [],
@@ -34,16 +33,43 @@ function makeSkill(
 describe("Codex native skills", function () {
   afterEach(function () {
     setUserSkills([]);
-    clearCodexNativeSkillClassifierCache();
   });
 
-  it("includes forced skill IDs even when classifier returns no match", async function () {
+  it("uses the host semantic selection despite conflicting request words", async function () {
     setUserSkills([
-      makeSkill("write-note", /write note/i, "Write-note instructions."),
-      makeSkill("compare-papers", /compare/i, "Compare instructions."),
+      makeSkill("write-note", "Write-note instructions."),
+      makeSkill("compare-papers", "Compare instructions."),
+    ]);
+    const result = await resolveCodexNativeSkills({
+      scope: { conversationKey: 1, libraryID: 7, kind: "global" },
+      userText: "compare",
+      model: "gpt-5.4",
+      classifiedIntent: classifiedFixture(),
+      skillRoutingReceipt: {
+        routerSchemaVersion: 1,
+        routerIdentityHash: "frozen",
+        skillManifestHash: "manifest",
+        skills: [
+          {
+            id: "write-note",
+            source: "explicit",
+            requestedScope: "none",
+            version: 1,
+            instructionHash: "hash",
+          },
+        ],
+      },
+    });
+    assert.deepEqual(result.matchedSkillIds, ["write-note"]);
+    assert.equal(result.resolutionSource, "semantic");
+  });
+
+  it("includes explicit skill selections without a second interpretation", async function () {
+    setUserSkills([
+      makeSkill("write-note", "Write-note instructions."),
+      makeSkill("compare-papers", "Compare instructions."),
     ]);
 
-    let classifierCalls = 0;
     const resolved = await resolveCodexNativeSkills({
       scope: {
         conversationKey: 1,
@@ -54,22 +80,17 @@ describe("Codex native skills", function () {
       model: "gpt-5.4",
       apiBase: "",
       skillContext: { forcedSkillIds: ["write-note"] },
-      detectSkillIntentImpl: async () => {
-        classifierCalls += 1;
-        return [];
-      },
     });
 
     assert.deepEqual(resolved.matchedSkillIds, ["write-note"]);
-    assert.equal(classifierCalls, 0);
     assert.include(resolved.instructionBlock, "Skill: write-note");
     assert.include(resolved.instructionBlock, "Write-note instructions.");
   });
 
   it("resolves only known explicit skill IDs in the user's selection order", function () {
     setUserSkills([
-      makeSkill("write-note", /write note/i, "Write-note instructions."),
-      makeSkill("compare-papers", /compare/i, "Compare instructions."),
+      makeSkill("write-note", "Write-note instructions."),
+      makeSkill("compare-papers", "Compare instructions."),
     ]);
 
     assert.deepEqual(
@@ -83,69 +104,8 @@ describe("Codex native skills", function () {
     );
   });
 
-  it("ignores regex metadata and uses only an explicitly supplied isolated classifier", async function () {
-    setUserSkills([
-      makeSkill("write-note", /note/i, "Write-note instructions."),
-      makeSkill("compare-papers", /compare/i, "Compare instructions."),
-    ]);
-
-    let classifierCalls = 0;
-    const resolved = await resolveCodexNativeSkills({
-      scope: {
-        conversationKey: 1,
-        libraryID: 7,
-        kind: "global",
-      },
-      userText: "Please compare these papers.",
-      model: "",
-      apiBase: "",
-      detectSkillIntentImpl: async () => {
-        classifierCalls += 1;
-        return ["write-note"];
-      },
-    });
-
-    assert.deepEqual(resolved.matchedSkillIds, ["write-note"]);
-    assert.equal(classifierCalls, 1);
-    assert.include(resolved.instructionBlock, "Skill: write-note");
-    assert.notInclude(resolved.instructionBlock, "Skill: compare-papers");
-  });
-
-  it("uses cached classifier fallback for ambiguous multilingual skill turns", async function () {
-    setUserSkills([
-      makeSkill("write-note", /write note/i, "Write-note instructions."),
-    ]);
-    let classifierCalls = 0;
-    const params = {
-      scope: {
-        conversationKey: 1,
-        libraryID: 7,
-        kind: "global" as const,
-        activeNoteId: 42,
-        activeNoteTitle: "Draft",
-      },
-      userText: "帮我整理一下",
-      model: "gpt-5.4",
-      apiBase: "",
-      detectSkillIntentImpl: async () => {
-        classifierCalls += 1;
-        return ["write-note"];
-      },
-    };
-
-    const first = await resolveCodexNativeSkills(params);
-    const second = await resolveCodexNativeSkills(params);
-
-    assert.deepEqual(first.matchedSkillIds, ["write-note"]);
-    assert.deepEqual(second.matchedSkillIds, ["write-note"]);
-    assert.equal(classifierCalls, 1);
-    assert.equal(second.resolutionSource, "cache");
-  });
-
-  it("fails closed when Codex has no proven isolated classifier adapter", async function () {
-    setUserSkills([
-      makeSkill("compare-papers", /compare/i, "Compare instructions."),
-    ]);
+  it("does not infer automatic skills when host semantic state is absent", async function () {
+    setUserSkills([makeSkill("compare-papers", "Compare instructions.")]);
     const resolved = await resolveCodexNativeSkills({
       scope: { conversationKey: 1, libraryID: 7, kind: "global" },
       userText: "compare these papers",
@@ -192,7 +152,8 @@ describe("Codex native skills", function () {
       userText: "summarize this paper",
       model: "",
       apiBase: "",
-      detectSkillIntentImpl: async () => ["simple-paper-qa"],
+      classifiedIntent: classifiedFixture(),
+      skillRoutingReceipt: skillReceiptFixture(["simple-paper-qa"]),
     });
     assert.deepEqual(paperTurn.matchedSkillIds, ["simple-paper-qa"]);
 
@@ -205,7 +166,8 @@ describe("Codex native skills", function () {
       userText: "summarize my library",
       model: "",
       apiBase: "",
-      detectSkillIntentImpl: async () => ["library-analysis"],
+      classifiedIntent: classifiedFixture(),
+      skillRoutingReceipt: skillReceiptFixture(["library-analysis"]),
     });
     assert.deepEqual(libraryTurn.matchedSkillIds, ["library-analysis"]);
   });
@@ -231,7 +193,8 @@ describe("Codex native skills", function () {
           },
         ],
       },
-      detectSkillIntentImpl: async () => ["compare-papers"],
+      classifiedIntent: classifiedFixture(),
+      skillRoutingReceipt: skillReceiptFixture(["compare-papers"]),
     });
 
     assert.deepEqual(resolved.matchedSkillIds, ["compare-papers"]);
@@ -262,7 +225,8 @@ describe("Codex native skills", function () {
           },
         ],
       },
-      detectSkillIntentImpl: async () => ["evidence-based-qa"],
+      classifiedIntent: classifiedFixture(),
+      skillRoutingReceipt: skillReceiptFixture(["evidence-based-qa"]),
     });
 
     assert.deepEqual(resolved.matchedSkillIds, ["evidence-based-qa"]);
@@ -356,7 +320,7 @@ describe("Codex native skills", function () {
     });
     const block = buildCodexNativeSkillInstructionBlock(
       ["simple-paper-qa"],
-      [makeSkill("simple-paper-qa", /summarize/i, "Call paper_read overview.")],
+      [makeSkill("simple-paper-qa", "Call paper_read overview.")],
       { rawPdfMode: true },
     );
 
@@ -393,7 +357,6 @@ describe("Codex native skills", function () {
     const managedEnd = "<!-- LLM-FOR-ZOTERO:MANAGED-END -->";
     const customized = makeSkill(
       "write-note",
-      /note/i,
       [
         managedBegin,
         "Default filename pattern: default-pattern.md",
@@ -406,7 +369,6 @@ describe("Codex native skills", function () {
     );
     const plain = makeSkill(
       "simple-paper-qa",
-      /summarize/i,
       [managedBegin, "Managed-only instructions.", managedEnd].join("\n"),
     );
 

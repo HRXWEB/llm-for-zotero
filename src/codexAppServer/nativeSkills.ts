@@ -16,13 +16,7 @@ import { resolveAgentRuntimeRequest } from "../agent/context/resolvedAgentReques
 import type { AgentSkill } from "../agent/skills";
 import { getAllSkills, getMatchedSkillIds } from "../agent/skills";
 import { getSkillCustomizationNotice } from "../agent/skills/managedBlock";
-import { detectSkillIntent } from "../agent/model/skillClassifier";
 import { RAW_PDF_TRANSPORT_POLICY_BLOCK } from "../agent/context/rawPdfTransportPolicy";
-import type { CodexNativeSkillRoutingMode } from "./prefs";
-
-const CLASSIFIER_CACHE_MAX_ENTRIES = 200;
-
-const classifierCache = new Map<string, string[]>();
 
 export type CodexNativeSkillScope = {
   profileSignature?: string;
@@ -63,7 +57,7 @@ export type CodexNativeResolvedSkills = {
   request: AgentRuntimeRequest;
   matchedSkillIds: string[];
   instructionBlock: string;
-  resolutionSource?: "none" | "deterministic" | "classifier" | "cache";
+  resolutionSource?: "none" | "explicit" | "semantic";
 };
 
 type ResolveNativeSkillsParams = {
@@ -73,12 +67,9 @@ type ResolveNativeSkillsParams = {
   apiBase?: string;
   signal?: AbortSignal;
   skillContext?: CodexNativeSkillContext;
-  detectSkillIntentImpl?: typeof detectSkillIntent;
+  classifiedIntent?: AgentRuntimeRequest["classifiedIntent"];
+  skillRoutingReceipt?: AgentRuntimeRequest["skillRoutingReceipt"];
 };
-
-export function clearCodexNativeSkillClassifierCache(): void {
-  classifierCache.clear();
-}
 
 export function resolveExplicitCodexNativeSkillIds(
   forcedSkillIds: ReadonlyArray<string>,
@@ -87,104 +78,6 @@ export function resolveExplicitCodexNativeSkillIds(
   return Array.from(
     new Set(forcedSkillIds.filter((skillId) => knownSkillIds.has(skillId))),
   );
-}
-
-function uniqueInSkillOrder(
-  ids: ReadonlySet<string>,
-  allSkills: ReadonlyArray<AgentSkill>,
-): string[] {
-  return allSkills
-    .filter((skill) => ids.has(skill.id))
-    .map((skill) => skill.id);
-}
-
-export function resolveDeterministicCodexNativeSkillIds(params: {
-  request: AgentRuntimeRequest;
-  allSkills?: ReadonlyArray<AgentSkill>;
-}): string[] {
-  const allSkills = params.allSkills || getAllSkills();
-  if (!allSkills.length) return [];
-  const matched = new Set(
-    resolveExplicitCodexNativeSkillIds(params.request.forcedSkillIds || []),
-  );
-  return uniqueInSkillOrder(matched, allSkills);
-}
-
-export function shouldUseCodexNativeSkillClassifierFallback(params: {
-  mode?: CodexNativeSkillRoutingMode;
-  request: AgentRuntimeRequest;
-  allSkills?: ReadonlyArray<AgentSkill>;
-  deterministicSkillIds?: ReadonlyArray<string>;
-}): boolean {
-  const allSkills = params.allSkills || getAllSkills();
-  if (!allSkills.length) return false;
-  if (params.deterministicSkillIds?.length) return false;
-  return (
-    params.mode === "classifier" &&
-    Boolean((params.request.userText || "").trim())
-  );
-}
-
-function buildSkillVersionSignature(
-  allSkills: ReadonlyArray<AgentSkill>,
-): string {
-  return allSkills
-    .map((skill) =>
-      [
-        skill.id,
-        skill.version,
-        skill.source,
-        skill.description,
-        [...skill.contexts].sort().join("|"),
-        [...(skill.supersedes || [])].sort().join("|"),
-        skill.instruction,
-      ].join(":"),
-    )
-    .sort()
-    .join(";");
-}
-
-export function buildCodexNativeSkillClassifierCacheKey(params: {
-  request: AgentRuntimeRequest;
-  allSkills?: ReadonlyArray<AgentSkill>;
-}): string {
-  const request = params.request;
-  const allSkills = params.allSkills || getAllSkills();
-  return JSON.stringify({
-    prompt: request.userText || "",
-    context: {
-      activeNote: Boolean(request.activeNoteContext),
-      selectedTextSources: Array.from(
-        new Set(request.selectedTextSources || []),
-      ).sort(),
-      selectedTextCount: request.selectedTexts?.length || 0,
-      selectedPaperCount: request.turnPaperScope.papers.filter((entry) =>
-        entry.roles.includes("selected"),
-      ).length,
-      fullTextPaperCount: request.turnPaperScope.papers.filter((entry) =>
-        entry.roles.includes("full_text"),
-      ).length,
-      pinnedPaperCount: request.turnPaperScope.papers.filter((entry) =>
-        entry.roles.includes("pinned"),
-      ).length,
-      collectionCount: request.turnPaperScope.collections.length,
-      tagCount: request.turnPaperScope.tags.length,
-      screenshotCount: request.screenshots?.length || 0,
-      attachmentTypes: Array.from(
-        new Set(
-          (request.attachments || []).map((attachment) => attachment.category),
-        ),
-      ).sort(),
-    },
-    skills: buildSkillVersionSignature(allSkills),
-  });
-}
-
-function setClassifierCache(key: string, value: string[]): void {
-  classifierCache.set(key, [...value]);
-  if (classifierCache.size <= CLASSIFIER_CACHE_MAX_ENTRIES) return;
-  const firstKey = classifierCache.keys().next().value;
-  if (firstKey) classifierCache.delete(firstKey);
 }
 
 function normalizeList<T>(value: readonly T[] | undefined): T[] | undefined {
@@ -225,7 +118,7 @@ function buildScopeActiveNoteContext(
 }
 
 export function buildCodexNativeSkillRequest(
-  params: Omit<ResolveNativeSkillsParams, "signal" | "detectSkillIntentImpl">,
+  params: Omit<ResolveNativeSkillsParams, "signal">,
 ): AgentRuntimeRequest {
   const { scope, skillContext } = params;
   const scopePapers = buildScopePaperContexts(scope);
@@ -233,6 +126,8 @@ export function buildCodexNativeSkillRequest(
     conversationKey: scope.conversationKey,
     mode: "agent",
     userText: params.userText,
+    classifiedIntent: params.classifiedIntent,
+    skillRoutingReceipt: params.skillRoutingReceipt,
     activeItemId: scope.activeItemId || scope.paperItemID,
     libraryID: scope.libraryID,
     conversationKind: scope.kind === "paper" ? "paper" : "global",
@@ -304,76 +199,10 @@ export async function resolveCodexNativeSkills(
   const request = buildCodexNativeSkillRequest(params);
   const rawPdfMode = Boolean(params.skillContext?.localDocuments?.length);
   const allSkills = getAllSkills();
-  if (!allSkills.length) {
-    return {
-      request,
-      matchedSkillIds: [],
-      instructionBlock: "",
-      resolutionSource: "none",
-    };
-  }
-  const deterministicSkillIds = resolveDeterministicCodexNativeSkillIds({
-    request,
-    allSkills,
-  });
-  if (deterministicSkillIds.length) {
-    return {
-      request,
-      matchedSkillIds: deterministicSkillIds,
-      instructionBlock: buildCodexNativeSkillInstructionBlock(
-        deterministicSkillIds,
-        allSkills,
-        { rawPdfMode },
-      ),
-      resolutionSource: "deterministic",
-    };
-  }
-
-  if (
-    !shouldUseCodexNativeSkillClassifierFallback({
-      // Codex currently cannot prove a truly no-tools classifier thread.
-      // Automatic routing therefore remains unavailable unless a caller
-      // supplies an isolated classifier adapter explicitly.
-      mode: params.detectSkillIntentImpl ? "classifier" : "deterministic",
-      request,
-      allSkills,
-      deterministicSkillIds,
-    })
-  ) {
-    return {
-      request,
-      matchedSkillIds: [],
-      instructionBlock: "",
-      resolutionSource: "none",
-    };
-  }
-
-  const cacheKey = buildCodexNativeSkillClassifierCacheKey({
-    request,
-    allSkills,
-  });
-  if (classifierCache.has(cacheKey)) {
-    const cachedSkillIds = classifierCache.get(cacheKey) || [];
-    return {
-      request,
-      matchedSkillIds: [...cachedSkillIds],
-      instructionBlock: buildCodexNativeSkillInstructionBlock(
-        cachedSkillIds,
-        allSkills,
-        { rawPdfMode },
-      ),
-      resolutionSource: "cache",
-    };
-  }
-
-  const classify = params.detectSkillIntentImpl || detectSkillIntent;
-  const classifiedSkillIds = await classify(
-    request,
-    [...allSkills],
-    params.signal,
-  );
-  const matchedSkillIds = getMatchedSkillIds(request, classifiedSkillIds);
-  setClassifierCache(cacheKey, matchedSkillIds);
+  const semanticIds = request.classifiedIntent?.semantic
+    ? request.skillRoutingReceipt?.skills.map((entry) => entry.id) || []
+    : [];
+  const matchedSkillIds = getMatchedSkillIds(request, semanticIds);
   return {
     request,
     matchedSkillIds,
@@ -382,6 +211,10 @@ export async function resolveCodexNativeSkills(
       allSkills,
       { rawPdfMode },
     ),
-    resolutionSource: "classifier",
+    resolutionSource: request.classifiedIntent?.semantic
+      ? "semantic"
+      : matchedSkillIds.length
+        ? "explicit"
+        : "none",
   };
 }

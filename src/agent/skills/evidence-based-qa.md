@@ -5,10 +5,6 @@ version: 7
 contexts: single-paper,paper-set,library-corpus
 activation: auto
 supersedes: simple-paper-qa
-match: /\b(what method|what approach|what technique|what model|how did they|how does it|what results?|what data|what dataset|what experiment|what metric|what performance|what accuracy|what baseline)\b/i
-match: /\b(find|locate|where|which section|which page|quote|passage|excerpt|evidence|proof|support|mention)\b.*\b(papers?|articles?|studies|texts?|documents?)\b/i
-match: /\b(does (this|the) paper|do the authors?)\b.*\b(mention|discuss|address|cover|report|describe|analyze|analyse|use|propose|introduce|present|evaluate|compare)\b/i
-match: /\b(specific|particular|exact|precise)\b.*\b(result|finding|number|figure|statistic|claim|statement)\b/i
 ---
 
 <!--

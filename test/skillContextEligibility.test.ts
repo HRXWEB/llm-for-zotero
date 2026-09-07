@@ -3,6 +3,7 @@ import {
   BUILTIN_SKILL_FILES,
   getMatchedSkillIds as getMatchedSkillIdsResolved,
   parseSkill,
+  getAllSkills,
   setUserSkills,
 } from "../src/agent/skills";
 import type {
@@ -210,7 +211,7 @@ describe("skill context eligibility", function () {
     );
   });
 
-  it("preserves legacy match metadata without using it for routing", function () {
+  it("discards legacy keyword rules while preserving readable skill instructions", function () {
     setUserSkills([
       parseSkill(
         [
@@ -225,6 +226,8 @@ describe("skill context eligibility", function () {
       ),
     ]);
 
+    assert.notProperty(getAllSkills()[0], "patterns");
+    assert.equal(getAllSkills()[0].instruction, "Custom instructions.");
     assert.notInclude(
       getMatchedSkillIds({ userText: "summarize anything" }),
       "custom-summary",

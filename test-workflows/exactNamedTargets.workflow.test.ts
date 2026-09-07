@@ -1,5 +1,10 @@
+import {
+  semanticContractFixture,
+  classifiedFixture,
+  semanticResponseFixture,
+} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
-import { detectTurnIntent } from "../src/agent/model/skillClassifier";
+import { detectTurnIntent } from "../src/agent/model/semanticIntentService";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -70,13 +75,13 @@ describe("workflow: exact named library targets", function () {
         conversationKind: "library",
         libraryID,
         userText: `Create Geometry and Memory under "${parent.name}" (${parent.id}). Add existing papers ${items[0].id} and ${items[2].id} to Geometry, and ${items[1].id} and ${items[2].id} to Memory. Preserve every pre-existing membership and tag. Do not create any papers or notes.`,
-        classifiedIntent: {
+        classifiedIntent: classifiedFixture({
           retrievalIntent: "none",
           wantedSections: [],
           writeDisposition: "required",
-          actionInterpretationSource: "classifier",
+          actionInterpretationSource: "semantic",
           actionIntents: intents,
-        },
+        }),
       });
       const contracts = new ActionContractService(new ZoteroGateway());
       request.actionContract = await contracts.createContract(request);
@@ -168,11 +173,11 @@ describe("workflow: exact named library targets", function () {
         conversationKind: "library",
         libraryID,
         userText: `Merge Geometry (${destinationIds[0]}) and Memory (${destinationIds[1]}) into geometry_memory under ${parent.id}. Preserve every paper, tag and unrelated membership; remove the old collection names.`,
-        classifiedIntent: {
+        classifiedIntent: classifiedFixture({
           retrievalIntent: "none",
           wantedSections: [],
           writeDisposition: "required",
-          actionInterpretationSource: "classifier",
+          actionInterpretationSource: "semantic",
           actionIntents: [
             {
               capability: "zotero.collections",
@@ -211,7 +216,7 @@ describe("workflow: exact named library targets", function () {
               },
             },
           ],
-        },
+        }),
       });
       mergeRequest.actionContract =
         await contracts.createContract(mergeRequest);
@@ -325,31 +330,28 @@ describe("workflow: exact named library targets", function () {
           ],
           {
             llmCall: async (params) => ({
-              text: String(params.prompt).includes(
-                "Classify only the exact mutation",
-              )
-                ? JSON.stringify({
-                    retrievalIntent: "none",
-                    wantedSections: [],
-                    writeDisposition: "required",
-                    actionIntents: [
-                      {
-                        operation: "set_item_tags",
-                        coverage: "some",
-                        targetKind: "papers",
-                        targetSelectors,
-                        parameters: { tags: ["coding", "drift"] },
-                      },
-                    ],
-                  })
-                : '{"schemaVersion":1,"taskKind":"write","requestedScopes":["library-corpus"],"selections":[],"retrievalIntent":"none","wantedSections":[]}',
+              text: JSON.stringify(
+                semanticResponseFixture({
+                  taskKind: "write",
+                  writeDisposition: "required",
+                  actionIntents: [
+                    {
+                      operation: "set_item_tags",
+                      coverage: "some",
+                      targetKind: "papers",
+                      targetSelectors,
+                      parameters: { tags: ["coding", "drift"] },
+                    },
+                  ],
+                }),
+              ),
               completion: { status: "complete" },
             }),
           },
         );
         assert.equal(
           routing.classifiedIntent?.actionInterpretationSource,
-          "classifier",
+          "semantic",
         );
         request.classifiedIntent = routing.classifiedIntent!;
         const contracts = new ActionContractService(new ZoteroGateway());
@@ -456,11 +458,11 @@ describe("workflow: exact named library targets", function () {
         conversationKind: "library",
         libraryID: items[0].libraryID,
         userText: `Move the paper titled "${items[0].getField("title")}" from "${collections[0].name}" to "${collections[1].name}". Preserve all other memberships.`,
-        classifiedIntent: {
+        classifiedIntent: classifiedFixture({
           retrievalIntent: "none",
           wantedSections: [],
           writeDisposition: "required",
-          actionInterpretationSource: "classifier",
+          actionInterpretationSource: "semantic",
           actionIntents: [
             {
               operation: "move_to_collection",
@@ -476,10 +478,15 @@ describe("workflow: exact named library targets", function () {
                 path: collections[0].name,
                 includeDescendants: false,
               },
+              scopeRole: "source",
+              parameters: {
+                destinationCollectionId: collections[1].id,
+                sourceCollectionId: collections[0].id,
+              },
               constraints: { collectionMode: "move" },
             },
           ],
-        },
+        }),
       });
       const contracts = new ActionContractService(new ZoteroGateway());
       request.actionContract = await contracts.createContract(request);

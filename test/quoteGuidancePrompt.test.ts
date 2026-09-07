@@ -1,3 +1,8 @@
+import {
+  actionFixture,
+  classifiedFixture,
+  semanticFixture,
+} from "./helpers/semanticIntent";
 import { readFileSync } from "node:fs";
 import { assert } from "chai";
 import { buildZoteroEnvironmentManifest } from "../src/codexAppServer/nativeClient";
@@ -106,6 +111,31 @@ describe("quote guidance prompts", function () {
     clearAgentEvidenceCache();
   });
 
+  it("does not turn an available full-text resource into a required read for semantic filing", async function () {
+    const messages = await buildAgentInitialMessages(
+      request({
+        userText: "File this paper in Bayesian",
+        classifiedIntent: actionFixture("move_to_collection", undefined, {
+          reading: { source: "metadata", coverage: "overview" },
+        }),
+        fullTextPaperContexts: [
+          {
+            itemId: 10,
+            contextItemId: 12,
+            libraryID: 1,
+            title: "Available paper",
+            mineruCacheDir: "/tmp/cache",
+          },
+        ],
+      }),
+      [],
+      [],
+    );
+    assert.notInclude(
+      messages.map((message) => message.content).join("\n"),
+      "your very first action MUST be",
+    );
+  });
   it("preserves the proven evidence wording inside one canonical contract", function () {
     assert.include(PAPER_CITATION_CONTRACT, BALANCED_EVIDENCE_GUIDANCE);
     assert.equal(fingerprintText(PAPER_CITATION_CONTRACT), "fnv1a32-61855269");
@@ -268,7 +298,7 @@ describe("quote guidance prompts", function () {
     }
   });
 
-  it("injects figure guidance only for figure intent or the matched figure skill", async function () {
+  it("injects figure task guidance only for semantic figure intent", async function () {
     const paperContext: PaperContextRef = {
       ...paper(),
       title: "Figure Paper",
@@ -292,6 +322,9 @@ describe("quote guidance prompts", function () {
     const intentMatched = await buildAgentInitialMessages(
       request({
         userText: "Explain Figure 1.",
+        classifiedIntent: classifiedFixture({
+          semantic: semanticFixture({ visualMode: "figure" }),
+        }),
         selectedPaperContexts: [paperContext],
         fullTextPaperContexts: [],
       }),
@@ -304,7 +337,7 @@ describe("quote guidance prompts", function () {
       ["analyze-figures"],
     );
 
-    for (const messages of [unmatched, conceptualGraphQuestion]) {
+    for (const messages of [unmatched, conceptualGraphQuestion, matched]) {
       const unmatchedText = messages
         .map((message) => message.content)
         .join("\n");
@@ -312,7 +345,7 @@ describe("quote guidance prompts", function () {
       assert.notInclude(unmatchedText, "For figure workflows");
       assert.notInclude(unmatchedText, "paper_read({ mode:'figures'");
     }
-    for (const messages of [intentMatched, matched]) {
+    for (const messages of [intentMatched]) {
       const matchedText = messages.map((message) => message.content).join("\n");
       assert.include(matchedText, "paper_read({ mode:'figures'");
       assert.include(matchedText, "precise PDF crops");
@@ -323,7 +356,7 @@ describe("quote guidance prompts", function () {
   it("describes image support generically without naming model vendors", function () {
     const text = readSkill("../src/agent/skills/analyze-figures.md");
 
-    assert.include(text, "Visual models");
+    assert.include(text, "A model without image capability");
     for (const modelName of ["GPT-4o", "Codex", "Claude", "Gemini"]) {
       assert.notInclude(text, modelName);
     }

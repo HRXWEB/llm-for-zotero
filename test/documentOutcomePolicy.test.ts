@@ -1,3 +1,5 @@
+import { classifiedFixture } from "./helpers/semanticIntent";
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { resolveDocumentOutcomePolicy } from "../src/agent/documents/outcomePolicy";
@@ -13,6 +15,18 @@ function request(userText: string, extra: Record<string, unknown> = {}) {
 }
 
 describe("DocumentOutcomePolicy", function () {
+  it("never lets a selected skill override the shared semantic deliverable", function () {
+    for (const selected of [[], ["literature-review"]]) {
+      const policy = resolveDocumentOutcomePolicy({
+        request: request("Discuss how reviews are written", {
+          forcedSkillIds: selected,
+          classifiedIntent: classifiedFixture({ deliverableIntent: "chat" }),
+        }),
+      });
+      assert.isFalse(policy.required);
+    }
+  });
+
   it("does not require a second document when creating a note on or about a source paper", function () {
     for (const text of [
       'Create one new child note on this paper titled "Note card live review" with a short paragraph, two bullet points, and one exact source quotation. I authorize creation of this new note now.',
@@ -22,7 +36,6 @@ describe("DocumentOutcomePolicy", function () {
       assert.isFalse(
         resolveDocumentOutcomePolicy({
           request: request(text),
-          matchedSkillIds: ["write-note"],
         }).required,
         text,
       );
@@ -30,8 +43,13 @@ describe("DocumentOutcomePolicy", function () {
       resolveDocumentOutcomePolicy({
         request: request(
           "Write a report about this paper and save it as a note.",
+          {
+            classifiedIntent: classifiedFixture({
+              deliverableIntent: "document",
+              documentKind: "report",
+            }),
+          },
         ),
-        matchedSkillIds: ["write-note"],
       }).required,
     );
   });
@@ -47,7 +65,6 @@ describe("DocumentOutcomePolicy", function () {
           provider: "original",
         },
       }),
-      matchedSkillIds: ["literature-review"],
       plannedDocumentKind: "literature_review",
       plannedResearch: true,
     });
@@ -71,7 +88,6 @@ describe("DocumentOutcomePolicy", function () {
           provider: "original",
         },
       }),
-      matchedSkillIds: ["literature-review"],
     });
     assert.isFalse(policy.required);
   });
@@ -82,8 +98,12 @@ describe("DocumentOutcomePolicy", function () {
       ["Write a literature review about representational drift", []],
     ] as const) {
       const policy = resolveDocumentOutcomePolicy({
-        request: request(text),
-        matchedSkillIds: skills,
+        request: request(text, {
+          classifiedIntent: classifiedFixture({
+            deliverableIntent: "document",
+            documentKind: "literature_review",
+          }),
+        }),
       });
       assert.isTrue(policy.required);
       assert.equal(policy.documentKind, "literature_review");
@@ -93,8 +113,12 @@ describe("DocumentOutcomePolicy", function () {
 
   it("uses lighter authored validation for explicit document writing", function () {
     const policy = resolveDocumentOutcomePolicy({
-      request: request("Please prepare a guide for our lab workflow"),
-      matchedSkillIds: [],
+      request: request("Please prepare a guide for our lab workflow", {
+        classifiedIntent: classifiedFixture({
+          deliverableIntent: "document",
+          documentKind: "guide",
+        }),
+      }),
     });
     assert.deepInclude(policy, {
       required: true,
@@ -113,7 +137,6 @@ describe("DocumentOutcomePolicy", function () {
     ]) {
       const policy = resolveDocumentOutcomePolicy({
         request: request(text),
-        matchedSkillIds: [],
       });
       assert.isFalse(policy.required, text);
     }
@@ -121,8 +144,12 @@ describe("DocumentOutcomePolicy", function () {
 
   it("keeps a directly requested research brief on authored validation", function () {
     const policy = resolveDocumentOutcomePolicy({
-      request: request("Write a research brief about this topic"),
-      matchedSkillIds: [],
+      request: request("Write a research brief about this topic", {
+        classifiedIntent: classifiedFixture({
+          deliverableIntent: "document",
+          documentKind: "research_brief",
+        }),
+      }),
     });
 
     assert.isTrue(policy.required);
@@ -134,6 +161,7 @@ describe("DocumentOutcomePolicy", function () {
     const policy = resolveDocumentOutcomePolicy({
       request: request("Create the requested deliverable", {
         classifiedIntent: {
+          semantic: semanticFixture(),
           retrievalIntent: "none",
           deliverableIntent: "document",
           documentKind: "report",
@@ -141,14 +169,12 @@ describe("DocumentOutcomePolicy", function () {
           actionIntents: [],
         },
       }),
-      matchedSkillIds: [],
     });
     assert.equal(policy.documentKind, "report");
     assert.equal(policy.integrityPolicy, "authored");
     assert.isFalse(
       resolveDocumentOutcomePolicy({
         request: request("Explain this briefly. ".repeat(500)),
-        matchedSkillIds: [],
       }).required,
     );
   });
@@ -163,7 +189,6 @@ describe("DocumentOutcomePolicy", function () {
           provider: "original",
         },
       }),
-      matchedSkillIds: ["literature-review"],
     });
     assert.isFalse(policy.required);
   });

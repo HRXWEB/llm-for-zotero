@@ -22,6 +22,66 @@ export type ContractEvaluation = {
   failure?: string;
 };
 
+/** Shared completion boundary for original and native provider turns. */
+export function evaluatePreparedActionContract(
+  request: Pick<
+    import("../types").AgentRuntimeRequest,
+    | "actionContract"
+    | "actionProgress"
+    | "actionPreparation"
+    | "classifiedIntent"
+  >,
+  receipts: AgentActionReceipt[],
+): ContractEvaluation {
+  if (
+    request.actionPreparation &&
+    request.actionPreparation.state !== "ready"
+  ) {
+    return {
+      state: "failed",
+      failure:
+        request.actionPreparation.issues.join(" ") ||
+        "Semantic action preparation is incomplete; completion cannot be verified.",
+    };
+  }
+  const contract = request.actionContract;
+  if (
+    !contract &&
+    request.actionPreparation?.state === "ready" &&
+    request.classifiedIntent?.semantic &&
+    request.classifiedIntent.writeDisposition === "none" &&
+    !request.classifiedIntent.actionIntents.length &&
+    !request.classifiedIntent.semantic.questions.length
+  )
+    return { state: "satisfied" };
+  if (contract?.version !== 4 || !contract.intent?.semantic) {
+    return {
+      state: "failed",
+      failure:
+        "A current semantic action contract is unavailable; no completed action can be claimed.",
+    };
+  }
+  const actions = evaluateActionContract(
+    contract,
+    receipts,
+    request.actionProgress,
+  );
+  const missingOutputs = (
+    contract.intent.semantic.materialOutputs || []
+  ).filter(
+    (output) =>
+      !request.actionProgress?.materialOutputs?.some(
+        (material) => material.outputId === output.id,
+      ),
+  );
+  if (missingOutputs.length && actions.state === "satisfied")
+    return {
+      state: "pending",
+      correction: `Finalize the remaining requested material with submit_document: ${missingOutputs.map((output) => output.id).join(", ")}. The earlier actions are already verified; do not repeat them.`,
+    };
+  return actions;
+}
+
 const ACTION_CORRECTION_GUIDANCE: Partial<
   Record<AgentActionCapability, string>
 > = {

@@ -1,3 +1,5 @@
+import { hasCurrentSemanticIntent } from "./model/semanticTransport";
+import { SemanticIntentService } from "./model/semanticIntentService";
 import { AgentToolRegistry } from "./tools/registry";
 import { readAttachmentBytes } from "../modules/contextPanel/attachmentStorage";
 import { encodeBytesBase64 } from "./model/shared";
@@ -59,14 +61,10 @@ import {
   normalizeHistoryMessages,
   renderAgentPromptEnvelope,
 } from "./model/messageBuilder";
-import { classifyWriteNoteDestination } from "./writeNoteDestination";
-import { WRITE_NOTE_SKILL_ID } from "./skills/noteIntent";
 import {
   detectTurnIntent,
-  inferActionIntentsFromRequest,
   resolvePlanSkillRoutingReceipt,
-} from "./model/skillClassifier";
-import { reconcileNoteDestinationActionIntents } from "./model/actionIntent";
+} from "./model/semanticIntentService";
 import { createUnverifiedReceipt } from "./contracts/actionEvaluation";
 import {
   ActionContractRunSession,
@@ -89,10 +87,7 @@ import {
   commitAgentCoverageActivities,
   hydrateAgentCoverageLedger,
 } from "./context/coverageLedger";
-import {
-  getNotesDirectoryConfig,
-  getNotesDirectoryNickname,
-} from "../utils/notesDirectoryConfig";
+import { getNotesDirectoryConfig } from "../utils/notesDirectoryConfig";
 import {
   buildAgentContextBudgetState,
   resolveAgentContextBudgetPolicy,
@@ -153,6 +148,7 @@ type AgentRuntimeDeps = {
   adapterFactory: (request: ResolvedAgentRuntimeRequest) => AgentModelAdapter;
   paperContextResolver?: AgentRequestPaperContextResolver;
   now?: () => number;
+  semanticInterpreter?: Pick<SemanticIntentService, "interpret">;
 };
 
 type PendingConfirmation = {
@@ -688,21 +684,6 @@ function filterTransientRecoveryTool<T extends { name: string }>(
   return tools.filter((tool) => tool.name !== TOOL_RESULT_READ_TOOL_NAME);
 }
 
-function writeNoteDestinationForRequest(
-  request: AgentRuntimeRequest,
-  matchedSkills: ReadonlyArray<string>,
-): import("./writeNoteDestination").WriteNoteDestination {
-  const activeSkillIds = new Set([
-    ...matchedSkills,
-    ...(request.forcedSkillIds || []),
-  ]);
-  if (!activeSkillIds.has(WRITE_NOTE_SKILL_ID)) return "none";
-  return classifyWriteNoteDestination(
-    request.userText,
-    getNotesDirectoryNickname(),
-  );
-}
-
 function stabilizeProgressValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stabilizeProgressValue);
   if (!value || typeof value !== "object") return value;
@@ -748,7 +729,14 @@ export class AgentRuntime {
     PendingConfirmation
   >();
 
+  private readonly semanticInterpreter: Pick<
+    SemanticIntentService,
+    "interpret"
+  >;
+
   constructor(deps: AgentRuntimeDeps) {
+    this.semanticInterpreter =
+      deps.semanticInterpreter || new SemanticIntentService();
     this.registry = deps.registry;
     this.adapterFactory = deps.adapterFactory;
     this.paperContextResolver = deps.paperContextResolver;
@@ -773,31 +761,85 @@ export class AgentRuntime {
     return this.registry.unregister(name);
   }
 
-  async createActionContractForRequest(
+  async prepareSemanticRequest(
     requestInput: AgentRuntimeRequestInput | AgentRuntimeRequest,
-  ): Promise<AgentRuntimeRequest["actionContract"]> {
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AgentRuntimeRequest> {
     const request =
       "turnPaperScope" in requestInput
         ? requestInput
         : resolveAgentRuntimeRequest(requestInput, {
             resolvePaperContext: this.paperContextResolver,
           });
-    if (request.actionContract) return request.actionContract;
-    if (!request.classifiedIntent) {
-      const actions = inferActionIntentsFromRequest(request);
-      request.classifiedIntent = {
-        retrievalIntent: "none",
-        wantedSections: [],
-        writeDisposition: actions.some(
-          (intent) => intent.operation !== "read_full",
-        )
-          ? "required"
-          : "none",
-        actionInterpretationSource: "deterministic_fallback",
-        actionIntents: actions,
-      };
+    if (request.planContext?.phase === "executing") {
+      const plan = request.planContext;
+      const artifact = await loadPlanArtifact(plan.planId, plan.revision);
+      if (
+        !artifact ||
+        artifact.digest !== plan.approvedDigest ||
+        artifact.status !== "approved"
+      )
+        throw new Error(
+          "The approved plan is unavailable or changed. No action was authorized.",
+        );
+      request.actionContract = artifact.actionContract;
+      request.classifiedIntent = artifact.actionContract?.intent;
+    } else if (!(await hasCurrentSemanticIntent(request))) {
+      request.actionContract = undefined;
+      request.actionProgress = undefined;
+      request.actionPreparation = { state: "interpreting", issues: [] };
+      const result = await this.semanticInterpreter.interpret(
+        request,
+        getAllSkills(),
+        options,
+      );
+      request.classifiedIntent = result.classifiedIntent || undefined;
+      request.skillRoutingReceipt = result.routingReceipt;
+      if (!result.classifiedIntent) {
+        request.actionPreparation = {
+          state: "unavailable",
+          issues: ["Semantic interpretation is unavailable."],
+        };
+        throw new Error(
+          `Semantic interpretation is unavailable (${result.failureReason || "unknown"}${result.failureStatus ? ` HTTP ${result.failureStatus}` : ""}${result.failureStage ? `: ${result.failureStage}` : ""}). No action was authorized.`,
+        );
+      }
     }
-    return (await this.registry.createActionContract(request)) || undefined;
+    if (options.signal?.aborted)
+      throw new Error("Semantic preparation was cancelled.");
+    const intent = request.classifiedIntent?.semantic;
+    const boundIntent = request.actionContract?.intent?.semantic;
+    if (
+      request.actionPreparation?.state === "ready" &&
+      request.actionContract?.version === 4 &&
+      intent &&
+      boundIntent &&
+      boundIntent.id === intent.id &&
+      boundIntent.revision === intent.revision &&
+      boundIntent.inputDigest === intent.inputDigest &&
+      request.actionProgress?.contractId === request.actionContract.id
+    )
+      return request;
+    const session = new ActionContractRunSession({
+      request,
+      contracts: this.registry,
+      emit: async () => {},
+    });
+    const initialized = await session.initialize({ checkpoint: null });
+    if (initialized.kind === "failed") throw new Error(initialized.userMessage);
+    return request;
+  }
+
+  async createActionContractForRequest(
+    requestInput: AgentRuntimeRequestInput | AgentRuntimeRequest,
+  ): Promise<AgentRuntimeRequest["actionContract"]> {
+    const request = await this.prepareSemanticRequest(requestInput);
+    Object.assign(requestInput, {
+      classifiedIntent: request.classifiedIntent,
+      actionPreparation: request.actionPreparation,
+      actionContract: request.actionContract,
+    });
+    return request.actionContract;
   }
 
   getCapabilities(request: AgentRuntimeRequestInput) {
@@ -1026,31 +1068,48 @@ export class AgentRuntime {
         }
         turnIntent = {
           skillIds: reused.skillIds,
-          classifiedIntent: null,
+          classifiedIntent:
+            approvedPlanArtifact?.actionContract?.intent || null,
           degraded: false,
         };
+      } else if (await hasCurrentSemanticIntent(request)) {
+        turnIntent = {
+          skillIds:
+            request.skillRoutingReceipt?.skills.map((skill) => skill.id) || [],
+          classifiedIntent: preclassifiedIntent || null,
+          degraded: false,
+          routingReceipt: request.skillRoutingReceipt,
+        };
       } else {
-        turnIntent = await detectTurnIntent(request, getAllSkills(), {
-          signal: params.signal,
-        });
+        request.actionContract = undefined;
+        request.actionProgress = undefined;
+        request.actionPreparation = { state: "interpreting", issues: [] };
+        turnIntent = await this.semanticInterpreter.interpret(
+          request,
+          getAllSkills(),
+          {
+            signal: params.signal,
+          },
+        );
       }
-      if (!preclassifiedIntent && turnIntent.classifiedIntent) {
-        request.classifiedIntent = turnIntent.classifiedIntent;
-      } else if (!preclassifiedIntent && !turnIntent.classifiedIntent) {
-        const fallbackActions = inferActionIntentsFromRequest(request);
-        if (fallbackActions.length) {
-          request.classifiedIntent = {
-            retrievalIntent: "none",
-            wantedSections: [],
-            writeDisposition: fallbackActions.some(
-              (intent) => intent.operation !== "read_full",
-            )
-              ? "required"
-              : "none",
-            actionInterpretationSource: "deterministic_fallback",
-            actionIntents: fallbackActions,
-          };
-        }
+      request.classifiedIntent = turnIntent.classifiedIntent || undefined;
+      if (
+        !request.classifiedIntent?.semantic &&
+        request.planContext?.phase !== "executing"
+      ) {
+        await emit({
+          type: "provider_event",
+          providerType: "agent_semantic_unavailable",
+          payload: {
+            reason: turnIntent.failureReason,
+            status: turnIntent.failureStatus,
+            rejectedResponses: turnIntent.rejectedResponses || [],
+            authority: "none",
+          },
+        });
+        throw new Error(
+          `Semantic interpretation is unavailable (${turnIntent.failureReason || "unknown"}${turnIntent.failureStatus ? ` HTTP ${turnIntent.failureStatus}` : ""}${turnIntent.failureStage ? `: ${turnIntent.failureStage}` : ""}). Actions are paused; retry after resolving the interpretation failure.`,
+        );
       }
       request.skillRoutingReceipt = turnIntent.routingReceipt;
       if (turnIntent.degraded) {
@@ -1070,7 +1129,6 @@ export class AgentRuntime {
           : undefined;
       request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
         request,
-        matchedSkillIds: matchedSkills,
         plannedDocumentKind: plannedSpec?.kind,
         plannedResearch: Boolean(approvedPlanArtifact?.contract?.investigation),
       });
@@ -1282,64 +1340,11 @@ export class AgentRuntime {
       }
 
       const requestIntent = classifyRequest(request);
-      const noteDestination = writeNoteDestinationForRequest(
-        request,
-        matchedSkills,
-      );
-      if (noteDestination !== "none" && !request.classifiedIntent) {
-        request.classifiedIntent = {
-          retrievalIntent: "none",
-          wantedSections: [],
-          writeDisposition: "required",
-          actionInterpretationSource: "deterministic_fallback",
-          actionIntents: [],
-        };
-      }
-      if (
-        noteDestination !== "none" &&
-        request.classifiedIntent!.actionInterpretationSource !== "classifier"
-      ) {
-        request.classifiedIntent!.actionIntents =
-          reconcileNoteDestinationActionIntents(
-            request.classifiedIntent!.actionIntents,
-            noteDestination,
-          );
-        request.classifiedIntent!.writeDisposition = "required";
-      }
       const requiresFileNoteWrite = Boolean(
         request.classifiedIntent?.actionIntents?.some(
           (intent) => intent.operation === "file_write",
         ),
       );
-      const hasPaperReadScope =
-        request.conversationKind === "paper" ||
-        Boolean(request.activeItemId) ||
-        request.turnPaperScope.papers.length > 0;
-      if (requestIntent.requiresFullPaperRead && hasPaperReadScope) {
-        if (!request.classifiedIntent) {
-          request.classifiedIntent = {
-            retrievalIntent: "none",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionInterpretationSource: "deterministic_fallback",
-            actionIntents: [],
-          };
-        }
-        if (
-          !request.classifiedIntent.actionIntents.some(
-            (action) => action.constraints?.readMode === "full",
-          )
-        ) {
-          request.classifiedIntent.actionIntents.push({
-            capability: "zotero.read",
-            operation: "read_full",
-            proofDomain: "zotero_state",
-            coverage: "all",
-            targetKind: "papers",
-            constraints: { readMode: "full" },
-          });
-        }
-      }
       const planInitialization = await activePlanSession.initialize();
       if (planInitialization.kind === "failed") {
         const text = planInitialization.userMessage;
@@ -1628,6 +1633,9 @@ export class AgentRuntime {
         if (value.length >= 8) return true;
         return /(?:\n|[.!?,:;]\s?)$/u.test(value);
       };
+      let finalizedMaterial:
+        | { documentId: string; finalText: string }
+        | undefined;
       const completeRun = async (
         finalText: string,
         status: "completed" | "failed" = "completed",
@@ -1637,6 +1645,13 @@ export class AgentRuntime {
           documentId?: string;
         } = {},
       ): Promise<AgentRuntimeOutcome> => {
+        if (finalizedMaterial && !options.documentId) {
+          options = { ...options, documentId: finalizedMaterial.documentId };
+          finalText =
+            status === "failed"
+              ? `${finalizedMaterial.finalText}\n\n${finalText}`
+              : finalizedMaterial.finalText;
+        }
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
         if (status === "failed") {
@@ -2451,6 +2466,50 @@ export class AgentRuntime {
             { ...context, currentAnswerText },
           );
           if (terminal) {
+            if (terminal.documentId) {
+              finalizedMaterial = {
+                documentId: terminal.documentId,
+                finalText: terminal.finalText,
+              };
+              const actionDecision = await actionContractSession.evaluateFinal({
+                canCorrect: true,
+              });
+              const planDecision = await activePlanSession.evaluateFinal({
+                canCorrect: true,
+              });
+              if (
+                actionDecision.kind !== "accept" ||
+                planDecision.kind !== "accept"
+              ) {
+                const remainingWork =
+                  actionDecision.kind === "correct"
+                    ? actionDecision.correction
+                    : actionDecision.kind === "fail"
+                      ? actionDecision.failure
+                      : planDecision.kind === "correct"
+                        ? planDecision.correction
+                        : planDecision.kind === "fail"
+                          ? planDecision.failure
+                          : "";
+                return {
+                  toolResult,
+                  delivery: options.suppressModelDelivery
+                    ? undefined
+                    : await buildToolDelivery(
+                        toolResult,
+                        deliveryCallId,
+                        toolDefinition,
+                        {
+                          content: contentForModel || toolResult.content,
+                          remainingWork,
+                          finalizedDocumentId: terminal.documentId,
+                          instruction:
+                            "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
+                        },
+                      ),
+                };
+              }
+            }
             return {
               toolResult,
               delivery: options.suppressModelDelivery

@@ -130,7 +130,10 @@ export async function recordMcpPlanEvidence(
       },
     );
   }
-  return ledger;
+  return planExecutionCoordinator.advanceVerifiedTasks({
+    executionId: plan.executionId,
+    requirementKinds: ["verified_read", "material_integrity"],
+  });
 }
 
 export type PlanFinalDecision =
@@ -143,7 +146,14 @@ export class PlanExecutionRunSession {
   private ledger: PlanExecutionLedger | null = null;
 
   constructor(
-    private readonly request: AgentRuntimeRequest,
+    private readonly request: Pick<
+      AgentRuntimeRequest,
+      | "conversationKey"
+      | "planContext"
+      | "actionContract"
+      | "actionProgress"
+      | "classifiedIntent"
+    >,
     private readonly emit: (event: AgentEvent) => Promise<void>,
   ) {}
 
@@ -192,7 +202,7 @@ export class PlanExecutionRunSession {
       artifact.version !== 4 ||
       ledger.version !== 2 ||
       ledger.tasks.some((task) => task.version !== 2) ||
-      (artifact.actionContract && artifact.actionContract.version !== 3)
+      (artifact.actionContract && artifact.actionContract.version !== 4)
     ) {
       return {
         kind: "failed",
@@ -202,6 +212,7 @@ export class PlanExecutionRunSession {
     }
     if (artifact.actionContract) {
       this.request.actionContract = artifact.actionContract;
+      this.request.classifiedIntent = artifact.actionContract.intent;
       if (
         this.request.actionProgress?.contractId !== artifact.actionContract.id
       ) {
@@ -345,6 +356,10 @@ export class PlanExecutionRunSession {
         createdAt: Date.now(),
       });
     }
+    ledger = await planExecutionCoordinator.advanceVerifiedTasks({
+      executionId: plan.executionId,
+      requirementKinds: ["verified_read", "material_integrity"],
+    });
     this.ledger = ledger;
     this.request.planContext = {
       ...plan,

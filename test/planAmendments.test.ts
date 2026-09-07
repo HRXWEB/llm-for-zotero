@@ -1,3 +1,4 @@
+import { semanticContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { decodePlanContract } from "../src/agent/plans/contracts";
@@ -1435,7 +1436,7 @@ describe("autonomous Plan scope amendments", function () {
         isRegularItem: () => true,
       }),
     };
-    const contract: AgentActionContract = {
+    const contract: AgentActionContract = semanticContractFixture({
       version: 3,
       id: "contract-1",
       writeDisposition: "required",
@@ -1464,7 +1465,7 @@ describe("autonomous Plan scope amendments", function () {
           },
         },
       ],
-    };
+    });
     for (const mode of ["safe", "auto", "yolo"] as const) {
       const amendments = new FakeAmendments();
       globalThis.Zotero = {

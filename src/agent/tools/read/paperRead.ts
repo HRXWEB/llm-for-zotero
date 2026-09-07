@@ -30,7 +30,7 @@ import {
 } from "../shared";
 import {
   buildCaptureFollowupMessage,
-  inferPdfMode,
+  semanticPdfMode,
   normalizeExplicitTargetSyntax,
   describeNoDefaultPaperTarget,
   resolveDefaultTargets,
@@ -43,9 +43,7 @@ import {
   type FullReadCoverageReceipt,
   type FullReadPaperResult,
 } from "../../../shared/exhaustiveDocumentReader";
-import { resolveFullReadPaperTargets } from "../../../shared/fullReadTargetResolver";
 import { getTurnPapersWithRoles } from "../../context/requestTurnPaperScope";
-import { detectExplicitFullReadIntent } from "../../../modules/contextPanel/retrievalQueryPlan";
 import { createCodexAppServerExhaustiveReaderSession } from "../../../codexAppServer/exhaustiveReader";
 import { createZoteroMetadataResolver } from "../../../services/zoteroMetadata/resolver";
 import { projectPaperMetadata } from "../../../services/zoteroMetadata/projections";
@@ -178,36 +176,39 @@ function resolveFullReadTargets(params: {
           MAX_FULL_TARGETS,
         )
       : [];
-  const userText = (params.context.request.userText || "").trim();
+  const request = params.context.request;
   if (
-    userText &&
-    !detectExplicitFullReadIntent(userText) &&
-    !hasApprovedFullReadAuthorization(params.context.request)
+    request.classifiedIntent?.semantic?.reading.coverage !== "exhaustive" &&
+    !hasApprovedFullReadAuthorization(request)
   ) {
     throw new Error(
-      "paper_read mode:'full' requires an explicit affirmative user request to read the complete document.",
+      "Exhaustive reading requires a resolved semantic reading intent or approved full-read contract.",
     );
   }
-  const requestText = userText || params.input.query || "";
-  if (!requestText && explicitTargets.length) return explicitTargets;
-  const selected = dedupePaperContexts([
-    ...getTurnPapersWithRoles(params.context.request, ["selected"]),
-  ]);
-  const activePaper = getTurnPapersWithRoles(params.context.request, [
-    "active",
-  ])[0];
-  const available = dedupePaperContexts([
-    ...params.zoteroGateway.listPaperContexts(params.context.request),
-    ...(activePaper ? [activePaper] : []),
-    ...selected,
-    ...explicitTargets,
-  ]);
-  const intendedTargets = resolveFullReadPaperTargets({
-    question: requestText,
-    availablePapers: available,
-    selectedPapers: selected,
-    activePaper,
-  }).papers;
+  const available = dedupePaperContexts(
+    params.zoteroGateway.listPaperContexts(request),
+  );
+  const obligations =
+    request.actionContract?.obligations.filter(
+      (entry) => entry.operation === "read_full",
+    ) || [];
+  const ids = obligations.flatMap(
+    (entry) =>
+      entry.targetBoundary?.frozenTargetIds ||
+      entry.targetSelectors?.flatMap((selector) =>
+        selector.kind === "item_id" ? [selector.value] : [],
+      ) ||
+      [],
+  );
+  const intendedTargets = ids.length
+    ? available.filter((paper) => ids.includes(paper.itemId))
+    : request.classifiedIntent?.paperTargetIntent === "all_visible"
+      ? available
+      : request.classifiedIntent?.paperTargetIntent === "added"
+        ? getTurnPapersWithRoles(request, ["selected"])
+        : getTurnPapersWithRoles(request, ["active"]).slice(0, 1);
+  if (!intendedTargets.length)
+    throw new Error("The requested full-read targets are unresolved.");
   if (explicitTargets.length) {
     const intendedKeys = new Set(
       intendedTargets.map(
@@ -230,7 +231,7 @@ function resolveFullReadTargets(params: {
       );
     }
   }
-  return intendedTargets;
+  return [...intendedTargets];
 }
 
 function readTextFile(filePath: string): Promise<string> {
@@ -332,65 +333,15 @@ function targetForPageTool(input: PaperReadInput): Record<string, unknown> {
   };
 }
 
-function isExplicitPdfVisualRequest(
-  input: PaperReadInput,
-  requestText: string | undefined,
-): boolean {
-  if (input.pages?.length) return true;
-  const text = [input.query || "", requestText || ""]
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-  if (!text) return false;
-  return (
-    /\b(?:raw|rendered?)\s+pdf\b/.test(text) ||
-    /\bpdf\s+(?:page|pages|render|renders|screenshot|screenshots|layout)\b/.test(
-      text,
-    ) ||
-    /\b(?:render|renders|rendered|screenshot|screenshots|capture|captures|captured)\s+(?:the\s+)?(?:pdf\s+)?pages?\b/.test(
-      text,
-    ) ||
-    /\b(?:current|visible)\s+(?:reader\s+)?pages?\b/.test(text) ||
-    /\bpage\s+(?:image|images|layout|screenshot|screenshots|render|renders|rendered)\b/.test(
-      text,
-    ) ||
-    /\bexact\s+pages?\b/.test(text) ||
-    /\bpages?\s+\d+(?:\s*(?:-|–|to|,|and)\s*\d+)?\b/.test(text) ||
-    /\bp\.?\s*\d+\b/.test(text) ||
-    /\bpaper_read\s*\(\s*\{\s*mode\s*:\s*['"]visual['"]/.test(text)
-  );
-}
-
-function getCombinedQueryText(
-  input: Pick<PaperReadInput, "query">,
-  requestText: string | undefined,
-): string {
-  return [input.query || "", requestText || ""]
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isTableOnlyInterpretationRequest(
-  input: Pick<PaperReadInput, "query">,
-  requestText: string | undefined,
-): boolean {
-  const text = getCombinedQueryText(input, requestText);
-  if (!text) return false;
-  const hasTable = /\btables?\s+(?:[sS]?\d+|[IVX]+)\b/i.test(text);
-  if (!hasTable) return false;
-  const hasFigure = /\b(?:fig(?:ure)?s?\.?|figs?\.?)\s*[sS]?\d+\b/i.test(text);
-  return !hasFigure;
-}
-
 async function buildMineruVisualRedirect(params: {
   input: PaperReadInput;
   context: AgentToolContext;
   zoteroGateway: ZoteroGateway;
 }): Promise<Record<string, unknown> | null> {
   if (
-    isExplicitPdfVisualRequest(params.input, params.context.request.userText)
+    params.input.pages?.length ||
+    params.context.request.classifiedIntent?.semantic?.reading.source ===
+      "rendered_pages"
   ) {
     return null;
   }
@@ -411,10 +362,8 @@ async function buildMineruVisualRedirect(params: {
   if (!paperContext) return null;
   const query = params.input.query || params.context.request.userText || "";
   if (
-    isTableOnlyInterpretationRequest(
-      params.input,
-      params.context.request.userText,
-    )
+    params.context.request.classifiedIntent?.semantic?.figures?.kind ===
+    "tables"
   ) {
     if (!mineruCacheDir) return null;
     return {
@@ -1197,7 +1146,9 @@ export function createPaperReadTool(
         throw new Error(describeNoDefaultPaperTarget(context.request));
       }
       if (input.mode === "figures") {
-        if (isTableOnlyInterpretationRequest(input, context.request.userText)) {
+        if (
+          context.request.classifiedIntent?.semantic?.figures?.kind === "tables"
+        ) {
           return {
             mode: "figures",
             status: "no_figures",
@@ -1420,6 +1371,7 @@ export function createPaperReadTool(
         await pdfService.ensurePaperContext(paper);
       }
       const results = await retrievalService.retrieveEvidence({
+        intent: context.request.classifiedIntent,
         papers: targets,
         question,
         queryVariants: input.queryVariants,

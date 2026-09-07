@@ -93,8 +93,8 @@
  *
  * ```ts
  * guidance: {
- *   matches: (request) => /\bmy keyword\b/i.test(request.userText),
- *   instruction: "Use my_tool when the user mentions 'my keyword'.",
+ *   matches: (request) => request.classifiedIntent?.semantic?.supportTools?.includes("my_tool") === true,
+ *   instruction: "Use my_tool for the supporting operation selected by semantic intent.",
  * },
  * ```
  *

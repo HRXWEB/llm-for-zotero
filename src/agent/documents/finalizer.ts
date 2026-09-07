@@ -1,3 +1,8 @@
+import {
+  assertMaterialReady,
+  materialDocumentId,
+  resolveMaterialOutput,
+} from "./workflowMaterial";
 import { renderMarkdownForNote } from "../../utils/markdown";
 import { Marked } from "marked";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
@@ -63,6 +68,7 @@ import {
 import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
 
 export type SubmitPlanDocumentInput = Readonly<{
+  materialOutputId?: string;
   title: string;
   markdown: string;
   citations: readonly PlanCitationCluster[];
@@ -1023,19 +1029,33 @@ export class DirectDocumentFinalizer {
     now?: number;
   }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
     const policy = params.request.documentOutcomePolicy;
+    const material = resolveMaterialOutput(
+      params.request,
+      params.input.materialOutputId,
+    );
+    const stableDocumentId = material
+      ? materialDocumentId(params.request, material.id)
+      : undefined;
     if (
       !policy?.required ||
-      params.request.planContext?.phase === "executing"
+      (params.request.planContext?.phase === "executing" && !material)
     ) {
       throw new Error("Direct document finalization is not authorized");
     }
-    const prior = await loadLatestDocumentForRun(params.runId);
+    const prior = stableDocumentId
+      ? await loadPlanDocument(stableDocumentId)
+      : await loadLatestDocumentForRun(params.runId);
     if (prior) {
+      if (prior.conversationKey !== params.request.conversationKey)
+        throw new Error(
+          "The finalized material belongs to another conversation.",
+        );
       const priorOutbox = await loadPlanDocumentOutbox(prior.documentId);
       if (!priorOutbox)
         throw new Error("The document exists without its outbox");
       return { document: prior, outbox: priorOutbox };
     }
+    if (material) assertMaterialReady(params.request, material, this.gateway);
     const now = params.now ?? Date.now();
     const title = params.input.title.trim();
     if (!title) throw new Error("Document title is required");
@@ -1134,7 +1154,7 @@ export class DirectDocumentFinalizer {
         : "not_applicable",
       issues: [...params.input.groundingIssues],
     };
-    const documentId = `${params.runId}:document:1`;
+    const documentId = stableDocumentId || `${params.runId}:document:1`;
     const contentHash = `sha256:${await sha256Text(
       canonicalJson({
         title,

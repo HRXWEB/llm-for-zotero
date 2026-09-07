@@ -1,78 +1,49 @@
 import { assert } from "chai";
-import { inferActionIntentsFromRequest } from "../src/agent/model/actionIntent";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import { actionFixture, classifiedFixture } from "./helpers/semanticIntent";
 
-describe("active note editing intent", function () {
-  for (const text of [
+describe("semantic note editing contracts", function () {
+  const service = new ActionContractService({} as never);
+  for (const userText of [
     "help me rewrite this sentence",
     "Please shorten this paragraph",
-    "Can you polish the selected text?",
     "请帮我润色这句话",
   ]) {
-    it(`requires a note patch proposal for ${text}`, function () {
+    it(`binds the semantic target before an edit: ${userText}`, async function () {
       const request = resolvedAgentRequest({
         conversationKey: 1,
         mode: "agent",
-        userText: text,
+        libraryID: 1,
+        userText,
         activeNoteContext: {
           noteId: 3975,
           title: "Note",
           noteKind: "standalone",
           noteText: "Selected sentence.",
         },
-        selectedTexts: ["Selected sentence."],
-        selectedTextSources: ["note-edit"],
+        classifiedIntent: actionFixture("note_edit", { targetNoteId: 3975 }),
       });
-      const intents = inferActionIntentsFromRequest(request);
-      assert.lengthOf(intents, 1);
-      assert.equal(intents[0].operation, "note_edit");
-      assert.equal(intents[0].parameters?.targetNoteId, 3975);
+      const contract = await service.createContract(request);
+      assert.equal(contract.obligations[0].parameters?.targetNoteId, 3975);
+      assert.equal(contract.obligations[0].operation, "note_edit");
     });
   }
-  for (const text of [
-    "What does this sentence mean?",
-    "Do not edit this note. Explain the sentence.",
-    "How would you rewrite a paragraph?",
-    "Give me three alternatives without changing the note.",
-  ]) {
-    it(`leaves explanatory requests in chat: ${text}`, function () {
-      const request = resolvedAgentRequest({
-        conversationKey: 1,
-        mode: "agent",
-        userText: text,
-        activeNoteContext: {
-          noteId: 3975,
-          title: "Note",
-          noteKind: "standalone",
-          noteText: "Selected sentence.",
-        },
-      });
-      assert.isEmpty(inferActionIntentsFromRequest(request));
+  it("does not turn explanation into an edit because a note is open", async function () {
+    const request = resolvedAgentRequest({
+      conversationKey: 1,
+      mode: "agent",
+      libraryID: 1,
+      userText: "Do not edit this note. Explain the sentence.",
+      activeNoteContext: {
+        noteId: 3975,
+        title: "Note",
+        noteKind: "standalone",
+        noteText: "Selected sentence.",
+      },
+      classifiedIntent: classifiedFixture(),
     });
-  }
-  for (const text of [
-    "Edit note 60 to fix the typo",
-    "Edit the paper metadata",
-  ]) {
-    it(`does not redirect another target to the active note: ${text}`, function () {
-      const intents = inferActionIntentsFromRequest(
-        resolvedAgentRequest({
-          conversationKey: 1,
-          mode: "agent",
-          userText: text,
-          activeNoteContext: {
-            noteId: 3975,
-            title: "Note",
-            noteKind: "standalone",
-            noteText: "Text.",
-          },
-        }),
-      );
-      assert.isFalse(
-        intents.some((intent) => intent.parameters?.targetNoteId === 3975),
-      );
-      if (text.includes("60"))
-        assert.equal(intents[0].parameters?.targetNoteId, 60);
-    });
-  }
+    const contract = await service.createContract(request);
+    assert.isEmpty(contract.obligations);
+  });
 });

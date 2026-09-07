@@ -4,12 +4,6 @@ description: Answer open-ended natural-language questions about the content of o
 version: 8
 contexts: single-paper
 activation: auto
-match: /\b(what|who|when|where|which|tell me|explain)\b.*\b(about|paper|article|study|wrote|author|publish|year|journal|abstract|topic|field|contribution|finding|claim|conclusion|argue)\b/i
-match: /\bsummar(y|ize|ise)\b/i
-match: /\b(what is|what are|what does|what do)\b.*\b(this paper|this article|this study|the paper|the article)\b/i
-match: /\b(understand|explain|walk me through|help me understand)\b.*\b(paper|ppaer|article|study)\b/i
-match: /\b(main|key|central|primary|core)\b.*\b(finding|result|contribution|argument|claim|conclusion|point|idea|theme|message|takeaway)\b/i
-match: /\b(tldr|tl;dr|gist|overview|brief)\b/i
 ---
 
 <!--

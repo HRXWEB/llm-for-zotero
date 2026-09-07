@@ -1,3 +1,5 @@
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { actionFixture, actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { normalizeOriginalAgentPermissionMode } from "../src/shared/originalAgentPermissionMode";
 import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
@@ -17,6 +19,8 @@ describe("invocation-plan confirmation policy", function () {
   const context = {
     request: {
       conversationKey: 1,
+      actionContract: actionContractFixture("settings_update"),
+      classifiedIntent: actionFixture("settings_update"),
       libraryID: 1,
       userText: "update the requested setting and write the result",
     },
@@ -85,7 +89,9 @@ describe("invocation-plan confirmation policy", function () {
       debug: () => undefined,
     } as never;
     if (db) await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register(tool(params.plan));
     return registry.prepareExecution(
       { id: "call-1", name: "future_write", arguments: {} },
@@ -156,7 +162,9 @@ describe("invocation-plan confirmation policy", function () {
         debug: () => undefined,
       } as never;
       await initAgentChangeJournal();
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(
+        new ActionContractService({} as never),
+      );
       registry.register(
         createLibrarySettingsTool({
           listSettings: () => [
@@ -204,7 +212,9 @@ describe("invocation-plan confirmation policy", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register(
       createLibrarySettingsTool({
         listSettings: () => [

@@ -74,7 +74,11 @@ if (list) {
       "Refusing to run: .env must explicitly select a .zotero-dev profile and zotero-dev data directory.",
     );
   const git = (...argv) =>
-    execFileSync("git", argv, { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", argv, {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    }).trim();
   const commit = git("rev-parse", "HEAD");
   const status = git("status", "--porcelain=v1");
   const sourceHash = createHash("sha256").update(git("diff", "HEAD", "--"));

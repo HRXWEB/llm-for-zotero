@@ -12,7 +12,7 @@ import {
 } from "../shared";
 import {
   normalizeTarget,
-  inferPdfMode,
+  semanticPdfMode,
   setPreparedCache,
   setCapturedCache,
   buildCaptureFollowupMessage,
@@ -229,7 +229,7 @@ export function createViewPdfPagesTool(
           attachmentId: input.target?.attachmentId,
           name: input.target?.name,
           question: input.question,
-          mode: inferPdfMode(input.question),
+          mode: semanticPdfMode(context.request),
           topK: 3,
         });
         pages = searchResult.pages.map((p) => p.pageIndex);
@@ -357,7 +357,7 @@ export function createViewPdfPagesTool(
           attachmentId: input.target?.attachmentId,
           name: input.target?.name,
           question: input.question,
-          mode: inferPdfMode(input.question),
+          mode: semanticPdfMode(context.request),
           topK: 3,
         });
         pages = searchResult.pages.map((p) => p.pageIndex);

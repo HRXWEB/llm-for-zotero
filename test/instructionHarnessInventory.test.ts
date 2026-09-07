@@ -14,9 +14,9 @@ import { estimateTextTokens } from "../src/utils/modelInputCap";
 
 const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
   "analyze-figures.md": [
-    "When MinerU cache is available",
-    "If figure extraction fails or returns no crops",
-    "Saving figure analysis to notes",
+    "shared semantic intent",
+    "When crop extraction fails",
+    "Requested persistence",
   ],
   "compare-papers.md": [
     "targeted first when the dimension is known",
@@ -51,7 +51,7 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
   "write-note.md": [
     "## Note template",
     "Checklist before writing the note",
-    "Worked example",
+    "host exports verified assets",
     "USER CUSTOMIZATIONS COME FIRST",
   ],
 };

@@ -548,26 +548,10 @@ function normalizeIntent(
   }
   if (value === "discover") return "enumerate";
   if (depth === "verify") return "verify";
-  // Language-independent classifier default: beats the English regexes below,
-  // loses to explicit tool args and verify depth above.
+  // Tool arguments and the shared semantic result are the only intent inputs.
   const classified = request?.classifiedIntent;
   if (classified && classified.retrievalIntent !== "none") {
     return classified.retrievalIntent;
-  }
-  const normalized = query.toLowerCase();
-  if (
-    /\b(?:all|which|how many|list|enumerate|papers?\s+that|contain|contains|containing|use|uses|using|discuss|discusses|mention|mentions)\b/.test(
-      normalized,
-    )
-  ) {
-    return "enumerate";
-  }
-  if (
-    /\b(?:summari[sz]e|summary|taxonomy|methods?|themes?|comprehensive|overview|commonalit(?:y|ies)|synthesi[sz]e|synthesis|similarit(?:y|ies)|compare|contrast)\b/.test(
-      normalized,
-    )
-  ) {
-    return "summarize";
   }
   return DEFAULT_INTENT;
 }
@@ -1413,6 +1397,11 @@ export class LibraryRetrieveService {
     const queryPlan = await resolveRetrievalQueryPlan({
       query: params.query,
       queryVariants: params.queryVariants,
+      readIntent:
+        params.request?.classifiedIntent?.semantic?.reading.coverage ===
+        "exhaustive"
+          ? "full-once"
+          : "targeted",
       hasRetrievalContext:
         requestedDepth !== "verify" && requestedIntent !== "verify",
       model: params.model || params.request?.model,
@@ -1426,6 +1415,12 @@ export class LibraryRetrieveService {
       signal: params.signal,
       sourceSamples: this.buildScopeSourceSamples(scope),
     });
+    queryPlan.retrievalPurpose =
+      params.request?.classifiedIntent?.semantic?.retrievalPurpose;
+    queryPlan.quoteAnchorPolicy =
+      params.request?.classifiedIntent?.retrievalIntent === "verify"
+        ? "verified"
+        : "none";
     let input = normalizeInput(params, params.request, queryPlan);
     const warnings: string[] = [];
     for (const note of new Set(input.queryPlan.notes)) {
@@ -1433,7 +1428,10 @@ export class LibraryRetrieveService {
     }
     const methodsUsed = new Set<LibraryRetrieveMethod>();
     const readStrategyBase = resolveLibraryChatReadStrategy({
-      query: input.query,
+      answerStyle:
+        params.request?.classifiedIntent?.documentKind === "comparison"
+          ? "comparison"
+          : undefined,
       intent: input.intent,
       depth: input.depth,
       paperCount: scope.totalItems,

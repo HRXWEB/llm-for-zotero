@@ -11,8 +11,10 @@
  * Users can create, edit, or delete skills by managing:
  *   {Zotero profile runtime root}/.agents/skills/<skill-id>/SKILL.md
  */
-import { matchesSkill, parseSkill } from "./skillLoader";
+import { parseSkill } from "./skillLoader";
 import type { AgentSkill } from "./skillLoader";
+import { getAllSkills } from "./catalog";
+export { getAllSkills, setUserSkills } from "./catalog";
 import type { SkillRoutingRequest } from "./contextEligibility";
 import libraryAnalysisRaw from "./library-analysis.md";
 import comparePapersRaw from "./compare-papers.md";
@@ -24,11 +26,7 @@ import literatureReviewRaw from "./literature-review.md";
 import importCitedReferenceRaw from "./import-cited-reference.md";
 import { resolveSkillRouting } from "./routing";
 
-export {
-  getSkillRoutingDiagnostics,
-  matchesSkill,
-  parseSkill,
-} from "./skillLoader";
+export { getSkillRoutingDiagnostics, parseSkill } from "./skillLoader";
 export {
   getSkillContextEligibility,
   isSkillContextEligible,
@@ -91,28 +89,6 @@ export function getBuiltinSkillInstruction(
   const raw = BUILTIN_SKILL_FILES[filename];
   if (!raw) return undefined;
   return parseSkill(raw).instruction;
-}
-
-/**
- * Skills loaded from the user's data directory.
- * This is the sole source of truth — the agent reads only from here.
- */
-let skills: AgentSkill[] = [];
-
-/**
- * Replace the current set of skills.
- * Called once at plugin startup after scanning the user skills directory.
- */
-export function setUserSkills(loaded: AgentSkill[]): void {
-  skills = loaded;
-}
-
-/**
- * Returns all skills loaded from the user folder.
- * This is the primary accessor used by messageBuilder and trace events.
- */
-export function getAllSkills(): AgentSkill[] {
-  return skills;
 }
 
 /**

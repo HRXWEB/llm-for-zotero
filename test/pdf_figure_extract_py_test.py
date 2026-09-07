@@ -325,7 +325,7 @@ class CaptionWindowTests(unittest.TestCase):
                         dpi=216,
                         json_out=str(json_out),
                         pages="",
-                        query="Figure 1",
+                        selection=json.dumps({"labels": ["Figure 1"], "kind": "figures", "includeSupplementary": False}),
                         crop_dir=str(root / "crops"),
                     )
                 )
@@ -366,7 +366,14 @@ class CaptionWindowTests(unittest.TestCase):
             self.extractor.subprocess.run = original_run
             self.extractor.os.pathsep = original_pathsep
 
-    def test_table_query_does_not_match_every_figure(self):
+    def test_selection_requires_explicit_scope_and_never_interprets_label_prose(self):
+        for raw in ("{}", '{"labels":[]}'):
+            with self.assertRaises(ValueError):
+                self.extractor.decode_figure_selection(raw)
+        selection = self.extractor.decode_figure_selection(json.dumps({"labels": ["all figures except Figure 1"], "kind": "figures", "includeSupplementary": False}))
+        self.assertFalse(self.extractor.direct_entry_matches_request({"label": "Figure 2"}, selection=selection, pages=set()))
+
+    def test_table_selection_does_not_match_every_figure(self):
         figure = {
             "label": "Figure 1",
             "pageNumber": 1,
@@ -377,7 +384,7 @@ class CaptionWindowTests(unittest.TestCase):
         self.assertFalse(
             self.extractor.direct_entry_matches_request(
                 figure,
-                query="What does Table 1 show?",
+                selection={"labels": ["Table 1"], "kind": "tables", "includeSupplementary": False},
                 pages=set(),
             )
         )
@@ -427,7 +434,7 @@ class CaptionWindowTests(unittest.TestCase):
                     poppler_bin=str(root / "poppler"),
                     dpi=144,
                     pages="",
-                    query="Figure 1",
+                    selection=json.dumps({"labels": ["Figure 1"], "kind": "figures", "includeSupplementary": False}),
                     crop_dir=str(crop_dir),
                     json_out=str(json_out),
                 )

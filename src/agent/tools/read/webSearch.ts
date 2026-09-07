@@ -37,25 +37,11 @@ export type WebSearchToolResult = WebSearchResponse & {
   citation: ReturnType<typeof webCitationInstruction>;
 };
 
-const EXPLICIT_WEB_SEARCH_FALLBACK_PATTERNS = [
-  /\b(?:web search|search (?:the )?(?:web|internet)|search online|online search|browse (?:the )?web|look up online|verify online|check online)\b/i,
-  /\b(?:search|browse|look up|find|verify|check|provide|cite|give)\b.{0,80}\b(?:website|online sources?|official sources?|official website|official documentation)\b/i,
-];
-
-const TIME_SENSITIVE_WEB_FALLBACK_PATTERN =
-  /\b(?:latest (?:version|release|news|price|status|schedule)|today(?:'s)?|news|weather|forecast|breaking news|release notes?|current (?:price|version|release|status|schedule|weather|officeholder|president|ceo)|currently (?:serves|serving|holds|available)|price of|as of)\b/i;
-
 export function matchesWebSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "userText" | "classifiedIntent">,
+  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
 ): boolean {
   const intent = request.classifiedIntent?.externalSearchIntent;
-  if (intent !== undefined) return intent === "web" || intent === "both";
-  const userText = request.userText || "";
-  return (
-    EXPLICIT_WEB_SEARCH_FALLBACK_PATTERNS.some((pattern) =>
-      pattern.test(userText),
-    ) || TIME_SENSITIVE_WEB_FALLBACK_PATTERN.test(userText)
-  );
+  return intent === "web" || intent === "both";
 }
 
 function normalizeTopic(value: unknown): WebSearchTopic {

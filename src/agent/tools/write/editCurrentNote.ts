@@ -1,3 +1,5 @@
+import { resolveWorkflowNoteDocument } from "../../documents/workflowMaterial";
+import { savePlanDocumentAsNote } from "../../documents/actions";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { LibraryMutationService } from "../../services/libraryMutationService";
 import { executeExternalMutation } from "../../services/mutationCoordinator";
@@ -68,6 +70,8 @@ function sanitizeNoteHtml(html: string): string {
 }
 
 type EditCurrentNoteInput = {
+  documentId?: string;
+  _documentContentHash?: string;
   mode: "edit" | "create" | "append";
   content: string;
   sourceNoteId?: number;
@@ -387,6 +391,25 @@ function prepareNoteWriteInput(
   input.noteTitle = snapshot.title || "Untitled note";
 }
 
+async function prepareWorkflowDocumentNote(
+  input: EditCurrentNoteInput,
+  context: AgentToolContext,
+): Promise<void> {
+  if (!input.documentId) return;
+  const document = await resolveWorkflowNoteDocument(
+    context.request,
+    input.documentId,
+    input.targetItemId,
+  );
+  if (input.content && input.content !== document.visibleHtml)
+    throw new Error(
+      "The reviewed content differs from the finalized document; revise the document before saving it.",
+    );
+  input.content = document.visibleHtml;
+  input._isHtml = true;
+  input._documentContentHash = document.contentHash;
+}
+
 export function createEditCurrentNoteTool(
   zoteroGateway: ZoteroGateway,
 ): AgentWriteToolDefinition<EditCurrentNoteInput, unknown> {
@@ -406,6 +429,8 @@ export function createEditCurrentNoteTool(
         source: "zotero_native",
         parameters: {
           noteMode: input.mode,
+          documentId: input.documentId,
+          contentHash: input._documentContentHash,
           targetItemId: input.targetItemId,
           targetNoteId: input.targetNoteId || input.noteId,
           expectedText: input.content
@@ -434,6 +459,11 @@ export function createEditCurrentNoteTool(
         type: "object",
         additionalProperties: false,
         properties: {
+          documentId: {
+            type: "string",
+            description:
+              "Exact finalized document ID returned by submit_document. Use instead of content when saving workflow material.",
+          },
           mode: {
             type: "string",
             enum: ["edit", "create", "append"],
@@ -512,7 +542,7 @@ export function createEditCurrentNoteTool(
         "For edits, PREFER `patches` (find-and-replace pairs) over `content` (full rewrite). " +
         "When the user asks to append/add content to an existing note, call `edit_current_note` with mode 'append' and `content`; pass `targetNoteId` when the destination note is known. " +
         "When the user asks to create/write/save a new item note, call `edit_current_note` with mode 'create', target 'item', and `content`; create means a brand-new child note, not appending to the response-save note. " +
-        "For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
+        "For generated workflow material, call `note_write` with mode:create, the exact targetItemId, and documentId returned by submit_document; omit content. For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
         SOURCE_NOTE_COPY_GUIDANCE +
         " " +
         "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Existing-note edits and appends always require the note review card, in every permission mode. " +
@@ -571,6 +601,24 @@ export function createEditCurrentNoteTool(
       const hasContent =
         typeof args.content === "string" && args.content.trim();
       const sourceNoteId = normalizePositiveInt(args.sourceNoteId);
+      const documentId =
+        typeof args.documentId === "string"
+          ? args.documentId.trim()
+          : undefined;
+      if (
+        args.documentId !== undefined &&
+        (!documentId ||
+          mode !== "create" ||
+          hasContent ||
+          hasPatches ||
+          sourceNoteId ||
+          args.target === "standalone" ||
+          !normalizePositiveInt(args.targetItemId) ||
+          args.collections !== undefined)
+      )
+        return fail(
+          "documentId requires create mode and the exact parent targetItemId, without replacement content or collections.",
+        );
       if (
         args.sourceNoteId !== undefined &&
         (!sourceNoteId || mode !== "create" || hasContent || hasPatches)
@@ -581,7 +629,7 @@ export function createEditCurrentNoteTool(
       }
 
       if (mode === "create" || mode === "append") {
-        if (!hasContent && !sourceNoteId) {
+        if (!hasContent && !sourceNoteId && !documentId) {
           return fail(
             `content is required for mode '${mode}': provide the note body as a string`,
           );
@@ -639,6 +687,7 @@ export function createEditCurrentNoteTool(
 
       return ok<EditCurrentNoteInput>({
         mode,
+        documentId,
         content,
         sourceNoteId,
         _rawHtmlContent: contentHasHtml ? rawContent.trim() : undefined,
@@ -822,7 +871,8 @@ export function createEditCurrentNoteTool(
         _patchedHtml: patchedHtml,
       });
     },
-    planInvocation(input, context) {
+    async planInvocation(input, context) {
+      await prepareWorkflowDocumentNote(input, context);
       prepareNoteWriteInput(zoteroGateway, input, context);
       const hasLocalImages =
         /!\[[^\]]*\]\(file:\/\/|<img\s+[^>]*src\s*=\s*"file:\/\//i.test(
@@ -841,7 +891,60 @@ export function createEditCurrentNoteTool(
       });
     },
     execute: async (input, context) => {
+      await prepareWorkflowDocumentNote(input, context);
       prepareNoteWriteInput(zoteroGateway, input, context);
+      if (input.documentId) {
+        const documentId = input.documentId;
+        return executeExternalMutation({
+          context,
+          toolName: "note_write",
+          plan: {
+            operation: "save_workflow_document",
+            description: "Attach the exact finalized summary to its paper",
+            forward: {
+              documentId,
+              targetItemId: input.targetItemId,
+              contentHash: input._documentContentHash,
+            },
+            reversibility: "full",
+            deferredInverse: true,
+          },
+          execute: async () => {
+            const saved = await savePlanDocumentAsNote(documentId, {
+              parentItemId: input.targetItemId!,
+              libraryID: context.request.libraryID!,
+            });
+            const note = zoteroGateway.getItem(saved.itemId)!;
+            return {
+              result: {
+                noteId: saved.itemId,
+                documentId,
+                title: note.getNoteTitle(),
+                status: saved.created ? "created" : "already_satisfied",
+                warnings: saved.warnings,
+              },
+              effect: saved.created ? ("applied" as const) : ("none" as const),
+              affectedCount: saved.created ? 1 : 0,
+              inverse: saved.created
+                ? {
+                    version: 1 as const,
+                    kind: "library_operations" as const,
+                    operations: [
+                      { type: "trash_items" as const, itemIds: [saved.itemId] },
+                    ],
+                  }
+                : undefined,
+              expectedPostcondition: {
+                kind: "created_item" as const,
+                itemId: saved.itemId,
+                exists: true,
+                parentItemId: input.targetItemId!,
+                htmlChecksum: await sha256Text(note.getNote()),
+              },
+            };
+          },
+        });
+      }
       const copyHasImages = Boolean(
         input.sourceNoteId && /\bdata-attachment-key\s*=/i.test(input.content),
       );

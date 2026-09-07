@@ -1,3 +1,5 @@
+import { actionFixture } from "./helpers/semanticIntent";
+import { semanticContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -36,11 +38,84 @@ describe("AgentToolRegistry", function () {
       conversationKey: 1,
       mode: "agent",
       userText: "test",
+      classifiedIntent: actionFixture("settings_update"),
+      actionContract: semanticContractFixture({
+        version: 3,
+        id: "contract:test-settings",
+        writeDisposition: "required",
+        interpretationSource: "classifier",
+        obligations: [
+          {
+            ...actionFixture("settings_update").actionIntents[0],
+            id: "obligation:settings",
+          },
+        ],
+      }),
     },
     item: null,
     currentAnswerText: "",
     modelName: "gpt-4o-mini",
   };
+
+  it("persists MCP proposal authority before allowing a native effect", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "auto" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
+    let executions = 0;
+    let checkpoints = 0;
+    registry.register({
+      spec: {
+        name: "settings_test",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      describeAction: describeTestMutation,
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["settings"],
+          reason: "Update requested setting.",
+        }),
+      execute: async () => {
+        executions++;
+        return { content: { ok: true }, effect: "applied" };
+      },
+    });
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const prepared = await registry.prepareExecution(
+      { id: "mcp-authority", name: "settings_test", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "provider-turn",
+        checkpointActionProgress: async () => {
+          checkpoints++;
+          assert.equal(
+            request.actionProgress.authorizationGrants[0].status,
+            "staged",
+          );
+          throw new Error("Durable store unavailable");
+        },
+      },
+      { callerKind: "mcp" },
+    );
+    assert.equal(executions, 0);
+    assert.equal(checkpoints, 1);
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind === "result")
+      assert.isFalse(prepared.execution.result.ok);
+  });
 
   function createSchemaTool(params: {
     name: string;
@@ -63,7 +138,9 @@ describe("AgentToolRegistry", function () {
   }
 
   it("returns an error result for unknown tools", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     const result = await registry.prepareExecution(
       {
         id: "call-1",
@@ -142,23 +219,25 @@ describe("AgentToolRegistry", function () {
         return { content: {}, effect: "applied" };
       },
     });
-    const contract = {
-      version: 3,
-      id: "approved-protected-test",
-      hardConstraints: [],
-      writeDisposition: "required",
-      interpretationSource: "classifier",
-      obligations: [
-        {
-          id: "settings",
-          operation: "settings_update",
-          proofDomain: "zotero_state",
-          capability: "zotero.settings",
-          coverage: "one",
-          targetKind: "items",
-        },
-      ],
-    } as const;
+    const contract = semanticContractFixture(
+      semanticContractFixture({
+        version: 3,
+        id: "approved-protected-test",
+        hardConstraints: [],
+        writeDisposition: "required",
+        interpretationSource: "classifier",
+        obligations: [
+          {
+            id: "settings",
+            operation: "settings_update",
+            proofDomain: "zotero_state",
+            capability: "zotero.settings",
+            coverage: "one",
+            targetKind: "items",
+          },
+        ],
+      }),
+    ) as const;
     const result = await registry.prepareExecution(
       { id: "protected", name: "library_settings", arguments: {} },
       {
@@ -225,8 +304,8 @@ describe("AgentToolRegistry", function () {
         return { effect: "applied", content: {} };
       },
     });
-    const contract = {
-      version: 3,
+    const contract = semanticContractFixture({
+      version: 4,
       id: "approved-batch",
       writeDisposition: "required",
       interpretationSource: "classifier",
@@ -247,7 +326,7 @@ describe("AgentToolRegistry", function () {
           },
         },
       ],
-    } as const;
+    });
     for (const [approved, itemId] of [
       [false, 1],
       [true, 4],
@@ -299,7 +378,9 @@ describe("AgentToolRegistry", function () {
         Prefs: { get: () => mode },
       } as never;
       await initAgentChangeJournal();
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(
+        new ActionContractService({} as never),
+      );
       let imports = 0;
       registry.register({
         spec: {
@@ -341,6 +422,21 @@ describe("AgentToolRegistry", function () {
             ...baseContext.request,
             userText:
               "Find five relevant papers and import only the ones I select.",
+            classifiedIntent: actionFixture("import_identifiers", undefined, {
+              literature: "select_then_import",
+            }),
+            actionContract: semanticContractFixture({
+              version: 3,
+              id: "contract:discovery",
+              writeDisposition: "required",
+              interpretationSource: "classifier",
+              obligations: [
+                {
+                  ...actionFixture("import_identifiers").actionIntents[0],
+                  id: "import",
+                },
+              ],
+            }),
           },
         },
       );
@@ -360,7 +456,9 @@ describe("AgentToolRegistry", function () {
   }
 
   it("gives every registered tool one complete invocation planner", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "plain_read",
@@ -391,7 +489,9 @@ describe("AgentToolRegistry", function () {
 
   it("rejects root composition in model-visible schemas before replacing a tool", function () {
     for (const keyword of ["oneOf", "allOf", "anyOf"] as const) {
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(
+        new ActionContractService({} as never),
+      );
       const name = `portable_${keyword}`;
       registry.register(
         createSchemaTool({
@@ -432,7 +532,9 @@ describe("AgentToolRegistry", function () {
     ];
 
     for (const fixture of invalidSchemas) {
-      const registry = new AgentToolRegistry();
+      const registry = new AgentToolRegistry(
+        new ActionContractService({} as never),
+      );
       const name = `invalid_${fixture.label.replace(/ /g, "_")}`;
       let registrationError: unknown;
       try {
@@ -450,7 +552,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("permits root composition for internal-only tool schemas", function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register(
       createSchemaTool({
         name: "internal_composed_tool",
@@ -467,7 +571,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("rejects malformed diagnostic arguments centrally before validation", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let validateCalls = 0;
     registry.register({
       spec: {
@@ -515,7 +621,9 @@ describe("AgentToolRegistry", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "mutate_library",
@@ -692,7 +800,7 @@ describe("AgentToolRegistry", function () {
           };
         },
       });
-      const actionContract = {
+      const actionContract = semanticContractFixture({
         version: 3 as const,
         id: "contract:chinese-note",
         hardConstraints: [],
@@ -709,7 +817,7 @@ describe("AgentToolRegistry", function () {
             parameters: { noteMode: "create" as const },
           },
         ],
-      };
+      });
 
       const prepared = await registry.prepareExecution(
         { id: "call:chinese-note", name: "write_note", arguments: {} },
@@ -739,7 +847,9 @@ describe("AgentToolRegistry", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let planCalls = 0;
     const executedTargets: string[] = [];
     registry.register({
@@ -840,7 +950,9 @@ describe("AgentToolRegistry", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let executions = 0;
     registry.register({
       spec: {
@@ -931,7 +1043,9 @@ describe("AgentToolRegistry", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "mutate_library",
@@ -1015,7 +1129,9 @@ describe("AgentToolRegistry", function () {
 
   it("blocks an unjournalled action even when it has inherited consent", async function () {
     globalThis.Zotero = { debug: () => undefined } as never;
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let executions = 0;
     registry.register({
       spec: {
@@ -1070,7 +1186,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("filters request-scoped tools when they are unavailable", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "edit_current_note",
@@ -1127,7 +1245,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("does not acquire the conversation write lock for reads or read-only write modes", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let receivedInvocationPlan: AgentToolContext["invocationPlan"];
     registry.register({
       spec: {
@@ -1198,7 +1318,9 @@ describe("AgentToolRegistry", function () {
       debug: () => undefined,
     } as never;
     await initAgentChangeJournal();
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "write_tool",
@@ -1240,7 +1362,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("discards a result and its artifacts when the lifecycle changes during execution", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let allowed = true;
     registry.register({
       spec: {
@@ -1281,7 +1405,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("rejects a dynamically registered write with no explicit effect", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     registry.register({
       spec: {
         name: "unknown_write",
@@ -1311,7 +1437,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("runs confirmed control operations without an action contract or mutation receipt", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let executions = 0;
     registry.register({
       spec: {
@@ -1357,7 +1485,9 @@ describe("AgentToolRegistry", function () {
   });
 
   it("blocks an untyped external effect before execution and fabricates no command receipt", async function () {
-    const registry = new AgentToolRegistry();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
     let executions = 0;
     registry.register({
       spec: {
@@ -1422,13 +1552,15 @@ describe("AgentToolRegistry", function () {
         ...baseContext,
         request: {
           ...baseContext.request,
-          actionContract: {
-            version: 2,
-            id: "contract:no-write",
-            writeDisposition: "none",
-            interpretationSource: "classifier",
-            obligations: [],
-          },
+          actionContract: semanticContractFixture(
+            semanticContractFixture({
+              version: 2,
+              id: "contract:no-write",
+              writeDisposition: "none",
+              interpretationSource: "classifier",
+              obligations: [],
+            }),
+          ),
         },
       },
       { callerKind: "model" },

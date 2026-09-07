@@ -1,3 +1,5 @@
+import { declaredSemanticInterpreter } from "./helpers/semanticIntent";
+import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -131,6 +133,7 @@ function makeRequest(
   overrides: Partial<AgentRuntimeRequest> = {},
 ): AgentRuntimeRequest {
   return {
+    classifiedIntent: classifiedFixture(),
     conversationKey: 51,
     mode: "agent",
     userText: "Find related papers from the internet",
@@ -327,6 +330,7 @@ describe("AgentRuntime HITL review workflow", function () {
         },
       ]);
       const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
         registry,
         adapterFactory: () => adapter,
       });
@@ -507,12 +511,14 @@ describe("AgentRuntime HITL review workflow", function () {
                 : []),
             ]);
             const runtime = new AgentRuntime({
+              semanticInterpreter: declaredSemanticInterpreter,
               registry,
               adapterFactory: () => adapter,
             });
             const cards: string[] = [];
             const outcome = await runtime.runTurn({
               request: makeRequest({
+                classifiedIntent: classifiedFixture(),
                 userText: "Find five papers relevant to this paper.",
                 metadata: { permissionMode: mode },
               }),

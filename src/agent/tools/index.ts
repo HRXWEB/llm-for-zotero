@@ -1,3 +1,4 @@
+import { ModelSemanticReferenceResolver } from "../model/semanticReferenceResolver";
 import { AgentToolRegistry } from "./registry";
 import { PdfService } from "../services/pdfService";
 import { RetrievalService } from "../services/retrievalService";
@@ -59,7 +60,7 @@ import { createZoteroScriptTool } from "./write/zoteroScript";
 import { PdfPageService } from "../services/pdfPageService";
 import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
 import type { AgentToolDefinition } from "../types";
-import { inferNoteIntent, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
+import { requestsNoteAction, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { ActionContractService } from "../contracts/actionContract";
 import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
@@ -115,11 +116,13 @@ const LIBRARY_UPDATE_OPERATION_SCHEMA = {
 
 const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(unfiled|folder|folders|collection|collections|move|file|organize|organise|categorize|categorise|full[- ]?text|abstract|doi|publisher|isbn|issn|added|modified|since|before|after|retracted|annotation|highlight|citation key|advanced search|trash|deleted)\b/i.test(
-      request.userText || "",
+    Boolean(
+      request.classifiedIntent &&
+      (request.classifiedIntent.retrievalIntent !== "none" ||
+        request.classifiedIntent.actionIntents.length),
     ),
   instruction:
-    "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, call library_update with {kind:'collections', action:'add', itemIds:[...]} and let the confirmation card collect the target folders. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices. When the user asks to MOVE or reorganize rather than merely file, pass mode:'move' with from:<collectionId> or from:'all'; the default adds, which would leave each item in both its old and new collection." +
+    "Use the host-resolved action contract for library operations. For a move_to_collection obligation, use its exact frozen item IDs and destinationCollectionId (or destination scope.collectionId). Set mode:'move' only when constraints.collectionMode is 'move', and set from only to the authorized sourceCollectionId. Otherwise use mode:'add' to preserve every existing membership. Never infer removal from the original wording or use from:'all' without that exact contract parameter. Missing or ambiguous references require semantic preparation or request_user_input before a mutation proposal. library_search({ entity:'collections', mode:'list', view:'tree' }) supplies collection metadata for permitted reference discovery." +
     "\n\nFor anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary. Each clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. If a condition and operator do not pair up, the error lists the operators that condition accepts — read it and retry rather than falling back to a plain text search." +
     "\n\nTwo rules that decide whether an advanced search works at all:" +
     "\n- fulltextContent, annotationText and childNote match a child item (an attachment or a note), so pass resolveToParents:true or those matches are dropped and the search looks empty." +
@@ -135,19 +138,22 @@ const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
     "\n- recommendations, references, citations modes -> always use source:'openalex' (only OpenAlex supports these)." +
     "\n- search mode -> source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
     "\n\nAuthor search:" +
-    "\n- When the user wants papers by a specific author, use the 'author' parameter (e.g. author:'Adrien Peyrache')." +
+    "\n- Encode an author filter from the prepared research scope in the 'author' parameter (e.g. author:'Adrien Peyrache')." +
     "\n- You can combine 'author' with 'query' to find an author's papers on a specific topic." +
     "\n- Do NOT put author names in the 'query' parameter; use 'author' instead.",
 };
 
 const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(?:tag|untag)\b/i.test(request.userText || "") ||
-    /\b(fix|correct|update|enrich|complete|sync|add|apply|assign|remove|set|replace|rename|merge|move|file|organize|organise)\b.*\b(metadata|fields?|title|authors?|doi|year|date|abstract|tags?|folders?|collections?)\b/i.test(
-      request.userText || "",
+    Boolean(
+      request.classifiedIntent?.actionIntents.some((action) =>
+        ["zotero.tags", "zotero.metadata", "zotero.collections"].includes(
+          action.capability,
+        ),
+      ),
     ),
   instruction:
-    "For library write operations, the confirmation card is the deliverable; call library_update directly instead of stopping with a prose summary. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; use zotero_script only when the semantic tool cannot express the requested computation. When the user asks to fix, correct, or enrich metadata from external sources, use literature_search with workflow:'review' and mode:'metadata' first to fetch canonical data, then continue through the review/update flow. Only call library_update with kind:'metadata' directly when the user provides specific field values to set.",
+    "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; A computation requiring zotero_script also requires separate host authority for that mechanism. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review.",
 };
 
 const NOTE_WRITE_GUIDANCE: ToolGuidance = {
@@ -155,30 +161,36 @@ const NOTE_WRITE_GUIDANCE: ToolGuidance = {
     Boolean(
       context?.matchedSkillIds.includes(WRITE_NOTE_SKILL_ID) ||
       request.forcedSkillIds?.includes(WRITE_NOTE_SKILL_ID) ||
-      inferNoteIntent(request) ||
+      requestsNoteAction(request) ||
       request.actionContract?.obligations.some(
         (obligation) => obligation.capability === "zotero.notes",
       ),
     ),
   instruction:
-    "For an open/current Zotero note, a request to rewrite, polish, shorten, translate, or edit its selected text requires note_write with mode:'edit' and patches. Do not substitute prose alternatives for the edit proposal. Copy selected visible text verbatim as find with findFormat:'text'; when copying Markdown noteText from library_read, use findFormat:'markdown'. Supply replacement as plain visible text. Existing-note changes always open a diff confirmation card for review, in every permission mode. Use mode:'append' for an existing destination note and mode:'create' only for a new child or standalone note. A named Zotero folder means a collection: resolve its ID, create a standalone note, and pass collections:[...]. Pass Markdown unless the user explicitly requests HTML. The requested note must be written with note_write rather than returned as note-ready prose in chat. Requested new notes are created without draft confirmation in every mode; after verification the UI displays the saved content and a direct link to the native note. Do not repeat the full saved content in the completion message. After an edit or append tool returns success, the user has already approved and the change is saved; do not claim a diff is still awaiting review. " +
+    "Execute a resolved note_edit obligation with note_write mode:'edit' and patches against its exact note target. Do not substitute prose alternatives for the edit proposal. Copy selected visible text verbatim as find with findFormat:'text'; when copying Markdown noteText from library_read, use findFormat:'markdown'. Supply replacement as plain visible text. Existing-note changes always open a diff confirmation card for review, in every permission mode. Map the resolved note_append obligation to mode:'append' and note_create to mode:'create'. Use only the contract's resolved parent or collection destination; unresolved names return to semantic preparation. Pass the finalized asset in its declared format. The requested note must be written with note_write rather than returned as note-ready prose in chat. Requested new notes are created without draft confirmation in every mode; after verification the UI displays the saved content and a direct link to the native note. Do not repeat the full saved content in the completion message. After an edit or append tool returns success, the user has already approved and the change is saved; do not claim a diff is still awaiting review. " +
     SOURCE_NOTE_COPY_GUIDANCE,
 };
 
 const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(import.*file|import.*pdf|import.*from.*(desktop|download|folder|directory|disk)|local.*file|add.*file.*library)\b/i.test(
-      request.userText || "",
+    Boolean(
+      request.classifiedIntent?.actionIntents.some((action) =>
+        ["import_local_files"].includes(action.operation),
+      ),
     ),
   instruction:
-    "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. First use run_command to list files when paths are unknown, then call library_import with kind:'files' and the selected paths. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
+    "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. Use only resolved paths within the contract's source boundary. Missing paths require preparation; this import obligation does not independently authorize command execution. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
     "\n\nkind:'identifiers' resolves DOIs, ISBNs, PMIDs, arXiv IDs and ADS bibcodes. It cannot import from a page URL — Zotero has no translator path for that — so take the DOI or arXiv ID off the page instead.",
 };
 
 const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(merge|dedupe|dedup|duplicat|combine|restore|recover|undelete|trash|deleted)\b/i.test(
-      request.userText || "",
+    Boolean(
+      request.classifiedIntent?.actionIntents.some((action) =>
+        ["merge_items", "trash_items", "restore_from_trash"].includes(
+          action.operation,
+        ),
+      ),
     ),
   instruction:
     "To merge duplicates: first use library_search({ entity:'items', mode:'duplicates' }) to find duplicate groups, then use library_read to compare metadata and decide which item is the best master, then call library_delete({ mode:'merge', ... }) with the master and the others. The master keeps all children (attachments, notes, tags, collections) from the merged items." +
@@ -187,11 +199,17 @@ const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
 
 const ATTACHMENT_UPDATE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(attachment|rename.*file|relink|broken.*link|missing.*file|delete.*attachment|remove.*attachment)\b/i.test(
-      request.userText || "",
+    Boolean(
+      request.classifiedIntent?.actionIntents.some((action) =>
+        [
+          "delete_attachment",
+          "rename_attachment",
+          "relink_attachment",
+        ].includes(action.operation),
+      ),
     ),
   instruction:
-    "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. For batch renaming with computed filenames, use zotero_script instead.",
+    "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
 };
 
 function markInternalTool<TInput, TResult>(
@@ -248,7 +266,7 @@ function createLibraryUpdateTool(tools: {
             "setColor",
           ],
           description:
-            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given — use it when the user wants a definite set, since adding is cumulative and drifts across batches. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
+            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and corresponds only to a set_item_tags obligation; add/remove correspond to apply_tags/remove_tags. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
         },
         itemIds: {
           ...NUMBER_ARRAY_SCHEMA,
@@ -302,7 +320,7 @@ function createLibraryUpdateTool(tools: {
           type: "string",
           enum: ["add", "move"],
           description:
-            "For kind:'collections' with action:'add'. 'add' (default) files the item and leaves its other collections alone. 'move' also takes it out of the collection named by 'from', so the item ends up filed only where the user asked. Use 'move' whenever the user says move, reorganize, or re-file — 'add' leaves the item in both places.",
+            "For kind:'collections' with action:'add', follow the resolved obligation: constraints.collectionMode:'move' requires mode:'move' and from equal to its exact sourceCollectionId. Otherwise mode:'add' preserves all existing memberships. The original request wording cannot override this contract.",
         },
         from: {
           description:
@@ -551,7 +569,10 @@ export function createBuiltInToolRegistry(
 ): AgentToolRegistry {
   const planAmendments = new PlanAmendmentService(deps.zoteroGateway);
   const registry = new AgentToolRegistry(
-    new ActionContractService(deps.zoteroGateway),
+    new ActionContractService(
+      deps.zoteroGateway,
+      new ModelSemanticReferenceResolver(),
+    ),
     planAmendments,
   );
   const queryLibrary = createQueryLibraryTool(deps.zoteroGateway);
@@ -677,7 +698,7 @@ export function createBuiltInToolRegistry(
       name: "note_write_batch",
       label: "Write Notes",
       description:
-        "Write a note onto each of many items in one batch operation. Use this whenever the user asks for a note on several papers.",
+        "Write a note onto each of many items in one batch operation. Use this for resolved per-item note_create obligations covering those exact papers.",
     }),
   );
   registry.register(savedSearchUpdate);
@@ -711,7 +732,11 @@ export function createBuiltInToolRegistry(
   registry.register(createToolResultReadTool());
   registry.register(createUpdatePlanTool(deps.zoteroGateway));
   registry.register(createPreparePlanExecutionTool(deps.zoteroGateway));
-  registry.register(createRequestUserInputTool());
+  registry.register(
+    createRequestUserInputTool((request) =>
+      registry.createActionContract(request),
+    ),
+  );
   registry.register(createTaskUpdateTool());
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
   registry.register(createSubmitPlanDocumentTool(deps.zoteroGateway));

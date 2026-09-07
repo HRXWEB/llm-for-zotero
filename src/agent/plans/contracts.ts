@@ -1,3 +1,7 @@
+import { isActionIndexList } from "../contracts/workflowDependencies";
+import { parseActionIntents } from "../model/actionIntent";
+import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
+import { decodeStoredSemanticIntent } from "../model/semanticIntentSchema";
 import type {
   AgentActionCapability,
   AgentActionContract,
@@ -85,6 +89,7 @@ function decodeActionParameters(
     "semanticAction",
     "tags",
     "metadataFields",
+    "metadataValues",
     "tag",
     "newTag",
     "collectionName",
@@ -110,6 +115,7 @@ function decodeActionParameters(
     "permanent",
     "filePath",
     "contentHash",
+    "documentId",
     "commandFingerprint",
     "settingsKey",
     "settingsValue",
@@ -192,6 +198,10 @@ function decodeActionParameters(
     semanticAction: semanticAction as AgentActionParameters["semanticAction"],
     tags: stringList("tags"),
     metadataFields: stringList("metadataFields"),
+    metadataValues:
+      input.metadataValues === undefined
+        ? undefined
+        : record(input.metadataValues, `${label}.metadataValues`),
     tag: optionalText(input.tag, `${label}.tag`),
     newTag: optionalText(input.newTag, `${label}.newTag`),
     collectionName: optionalText(
@@ -226,6 +236,7 @@ function decodeActionParameters(
     permanent: boolean("permanent"),
     filePath: optionalText(input.filePath, `${label}.filePath`),
     contentHash: optionalText(input.contentHash, `${label}.contentHash`),
+    documentId: optionalText(input.documentId, `${label}.documentId`),
     commandFingerprint: optionalText(
       input.commandFingerprint,
       `${label}.commandFingerprint`,
@@ -372,7 +383,14 @@ function decodeActionIntent(
   ) {
     throw new Error(`${label}.scopeRole is invalid`);
   }
-  const result: AgentActionIntent & { id?: string } = {
+  if (input.dependsOn !== undefined && !isActionIndexList(input.dependsOn))
+    throw new Error(`${label}.dependsOn must be unique action indexes`);
+  const result: AgentActionIntent & {
+    id?: string;
+    sourceActionIndex?: number;
+  } = {
+    dependsOn: input.dependsOn as number[] | undefined,
+    contentFrom: optionalText(input.contentFrom, `${label}.contentFrom`),
     capability,
     operation,
     proofDomain,
@@ -398,8 +416,27 @@ function decodeActionIntent(
         }
       : undefined,
   };
+  if (input.targetSelectors !== undefined || input.discovery !== undefined) {
+    const decoded = parseActionIntents([
+      {
+        operation,
+        coverage: input.coverage,
+        targetKind: input.targetKind,
+        targetSelectors: input.targetSelectors,
+        discovery: input.discovery,
+      },
+    ])[0];
+    if (!decoded) throw new Error(`${label} reference selection is invalid`);
+    result.targetSelectors = decoded.targetSelectors;
+    result.discovery = decoded.discovery;
+  }
   if (options.obligation) {
     result.id = text(input.id, `${label}.id`);
+    if (input.sourceActionIndex !== undefined)
+      result.sourceActionIndex = nonNegativeInteger(
+        input.sourceActionIndex,
+        `${label}.sourceActionIndex`,
+      );
     if (scopeInput) {
       result.scope = {
         ...result.scope!,
@@ -416,6 +453,24 @@ function decodeActionIntent(
           `${label}.scope.collectionPath`,
         ),
       } as AgentActionContract["obligations"][number]["scope"];
+    }
+    if (input.destinationCreation !== undefined) {
+      const dependency = record(
+        input.destinationCreation,
+        `${label}.destinationCreation`,
+      );
+      (
+        result as AgentActionContract["obligations"][number]
+      ).destinationCreation = {
+        obligationId: text(
+          dependency.obligationId,
+          `${label}.destinationCreation.obligationId`,
+        ),
+        libraryID: positiveInteger(
+          dependency.libraryID,
+          `${label}.destinationCreation.libraryID`,
+        ),
+      };
     }
     if (input.targetBoundary !== undefined) {
       const boundary = record(input.targetBoundary, `${label}.targetBoundary`);
@@ -730,7 +785,7 @@ function decodeDocumentSpec(value: unknown): DocumentSpec {
 export function decodeActionContract(value: unknown): AgentActionContract {
   const input = record(value, "effects.libraryMutation.contract");
   if (
-    (input.version !== 2 && input.version !== 3) ||
+    (input.version !== 2 && input.version !== 3 && input.version !== 4) ||
     !Array.isArray(input.obligations)
   ) {
     throw new Error("effects.libraryMutation.contract is invalid");
@@ -746,6 +801,7 @@ export function decodeActionContract(value: unknown): AgentActionContract {
     );
   }
   if (
+    input.interpretationSource !== "semantic" &&
     input.interpretationSource !== "classifier" &&
     input.interpretationSource !== "deterministic_fallback"
   ) {
@@ -753,8 +809,22 @@ export function decodeActionContract(value: unknown): AgentActionContract {
       "effects.libraryMutation.contract.interpretationSource is invalid",
     );
   }
-  const hardConstraints =
-    input.hardConstraints === undefined
+  const semanticIntent =
+    input.version === 4 ? decodeStoredSemanticIntent(input.intent) : undefined;
+  if (
+    semanticIntent &&
+    input.hardConstraints !== undefined &&
+    !canonicalJsonEqual(
+      input.hardConstraints,
+      semanticIntent.semantic!.constraints,
+    )
+  )
+    throw new Error(
+      "Stored action constraints disagree with their semantic intent.",
+    );
+  const hardConstraints = semanticIntent
+    ? semanticIntent.semantic!.constraints
+    : input.hardConstraints === undefined
       ? undefined
       : (() => {
           if (!Array.isArray(input.hardConstraints)) {
@@ -863,7 +933,8 @@ export function decodeActionContract(value: unknown): AgentActionContract {
   ) as AgentActionContract["obligations"];
   uniqueIds(obligations, "effects.libraryMutation.contract.obligations");
   return {
-    version: input.version as 2 | 3,
+    version: input.version as 2 | 3 | 4,
+    intent: semanticIntent,
     id,
     hardConstraints,
     writeDisposition: input.writeDisposition,

@@ -1,3 +1,8 @@
+import {
+  semanticContractFixture,
+  classifiedFixture,
+  semanticResponseFixture,
+} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
@@ -19,12 +24,12 @@ describe("workflow: behavior audit shared-owner regressions", function () {
     text: string,
   ) {
     const contracts = new ActionContractService(new ZoteroGateway());
-    const contract: AgentActionContract = {
+    const contract: AgentActionContract = semanticContractFixture({
       version: 3,
       id: `behavior-review-${Date.now()}`,
       hardConstraints: [],
       writeDisposition: "required",
-      interpretationSource: "classifier",
+      interpretationSource: "semantic",
       obligations: [
         {
           id: "write",
@@ -39,7 +44,7 @@ describe("workflow: behavior audit shared-owner regressions", function () {
           parameters,
         },
       ],
-    };
+    });
     const context: AgentToolContext = {
       request: {
         conversationKey: 2500900001,

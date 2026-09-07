@@ -649,10 +649,13 @@ describe("multiContextPlanner", function () {
         inputTokenCap: 4096,
         outputTokenLimit: { mode: "custom", tokens: 256 },
       },
-      queryPlan: buildRetrievalQueryPlan({
-        query: "Read the complete second selected paper.",
-        readIntent: "full-once",
-      }),
+      queryPlan: {
+        ...buildRetrievalQueryPlan({
+          query: "Read the complete second selected paper.",
+          readIntent: "full-once",
+        }),
+        fullReadTargets: { kind: "item_ids", itemIds: [124] },
+      },
     });
 
     assert.equal(plan.strategy, "paper-exhaustive-full");
@@ -700,7 +703,10 @@ describe("multiContextPlanner", function () {
     }
 
     assert.instanceOf(caught, Error);
-    assert.include((caught as Error).message, "ambiguous");
+    assert.include(
+      (caught as Error).message,
+      "not available in the frozen context",
+    );
   });
 
   it("uses focused retrieval on paper-mode follow-up turns even when full text would fit", async function () {
@@ -969,7 +975,7 @@ describe("multiContextPlanner", function () {
     assert.include((plan as any).coverageReceipt?.text, "Planned papers: 1");
   });
 
-  it("adds a capability reminder only for follow-up questions about access or coverage", async function () {
+  it("supplies the same evidence-based coverage instruction independently of follow-up wording", async function () {
     const paper = registerMockPaper({
       itemId: 34,
       contextItemId: 35,
@@ -1009,8 +1015,8 @@ describe("multiContextPlanner", function () {
     });
 
     assert.equal(plan.strategy, "paper-followup-retrieval");
-    assert.include(plan.assistantInstruction || "", "full text");
-    assert.isUndefined(unrelated.assistantInstruction);
+    assert.include(plan.assistantInstruction || "", "reading coverage");
+    assert.equal(unrelated.assistantInstruction, plan.assistantInstruction);
   });
 
   it("keeps explicit full-text papers in full context before falling back to retrieval for overflow", async function () {

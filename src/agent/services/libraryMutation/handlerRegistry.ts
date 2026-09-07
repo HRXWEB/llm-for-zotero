@@ -26,6 +26,7 @@ export const libraryMutationHandlers = {
     targetItemIds: (operation) => (operation.itemId ? [operation.itemId] : []),
     actionParameters: (operation) => ({
       metadataFields: Object.keys(operation.metadata),
+      metadataValues: operation.metadata,
     }),
     stateSections: ["items"],
     replay: "state-aware",
@@ -351,7 +352,7 @@ export const libraryMutationHandlers = {
     targetScope: "none",
     actionParameters: (operation) => ({
       savedSearchId: operation.savedSearchId,
-      permanent: operation.permanent,
+      permanent: operation.permanent === true,
     }),
     additionalActionTargets: (operation) => [
       `saved-search:${operation.savedSearchId}`,
@@ -634,7 +635,7 @@ export const libraryMutationHandlers = {
     actionParameters: (operation) => ({
       collectionId: operation.collectionId,
       deleteItems: operation.deleteItems,
-      permanent: operation.permanent,
+      permanent: operation.permanent === true,
     }),
     additionalActionTargets: (operation) => [
       `collection:${operation.collectionId}`,
@@ -722,6 +723,7 @@ export const libraryMutationHandlers = {
   }),
   trash_items: defineHandler("trash_items", {
     actionCapability: "zotero.trash",
+    actionParameters: () => ({ permanent: false }),
     targetScope: "items",
     targetItemIds: (operation) => operation.itemIds,
     stateSections: ["items"],

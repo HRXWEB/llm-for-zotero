@@ -7,7 +7,7 @@ import { resolveDisplayConversationKind } from "../../portalScope";
 import { resolveSlashActionChatMode } from "../../slashMenuBehavior";
 import {
   isPagedLibraryActionForMode,
-  parseCommandParams,
+  buildCommandDefaultInput,
   shouldExecuteAgentActionImmediatelyFromSlash,
   type ActionChatMode,
 } from "./actionCommandParams";
@@ -334,7 +334,7 @@ export function renderAgentActionsInSlashMenu(
         )
       ) {
         const parsedInput = isPagedLibraryActionForMode(action.name, actionMode)
-          ? parseCommandParams(action.name, "", actionMode)
+          ? buildCommandDefaultInput(action.name, actionMode)
           : undefined;
         void context.executeAgentAction(action, parsedInput, userQuery);
         return;

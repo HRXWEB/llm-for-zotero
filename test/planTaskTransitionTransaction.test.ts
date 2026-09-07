@@ -1,8 +1,33 @@
+import { attachPlanMaterialEvidence } from "../src/agent/plans/materialEvidence";
+import {
+  semanticContractFixture,
+  classifiedFixture,
+} from "./helpers/semanticIntent";
+import type { ActionConstraint } from "../src/agent/authorization/types";
+const noExecution: ActionConstraint[] = [
+  {
+    kind: "deny_mechanisms",
+    mechanisms: ["shell", "zotero_script"],
+    description: "Do not execute commands or scripts.",
+  },
+];
+const noZoteroWrites: ActionConstraint = {
+  kind: "deny_effects",
+  domains: ["zotero_library"],
+  effects: ["create", "modify", "delete"],
+  description: "Do not modify Zotero.",
+};
+const noExternalWrites: ActionConstraint = {
+  kind: "deny_effects",
+  domains: ["filesystem"],
+  effects: ["create", "modify", "delete"],
+  description: "Do not write external files.",
+};
 import {
   createNativeLifecycleTestProcess,
   installDirectPathTestPrefs,
 } from "./helpers/codexNativeLifecycle";
-import { runCodexAppServerNativeTurn } from "../src/codexAppServer/nativeClient";
+import { runCodexAppServerNativeTurn } from "./helpers/preparedNativeTurn";
 import {
   CodexAppServerProcess,
   destroyCachedCodexAppServerProcess,
@@ -48,9 +73,7 @@ import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { createPreparePlanExecutionTool } from "../src/agent/tools/plan/preparePlanExecution";
 import { finalizeNativePlanProposal } from "../src/agent/plans/nativePlanning";
 import { loadPlanArtifact } from "../src/agent/plans/store";
-import { parseActionConstraints } from "../src/agent/authorization/policy";
 import { initResearchStore } from "../src/agent/research/store";
-import { inferActionIntentsFromRequest } from "../src/agent/model/actionIntent";
 import { createCodexNativeActivityTraceControllerForTests } from "../src/modules/contextPanel/chat";
 import {
   initAgentTraceStore,
@@ -417,16 +440,15 @@ describe("transactional Plan task transitions", function () {
         },
       },
     });
-    // The conservative fallback deliberately leaves this prefaced request
-    // unresolved. A proposal must not turn that absence into write authority.
-    assert.isEmpty(inferActionIntentsFromRequest(request));
+    // A missing semantic interpretation cannot be replaced by a native proposal.
+    assert.isUndefined(request.classifiedIntent);
     request.actionContract = {
       version: 3,
       id: "unresolved-request",
       writeDisposition: "none",
       interpretationSource: "deterministic_fallback",
       obligations: [],
-      hardConstraints: parseActionConstraints(request.userText),
+      hardConstraints: [noExternalWrites, ...noExecution],
     };
     const tool = createPreparePlanExecutionTool();
     const input = tool.validate({
@@ -531,9 +553,7 @@ describe("transactional Plan task transitions", function () {
       runId: "first",
     } as any);
     const original = (await loadPlanArtifact("native-tag-revision", 1))!;
-    const constraints = parseActionConstraints(
-      "Do not execute commands or scripts.",
-    );
+    const constraints = noExecution;
     const revisionRequest = resolvedAgentRequest({
       ...initialRequest,
       userText:
@@ -665,19 +685,14 @@ describe("transactional Plan task transitions", function () {
           writeDisposition: "none",
           interpretationSource: "deterministic_fallback",
           obligations: [],
-          hardConstraints: parseActionConstraints(
-            "Do not execute commands or scripts.",
-          ),
+          hardConstraints: noExecution,
         },
       }),
       runId: "turn",
     } as any);
     const staged = await loadPlanArtifact(plan.planId, 1);
     assert.equal(staged?.status, "drafting");
-    assert.deepEqual(
-      staged?.actionContract?.hardConstraints,
-      parseActionConstraints("Do not execute commands or scripts."),
-    );
+    assert.deepEqual(staged?.actionContract?.hardConstraints, noExecution);
     let approvalError: unknown;
     try {
       await new PlanExecutionCoordinator().approve({
@@ -930,9 +945,7 @@ describe("transactional Plan task transitions", function () {
       ],
     });
     if (!input.ok) throw new Error(input.error);
-    const restrictions = parseActionConstraints(
-      "Do not modify Zotero. Do not execute commands or scripts.",
-    );
+    const restrictions = [noZoteroWrites, ...noExecution];
     for (const [attempt, revision] of [1, 1, 2].entries()) {
       await tool.execute(input.value, {
         runId: "turn",
@@ -1082,7 +1095,7 @@ describe("transactional Plan task transitions", function () {
                 "prepare_plan_execution",
                 "The resumed thread must refresh its planning catalog before execution",
               );
-              if (turnNumber <= 4)
+              if (turnNumber <= 6)
                 assert.include(cachedToolNames!, "task_update");
               else assert.notInclude(cachedToolNames!, "task_update");
             }
@@ -1253,7 +1266,14 @@ describe("transactional Plan task transitions", function () {
         approvedDigest: ledger.planDigest,
         provider: "codex" as const,
       };
-      await runCodexAppServerNativeTurn({ ...base, planContext: execution });
+      const unfinished = await runCodexAppServerNativeTurn({
+        ...base,
+        planContext: execution,
+      });
+      assert.isString(
+        unfinished.verificationFailure,
+        "An incomplete native plan cannot claim completion",
+      );
       assert.include(
         requests.filter((r) => r.method === "turn/start").at(-1)!.params
           .additionalContext?.zotero_plan?.value || "",
@@ -1266,7 +1286,7 @@ describe("transactional Plan task transitions", function () {
         requests
           .filter((r) => r.method === "turn/start")
           .map((r) => r.params.collaborationMode.mode),
-        ["plan", "plan", "default", "default", "default"],
+        ["plan", "plan", "default", "default", "default", "default", "default"],
       );
       assert.isAtLeast(
         requests.filter((r) => r.method === "thread/resume").length,
@@ -1559,6 +1579,75 @@ describe("transactional Plan task transitions", function () {
         : undefined,
       second.taskId,
     );
+  });
+
+  it("advances an intermediate material task from stored document evidence before the later save", async function () {
+    const first = {
+      ...reasoningTask(),
+      expectedEffect: "artifact",
+      materialOutputId: "summary",
+      completionRequirements: [
+        {
+          requirementId: "material",
+          kind: "material_integrity",
+          criterionIds: ["material"],
+          contractDigest: "sha256:contract",
+        },
+      ],
+      acceptanceCriteria: [
+        {
+          criterionId: "material",
+          description: "Stored summary",
+          verifier: "material_integrity",
+        },
+      ],
+    } as ExecutionTask;
+    const second = {
+      ...reasoningTask(),
+      taskId: "execution-1:save",
+      planStepId: "save",
+      status: "pending",
+      attemptCount: 0,
+      startedAt: undefined,
+    } as ExecutionTask;
+    await savePlanExecutionLedger({ ...execution(), tasks: [first, second] });
+    const request = resolvedAgentRequest({
+      conversationKey: 41,
+      mode: "agent",
+      userText: "Execute approved workflow",
+      libraryID: 1,
+      planContext: {
+        phase: "executing",
+        planId: "plan-1",
+        revision: 1,
+        executionId: "execution-1",
+        approvedDigest: "sha256:plan",
+        activeTaskId: first.taskId,
+        provider: "original",
+      },
+    });
+    await attachPlanMaterialEvidence(request, "summary", {
+      documentId: "durable-summary",
+      conversationKey: 41,
+      contentHash: "sha256:summary",
+      validation: { integrityValidated: true },
+    } as PlanDocument);
+    const session = new PlanExecutionRunSession(request, async () => {});
+    await session.recordToolResult({
+      toolName: "submit_document",
+      executionClass: "control",
+      result: {
+        callId: "submit",
+        name: "submit_document",
+        ok: true,
+        actionReceipts: [],
+        content: { documentId: "durable-summary" },
+      },
+      runId: "run",
+    });
+    const ledger = await loadPlanExecutionLedger("execution-1");
+    assert.equal(ledger?.tasks[0].status, "completed");
+    assert.equal(ledger?.activeTaskId, second.taskId);
   });
 
   it("rolls back evidence and progress when the transition write fails", async function () {

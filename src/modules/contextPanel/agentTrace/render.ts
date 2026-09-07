@@ -5490,6 +5490,11 @@ export function renderAgentTrace({
   allowPlanRecovery = false,
 }: RenderAgentTraceParams): HTMLElement | null {
   const runId = message.agentRunId?.trim() || "pending";
+  // Temporary native events remain visible until the durable run is loaded.
+  // The caller supplies this callback only while that run is absent from cache.
+  onTraceMissing?.();
+  if (!events.length && message.pendingAgentTraceEvents?.length)
+    events = message.pendingAgentTraceEvents;
   if (
     !events.length &&
     !message.pendingAgentTraceEvents?.length &&
@@ -5539,7 +5544,6 @@ export function renderAgentTrace({
   view.lastEvent = events[events.length - 1];
 
   if (!events.length) {
-    onTraceMissing?.();
     const loadingRow = doc.createElement("div");
     loadingRow.className = "llm-at-row llm-at-row-plan";
     const loadingIcon = doc.createElement("span");
@@ -5935,7 +5939,10 @@ export function renderAgentTrace({
     message.documentId || message.planDocumentId || getPlanDocumentId(events);
   const savedNotePrimary =
     hasSavedNote &&
-    savedNoteIsPrimaryOutcome(userMessage?.text || "", Boolean(planProjection));
+    savedNoteIsPrimaryOutcome(
+      events.map((record) => record.payload),
+      Boolean(planProjection),
+    );
   if (savedNotePrimary) onInterleavedText?.();
   if (planDocumentId && !savedNotePrimary) {
     // The immutable card is the visible deliverable. The message text remains

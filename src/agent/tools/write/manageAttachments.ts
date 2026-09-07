@@ -64,8 +64,14 @@ export function createManageAttachmentsTool(
 
     guidance: {
       matches: (request) =>
-        /\b(attachment|rename.*file|relink|broken.*link|missing.*file|delete.*attachment|remove.*attachment)\b/i.test(
-          request.userText || "",
+        Boolean(
+          request.classifiedIntent?.actionIntents.some((action) =>
+            [
+              "delete_attachment",
+              "rename_attachment",
+              "relink_attachment",
+            ].includes(action.operation),
+          ),
         ),
       instruction:
         "Use manage_attachments to delete, rename, or re-link a single attachment. " +

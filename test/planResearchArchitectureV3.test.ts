@@ -45,10 +45,7 @@ import {
   buildAdaptiveScreeningBatch,
   type ScreeningBatchPaper,
 } from "../src/agent/research/screeningBatch";
-import {
-  createUpdatePlanTool,
-  extractExplicitResearchScopeCount,
-} from "../src/agent/tools/plan/updatePlan";
+import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
 import {
   buildPlanFinalCorrection,
@@ -201,26 +198,6 @@ describe("Plan Mode research architecture v3", function () {
         deepReadPlanned: 10,
       }),
       "a corpus-wide deep-read plan cannot use relative selection as an exclusion reason",
-    );
-  });
-
-  it("derives an explicit research scope count without confusing the deep-read count", function () {
-    assert.equal(
-      extractExplicitResearchScopeCount(
-        "Use exactly the first 55 alphabetically listed papers and deep-read 3.",
-      ),
-      55,
-    );
-    assert.equal(
-      extractExplicitResearchScopeCount(
-        "Create a review using exactly 30 articles from this collection.",
-      ),
-      30,
-    );
-    assert.isUndefined(
-      extractExplicitResearchScopeCount(
-        "Screen the collection and deep-read exactly 3 papers.",
-      ),
     );
   });
 

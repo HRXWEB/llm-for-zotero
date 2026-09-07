@@ -1,3 +1,8 @@
+import {
+  semanticContractFixture,
+  classifiedFixture,
+  semanticResponseFixture,
+} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -44,12 +49,12 @@ describe("workflow: create then show saved note", function () {
             "note_write",
           ),
         );
-        const contract: AgentActionContract = {
+        const contract: AgentActionContract = semanticContractFixture({
           version: 3,
           id: `saved-note-${mode}`,
           hardConstraints: [],
           writeDisposition: "required",
-          interpretationSource: "classifier",
+          interpretationSource: "semantic",
           obligations: [
             {
               id: "create-note",
@@ -61,7 +66,7 @@ describe("workflow: create then show saved note", function () {
               parameters: { noteMode: "create" },
             },
           ],
-        };
+        });
         const context: AgentToolContext = {
           request: {
             conversationKey: parent.id,
@@ -116,13 +121,14 @@ describe("workflow: create then show saved note", function () {
         );
         const panel = await api.renderPanelForItem(parent.id);
         root = api.renderToolResultForPanel(panel.panelId, result, {
-          documentId: "legacy-duplicate-note-document",
+          documentId: "duplicate-note-document",
+          actionContract: contract,
         });
         assert.exists(root);
         assert.lengthOf(
           root!.querySelectorAll(".llm-plan-container"),
           1,
-          "a restored note-only turn has one card, not a second document",
+          "a restored semantic note-only turn has one card, not a second document",
         );
         const card = root!.querySelector<HTMLElement>(".llm-saved-note-card")!;
         assert.exists(

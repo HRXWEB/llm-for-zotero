@@ -1,3 +1,7 @@
+import {
+  validWorkflowDependencies,
+  workflowDependencyIssue,
+} from "./workflowDependencies";
 import type {
   AgentActionContract,
   AgentActionEvidence,
@@ -20,19 +24,16 @@ import {
   type PreparedActionExecution,
 } from "./actionOperationEvidence";
 import {
+  ActionReferenceResolutionError,
   listCurrentLibraryTargetIds,
   listScopeTargetIds,
   resolveCreatedDestinations,
   resolveScope,
+  resolveDescriptiveTargets,
 } from "./actionScope";
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
-import { isLocalPathInsideOrEqual } from "../../utils/notesDirectoryConfig";
 import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
-import {
-  normalizeStoredActionConstraints,
-  parseActionConstraints,
-} from "../authorization/policy";
 
 export type {
   ActionContractGateway,
@@ -45,6 +46,7 @@ export {
 
 export type ScopeValidationFailure = {
   code:
+    | "workflow_dependency"
     | "missing_typed_proposal"
     | "different_operation"
     | "closed_obligation"
@@ -104,7 +106,9 @@ function parametersMatch(
     const proposed = actualValue[key as keyof AgentActionParameters];
     return Array.isArray(value)
       ? Array.isArray(proposed) && sameArrayValues(value, proposed)
-      : proposed === value;
+      : value && typeof value === "object"
+        ? canonicalJsonEqual(value, proposed)
+        : proposed === value;
   });
 }
 
@@ -117,35 +121,11 @@ function matchingObligations(
       !obligation.destinationCreation &&
       obligation.operation === proposal.operation &&
       obligation.proofDomain === proposal.proofDomain &&
-      parametersMatch(obligation.parameters, proposal.parameters),
+      parametersMatch(obligation.parameters, proposal.parameters) &&
+      (obligation.operation !== "move_to_collection" ||
+        obligation.parameters?.sourceCollectionId ===
+          proposal.parameters?.sourceCollectionId),
   );
-}
-
-function isRequestedFilePreparation(
-  contract: AgentActionContract,
-  proposal: AgentActionProposal,
-): boolean {
-  if (
-    proposal.operation !== "command_execute" ||
-    proposal.source !== "command" ||
-    !proposal.parameters?.filePaths?.length
-  )
-    return false;
-  return contract.obligations.some((obligation) => {
-    const filePath =
-      obligation.operation === "file_write"
-        ? obligation.parameters?.filePath
-        : undefined;
-    if (!filePath) return false;
-    const directory = filePath.replace(/[\\/][^\\/]+$/, "");
-    return (
-      directory !== filePath &&
-      directory.length > 1 &&
-      proposal.parameters!.filePaths!.every((target) =>
-        isLocalPathInsideOrEqual(target, directory),
-      )
-    );
-  });
 }
 
 function obligationStatus(
@@ -361,16 +341,77 @@ function fileEvidence(
       reason: `File readback hash ${actualHash} did not match ${expectedHash}.`,
     };
   }
+  if (proposal.expectedFiles?.length) {
+    const files = Array.isArray(record.exportedFiles)
+      ? (record.exportedFiles as Record<string, unknown>[])
+      : [];
+    for (const expected of proposal.expectedFiles) {
+      const actual = files.find((file) => file.filePath === expected.path);
+      if (
+        !actual ||
+        actual.exists !== true ||
+        actual.contentHash !== expected.contentHash ||
+        actual.bytesWritten !== expected.byteLength
+      )
+        return {
+          verified: false,
+          target,
+          reason: `Export member ${expected.path} was not verified against the authorized bytes.`,
+        };
+    }
+  }
   return { verified: true, target, evidenceRef: `sha256:${actualHash}` };
 }
 
 export class ActionContractService {
-  constructor(private readonly gateway: ActionContractGateway) {}
+  constructor(
+    private readonly gateway: ActionContractGateway,
+    private readonly references?: import("./semanticReferences").SemanticReferenceResolver,
+  ) {}
 
   async createContract(
     request: AgentRuntimeRequest,
   ): Promise<AgentActionContract> {
-    const intents = request.classifiedIntent?.actionIntents || [];
+    if (!request.classifiedIntent?.semantic)
+      throw new Error(
+        "A semantic interpretation is required before constructing an action contract.",
+      );
+    if (request.classifiedIntent.semantic.questions.length)
+      throw new ActionReferenceResolutionError(
+        request.classifiedIntent.semantic.questions.join("\n"),
+      );
+    if (
+      !validWorkflowDependencies(
+        request.classifiedIntent.actionIntents,
+        request.classifiedIntent.semantic.materialOutputs,
+      )
+    )
+      throw new Error(
+        "The semantic workflow contains unresolved or cyclic dependencies.",
+      );
+    const intents: import("../types").AgentActionIntent[] = [];
+    for (const intent of request.classifiedIntent.actionIntents)
+      intents.push(
+        await resolveDescriptiveTargets(
+          this.gateway,
+          request,
+          intent,
+          this.references,
+        ),
+      );
+    if (
+      request.classifiedIntent.semantic.reading.coverage === "exhaustive" &&
+      !intents.some((intent) => intent.operation === "read_full")
+    ) {
+      intents.push({
+        operation: "read_full",
+        capability: "zotero.read",
+        proofDomain: "zotero_state",
+        coverage: "all",
+        targetKind: "papers",
+        constraints: { readMode: "full" },
+      });
+    }
     const writeDisposition =
       request.classifiedIntent?.writeDisposition ||
       (intents.length ? "required" : "none");
@@ -393,34 +434,42 @@ export class ActionContractService {
       if (intent.operation !== "create_collection") continue;
       collectionCreations.set(
         index,
-        (await resolveScope(this.gateway, request, intent)).map(
-          (obligation, offset) => ({
-            ...obligation,
-            id: `${contractId}:creation:${index}:${offset}`,
-          }),
-        ),
+        (
+          await resolveScope(this.gateway, request, intent, [], this.references)
+        ).map((obligation, offset) => ({
+          ...obligation,
+          id: `${contractId}:creation:${index}:${offset}`,
+        })),
       );
     }
     const resolved: AgentActionObligation[] = [];
     for (const [index, intent] of intents.entries()) {
+      const obligations =
+        collectionCreations.get(index) ||
+        (await resolveScope(
+          this.gateway,
+          request,
+          intent,
+          [...collectionCreations.values()].flat(),
+          this.references,
+        ));
       resolved.push(
-        ...(collectionCreations.get(index) ||
-          (await resolveScope(
-            this.gateway,
-            request,
-            intent,
-            [...collectionCreations.values()].flat(),
-          ))),
+        ...obligations.map((obligation) => ({
+          ...obligation,
+          sourceActionIndex: index,
+        })),
       );
     }
     return {
-      version: 3,
+      version: 4,
       id: contractId,
-      hardConstraints: parseActionConstraints(request.userText || ""),
+      intent: JSON.parse(JSON.stringify(request.classifiedIntent)),
+      hardConstraints: JSON.parse(
+        JSON.stringify(request.classifiedIntent.semantic.constraints),
+      ),
       writeDisposition,
       interpretationSource:
-        request.classifiedIntent?.actionInterpretationSource ||
-        "deterministic_fallback",
+        request.classifiedIntent?.actionInterpretationSource || "semantic",
       obligations: resolved.map((obligation, index) => ({
         ...obligation,
         id: obligation.id.startsWith(`${contractId}:creation:`)
@@ -552,16 +601,17 @@ export class ActionContractService {
     }
     if (!prepared.proposals.length) return null;
     if (!contract.obligations.length) {
-      // Classifier output is a planning hint, not permission authority.
-      // A concrete proposal that emerges later is reconciled by the runtime's
-      // permission policy. This is the issue #413 path.
-      return null;
+      return failure(
+        "The semantic intent contains no authorized action obligations.",
+        contract,
+        prepared,
+        undefined,
+        undefined,
+        "different_operation",
+      );
     }
 
     for (const proposal of prepared.proposals) {
-      // Preparation may support an export, but its execution receipt cannot
-      // satisfy the independent file readback obligation.
-      if (isRequestedFilePreparation(contract, proposal)) continue;
       const matches = matchingObligations(contract, proposal);
       if (!matches.length) {
         return failure(
@@ -575,7 +625,7 @@ export class ActionContractService {
           "different_operation",
         );
       }
-      const openMatches = matches.filter((obligation) =>
+      let openMatches = matches.filter((obligation) =>
         obligationIsUnresolved(options.progress, obligation.id),
       );
       if (!openMatches.length) {
@@ -596,6 +646,27 @@ export class ActionContractService {
           "closed_obligation",
         );
       }
+      const dependencies = openMatches.map((obligation) => ({
+        obligation,
+        issue: workflowDependencyIssue(
+          contract!,
+          obligation,
+          proposal,
+          options.progress,
+        ),
+      }));
+      openMatches = dependencies
+        .filter((entry) => !entry.issue)
+        .map((entry) => entry.obligation);
+      if (!openMatches.length)
+        return failure(
+          dependencies.map((entry) => entry.issue).join(" "),
+          contract,
+          prepared,
+          proposal.requestedTargets,
+          [],
+          "workflow_dependency",
+        );
       for (const obligation of openMatches) {
         if (isSourceCollectionItemObligation(obligation)) continue;
         const prefix = obligation.constraints?.tagPrefix;
@@ -759,7 +830,6 @@ export class ActionContractService {
               [`collection:${scope.collectionId}`],
             );
           }
-          continue;
         }
         if (!obligation.targetBoundary) continue;
         const boundary = obligation.targetBoundary;
@@ -779,6 +849,7 @@ export class ActionContractService {
         }
         const currentTargets =
           scope &&
+          obligation.scopeRole !== "destination" &&
           (boundary.kind === "collection" || boundary.kind === "selection")
             ? (
                 await listScopeTargetIds(this.gateway, {
@@ -1033,11 +1104,25 @@ export class ActionContractService {
             ? "already_satisfied"
             : "applied"
           : "unverified",
-        requestedTargets: [proof.target],
+        requestedTargets: proposal.expectedFiles?.map(
+          (file) => `file:${file.path}`,
+        ) || [proof.target],
         appliedTargets:
-          proof.verified && params.effect !== "none" ? [proof.target] : [],
+          proof.verified && params.effect !== "none"
+            ? proposal.requestedTargets
+            : [],
         alreadySatisfiedTargets:
-          proof.verified && params.effect === "none" ? [proof.target] : [],
+          proof.verified && params.effect === "none"
+            ? proposal.requestedTargets
+            : [],
+        verifiedFacts: proof.verified
+          ? [
+              ...base.verifiedFacts,
+              ...(proposal.expectedFiles || []).map(
+                (file) => `${file.path}:sha256:${file.contentHash}`,
+              ),
+            ]
+          : base.verifiedFacts,
         reasons: [...base.reasons, ...(proof.reason ? [proof.reason] : [])],
       };
     }

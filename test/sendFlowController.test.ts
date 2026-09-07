@@ -64,7 +64,7 @@ describe("sendFlowController", function () {
       id,
       description: `${id} description`,
       version: 1,
-      patterns: [],
+
       contexts: ["any"],
       activation: "auto",
       instruction: `${id} instructions`,
@@ -1816,61 +1816,18 @@ describe("sendFlowController", function () {
     assert.deepEqual(lastSend.lastSentForcedSkillIds, ["write-note"]);
   });
 
-  it("recognizes fuzzy natural-language Codex skill directives", async function () {
-    const skills = [
-      makeTestSkill("evidence-based-qa", {
-        description:
-          "Locate specific passages in selected papers that support a claim with quoted evidence.",
-      }),
-      makeTestSkill("write-note", {
-        description: "Write a long-form reading or literature note.",
-      }),
-    ];
-
-    const partial = await sendCodexNativeSkillInput(
+  it("preserves natural-language skill requests for semantic interpretation", async function () {
+    for (const text of [
       "use evidence base skill to read the paper",
-      skills,
-    );
-    assert.equal(
-      partial.lastSentQuestion,
-      "$evidence-based-qa\n\nread the paper",
-    );
-    assert.equal(
-      partial.lastSentDisplayQuestion,
-      "use evidence base skill to read the paper",
-    );
-    assert.deepEqual(partial.lastSentForcedSkillIds, ["evidence-based-qa"]);
-
-    const typo = await sendCodexNativeSkillInput(
       "use evidnce based skill to read the paper",
-      skills,
-    );
-    assert.equal(typo.lastSentQuestion, "$evidence-based-qa\n\nread the paper");
-    assert.deepEqual(typo.lastSentForcedSkillIds, ["evidence-based-qa"]);
-
-    const writeNote = await sendCodexNativeSkillInput(
-      "please use write not skill to draft a note",
-      skills,
-    );
-    assert.equal(writeNote.lastSentQuestion, "$write-note\n\ndraft a note");
-    assert.deepEqual(writeNote.lastSentForcedSkillIds, ["write-note"]);
-
-    const description = await sendCodexNativeSkillInput(
-      "use reading note skill to summarize",
-      skills,
-    );
-    assert.equal(description.lastSentQuestion, "$write-note\n\nsummarize");
-    assert.deepEqual(description.lastSentForcedSkillIds, ["write-note"]);
-
-    const quoted = await sendCodexNativeSkillInput(
-      'use "evidence base" skill: quote the method',
-      skills,
-    );
-    assert.equal(
-      quoted.lastSentQuestion,
-      "$evidence-based-qa\n\nquote the method",
-    );
-    assert.deepEqual(quoted.lastSentForcedSkillIds, ["evidence-based-qa"]);
+      "请用文献综述技能",
+    ]) {
+      const sent = await sendCodexNativeSkillInput(text, [
+        makeTestSkill("evidence-based-qa"),
+      ]);
+      assert.equal(sent.lastSentQuestion, text);
+      assert.isUndefined(sent.lastSentForcedSkillIds);
+    }
   });
 
   it("does not force ambiguous or non-leading natural-language skill mentions", async function () {
@@ -1914,7 +1871,7 @@ describe("sendFlowController", function () {
     assert.isUndefined(midSentence.lastSentForcedSkillIds);
   });
 
-  it("allows natural-language directives to force manual Codex skills", async function () {
+  it("leaves natural-language manual skill requests to semantic interpretation", async function () {
     const manual = await sendCodexNativeSkillInput(
       "use manual helper skill to run this",
       [
@@ -1925,8 +1882,11 @@ describe("sendFlowController", function () {
       ],
     );
 
-    assert.equal(manual.lastSentQuestion, "$manual-helper\n\nrun this");
-    assert.deepEqual(manual.lastSentForcedSkillIds, ["manual-helper"]);
+    assert.equal(
+      manual.lastSentQuestion,
+      "use manual helper skill to run this",
+    );
+    assert.isUndefined(manual.lastSentForcedSkillIds);
   });
 
   it("keeps slash skill text unchanged outside Codex app-server mode", async function () {

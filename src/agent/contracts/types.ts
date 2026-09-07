@@ -50,6 +50,7 @@ export type AgentActionParameters = {
     | "setColor";
   tags?: string[];
   metadataFields?: string[];
+  metadataValues?: Record<string, unknown>;
   tag?: string;
   newTag?: string;
   collectionName?: string;
@@ -76,18 +77,28 @@ export type AgentActionParameters = {
   permanent?: boolean;
   filePath?: string;
   contentHash?: string;
+  documentId?: string;
   commandFingerprint?: string;
   settingsKey?: string;
   settingsValue?: string;
 };
 
 export type AgentActionIntent = {
+  /** Zero-based indexes into the frozen action list. */
+  dependsOn?: number[];
+  /** Identity of authored material from semantic.materialOutputs. */
+  contentFrom?: string;
   capability: AgentActionCapability;
   operation: AgentActionOperation;
   proofDomain: AgentActionProofDomain;
   coverage: "one" | "some" | "all";
   targetKind: "papers" | "items";
   parameters?: AgentActionParameters;
+  discovery?: {
+    description: string;
+    source: "context" | "library" | "collection";
+    collectionPath?: string;
+  };
   /** Literal native identities, resolved and frozen by the host before execution. */
   targetSelectors?: Array<
     | { kind: "item_id"; value: number }
@@ -95,6 +106,7 @@ export type AgentActionIntent = {
   >;
   scope?: {
     kind: "collection";
+    referenceKind?: "literal" | "descriptive";
     path?: string;
     includeDescendants: boolean;
   };
@@ -108,6 +120,8 @@ export type AgentActionIntent = {
 
 export type AgentActionObligation = AgentActionIntent & {
   id: string;
+  /** Index of the interpreted action, which may expand to several native obligations. */
+  sourceActionIndex?: number;
   /** The destination must be created and natively verified by this same contract. */
   destinationCreation?: { obligationId: string; libraryID: number };
   scope?: AgentActionIntent["scope"] & {
@@ -125,14 +139,15 @@ export type AgentActionObligation = AgentActionIntent & {
 
 /** Immutable interpretation of one user request. */
 export type AgentActionContract = {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   id: string;
   /** Only explicit user restrictions are authoritative at execution time. */
   hardConstraints?: Array<
     ActionConstraint | { kind: "no_write"; description: string }
   >;
   writeDisposition: "none" | "required" | "uncertain";
-  interpretationSource: "classifier" | "deterministic_fallback";
+  interpretationSource: "semantic" | "classifier" | "deterministic_fallback";
+  intent?: import("../types").ClassifiedTurnIntent;
   obligations: AgentActionObligation[];
 };
 
@@ -165,6 +180,7 @@ export type AgentActionProgressLedger = {
   correctionCount: number;
   obligations: AgentActionObligationProgress[];
   appliedReceiptKeys: string[];
+  materialOutputs?: import("./workflowDependencies").MaterialOutputReceipt[];
   authorizationGrants?: Array<{
     proposalDigest: string;
     toolName: string;
@@ -192,6 +208,12 @@ export type AgentActionProposal = {
   requestedTargets: string[];
   destinationCollectionIds: number[];
   expectedContentHash?: string;
+  /** Host-derived finalized export bundle, bound into the exact proposal digest. */
+  expectedFiles?: Array<{
+    path: string;
+    contentHash: string;
+    byteLength: number;
+  }>;
 };
 
 export type AgentActionReceipt = {

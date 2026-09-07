@@ -4780,6 +4780,21 @@ export function installWorkflowTestHarness(targetAddon: {
           timestamp: Date.now() - 1,
         },
         events: [
+          ...(options?.actionContract
+            ? [
+                {
+                  runId: "workflow-tool-result",
+                  seq: 0,
+                  eventType: "provider_event" as const,
+                  createdAt: Date.now(),
+                  payload: {
+                    type: "provider_event" as const,
+                    providerType: "agent_action_contract",
+                    payload: { contract: options.actionContract },
+                  },
+                },
+              ]
+            : []),
           {
             runId: "workflow-tool-result",
             seq: 1,

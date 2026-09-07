@@ -10,6 +10,8 @@ import {
 import {
   areConversationWritesFrozen,
   getConversationWriteGeneration,
+  isConversationWriteGenerationCurrent,
+  withConversationWriteLock,
 } from "../../shared/conversationWriteFence";
 import type {
   AgentEvent,
@@ -758,4 +760,76 @@ export async function clearAgentTraceState(
   }
   if (firstFileError) throw firstFileError;
   return cleanupRunIDs;
+}
+
+/** Durable host events for provider-owned turns, using the existing run store. */
+export type AgentRunEventJournal = {
+  runId: string;
+  append(event: AgentEvent): Promise<void>;
+  finish(status: AgentRunStatus, text: string): Promise<void>;
+};
+
+export function createAgentRunEventJournal(params: {
+  conversationKey: number;
+  conversationGeneration: number;
+  model?: string;
+}): AgentRunEventJournal {
+  const runId = `native-host:${params.conversationKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  let started = false;
+  let closed = false;
+  let seq = 0;
+  let queue = Promise.resolve();
+  const enqueue = (task: () => Promise<void>) => {
+    queue = queue.then(() =>
+      withConversationWriteLock(params.conversationKey, async () => {
+        if (
+          areConversationWritesFrozen(params.conversationKey) ||
+          !isConversationWriteGenerationCurrent(
+            params.conversationKey,
+            params.conversationGeneration,
+          )
+        )
+          throw new Error(
+            "The conversation changed; native execution authority is no longer current.",
+          );
+        if (!started) {
+          await createAgentRun({
+            runId,
+            conversationKey: params.conversationKey,
+            mode: "agent",
+            model: params.model,
+            status: "running",
+            createdAt: Date.now(),
+          });
+          const trace = await getAgentRunTrace(runId);
+          if (!trace.run)
+            throw new Error(
+              "The native turn could not persist its execution authority.",
+            );
+          started = true;
+        }
+        await task();
+      }),
+    );
+    return queue;
+  };
+  return {
+    runId,
+    append(event) {
+      if (closed)
+        return Promise.reject(
+          new Error("The native run is already finalized."),
+        );
+      const snapshot = JSON.parse(JSON.stringify(event)) as AgentEvent;
+      return enqueue(() => appendAgentRunEvent(runId, ++seq, snapshot));
+    },
+    finish(status, text) {
+      if (closed) return queue;
+      closed = true;
+      return enqueue(async () => {
+        await appendAgentRunEvent(runId, ++seq, { type: "final", text });
+        await finishAgentRun(runId, status, text);
+      });
+    },
+  };
 }

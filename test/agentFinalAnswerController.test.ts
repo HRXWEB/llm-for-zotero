@@ -1,3 +1,4 @@
+import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswerController";
 import type { AgentFinalActionSession } from "../src/agent/finalization/finalAnswerController";
@@ -36,6 +37,7 @@ describe("AgentFinalAnswerController", function () {
         conversationKind: "paper",
         userText: "Explain the reported decoding comparison.",
         classifiedIntent: {
+          semantic: semanticFixture(),
           // Single-paper reads deliberately use none: this field controls
           // collection/library retrieval, not whether an answer needs evidence.
           retrievalIntent: "none",
@@ -276,6 +278,7 @@ describe("AgentFinalAnswerController", function () {
     const request = makeRequest({
       userText: "What methods do these papers share?",
       classifiedIntent: {
+        semantic: semanticFixture(),
         retrievalIntent: "summarize",
         wantedSections: ["methods"],
         actionIntents: [],

@@ -1,8 +1,5 @@
 import { BUILTIN_SKILL_FILES, parseSkill } from "../src/agent/skills/index";
-import {
-  clearSkillRouterCache,
-  detectTurnIntent,
-} from "../src/agent/model/skillClassifier";
+import { detectTurnIntent } from "../src/agent/model/semanticIntentService";
 import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { SKILL_ROUTER_SEMANTIC_CORPUS } from "../test/fixtures/skillRouterSemanticCorpus";
 
@@ -35,7 +32,6 @@ function addMetric(key: string, tp: number, fp: number, fn: number): void {
 }
 
 for (const entry of SKILL_ROUTER_SEMANTIC_CORPUS) {
-  clearSkillRouterCache();
   const selectedPaperContexts =
     entry.context === "single-paper"
       ? [paper(1)]

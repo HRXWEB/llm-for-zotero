@@ -1009,46 +1009,6 @@ function isNetworkToShellCommand(command: string): boolean {
   return NETWORK_TO_SHELL_PATTERN.test(command.trim());
 }
 
-/** Exact mkdir/crop-copy preparation, never an interpreter or document write. */
-function filePreparationTargets(input: RunCommandInput): string[] | undefined {
-  if (/[$`\n\r\\]/.test(input.command)) return undefined;
-  const targets: string[] = [];
-  for (const stage of input.command.split(/\s+&&\s+/)) {
-    const words = parseSimpleShellWords(stage);
-    if (!words?.length) return undefined;
-    const [program, ...args] = words;
-    if (args.some(hasGlobPattern)) return undefined;
-    if (
-      program === "ls" &&
-      args.every((arg) => /^-[la]+$/.test(arg) || isAbsolutePath(arg))
-    )
-      continue;
-    const write = parseReversibleCommandWrite(stage);
-    if (
-      !write ||
-      !["mkdir", "cp"].includes(program) ||
-      !isAbsolutePath(write.path)
-    )
-      return undefined;
-    let target = write.path;
-    if (write.sourcePath) {
-      const imageExtension = /\.(?:png|jpe?g|webp|gif)$/i;
-      if (
-        !isAbsolutePath(write.sourcePath) ||
-        !imageExtension.test(write.sourcePath)
-      )
-        return undefined;
-      // A trailing slash explicitly names a directory in cp. Bind authority
-      // to the resulting image path, just as for a named destination file.
-      if (target.endsWith("/"))
-        target += write.sourcePath.slice(write.sourcePath.lastIndexOf("/") + 1);
-      if (!imageExtension.test(target)) return undefined;
-    }
-    targets.push(resolveCommandPath(target, input.cwd));
-  }
-  return targets.length ? [...new Set(targets)] : undefined;
-}
-
 export function createRunCommandTool(): AgentWriteToolDefinition<
   RunCommandInput,
   unknown
@@ -1063,7 +1023,6 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
         source: "command",
         parameters: {
           commandFingerprint: fingerprintText(input.command),
-          filePaths: filePreparationTargets(input),
         },
         requestedTargets: [],
         destinationCollectionIds: [],
@@ -1103,8 +1062,10 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
 
     guidance: {
       matches: (request) =>
-        /\b(run|execute|script|python|bash|shell|terminal|command|analyze|analysis|plot|calculate|compute|Rscript)\b/i.test(
-          request.userText || "",
+        Boolean(
+          request.classifiedIntent?.actionIntents.some(
+            (action) => action.capability === "command.execute",
+          ),
         ),
       instruction:
         "Use run_command to execute shell commands for data analysis, running scripts, or invoking external tools. " +

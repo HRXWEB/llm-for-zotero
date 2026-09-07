@@ -145,6 +145,20 @@ export class LiveDriver {
       this.timeoutMs,
     );
     let result: any;
+    const transportDiagnostics: string[] = [];
+    const originalDebug = Zotero.debug;
+    Zotero.debug = function (message: unknown, ...args: unknown[]) {
+      if (
+        typeof message === "string" &&
+        message.startsWith("[llm-for-zotero] Semantic interpretation failed")
+      ) {
+        transportDiagnostics.push(
+          message.split(thisDriverApiKey).join("[redacted]"),
+        );
+      }
+      return originalDebug?.call(Zotero, message, ...args);
+    };
+    const thisDriverApiKey = this.creds.apiKey;
     try {
       if (invokeUI) {
         // Observe the real UI-to-runtime call without replacing its request,
@@ -214,6 +228,7 @@ export class LiveDriver {
             mode: "agent",
             conversationKind: "global",
             libraryID: Zotero.Libraries.userLibraryID,
+            authMode: "api_key",
             model: this.creds.model,
             apiBase: this.creds.apiBase,
             apiKey: this.creds.apiKey,
@@ -247,11 +262,13 @@ export class LiveDriver {
       );
       throw failure;
     } finally {
+      Zotero.debug = originalDebug;
       Zotero.getMainWindow().clearTimeout(timer);
       await this.write(`${eventPath}.json`, {
         prompt,
         mode,
         expectedConfirmation: expected,
+        transportDiagnostics,
         result,
         errors,
         events,

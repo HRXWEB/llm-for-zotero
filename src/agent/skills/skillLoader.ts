@@ -20,8 +20,6 @@ export type AgentSkill = {
   id: string;
   description: string;
   version: number;
-  /** Deprecated routing metadata. Preserved for round-tripping/diagnostics only. */
-  patterns: RegExp[];
   contexts: SkillContextKind[];
   activation: SkillActivationMode;
   supersedes: string[];
@@ -76,7 +74,6 @@ function parseSkillActivation(raw: string): SkillActivationMode {
  * Parse a raw `.md` skill file into an AgentSkill.
  * Frontmatter is delimited by `---` lines. Supported keys:
  * - `id: <string>`          — unique skill identifier
- * - `match: /<regex>/<flags>` — deprecated metadata, preserved but ignored by routing
  * - `contexts: <context>[,<context>]` — request contexts where the skill is valid
  * - `activation: auto|manual|both` — whether the skill can activate automatically
  * - `supersedes: <id>[,<id>]` — automatic skills this workflow replaces
@@ -109,7 +106,6 @@ export function parseSkill(raw: string): AgentSkill {
   let contexts: SkillContextKind[] = ["any"];
   let activation: SkillActivationMode = "auto";
   let supersedes: string[] = [];
-  const patterns: RegExp[] = [];
 
   for (const line of fmLines) {
     const idMatch = line.match(/^id:\s*(.+)$/);
@@ -154,16 +150,6 @@ export function parseSkill(raw: string): AgentSkill {
       );
       continue;
     }
-    // Skip name: lines (legacy, no longer used)
-    if (/^name:\s/.test(line)) continue;
-    const matchMatch = line.match(/^match:\s*\/(.+)\/([gimsuy]*)$/);
-    if (matchMatch) {
-      try {
-        patterns.push(new RegExp(matchMatch[1], matchMatch[2]));
-      } catch {
-        // Skip invalid regex
-      }
-    }
   }
   if (id === "unknown" && name) {
     id = name;
@@ -175,7 +161,6 @@ export function parseSkill(raw: string): AgentSkill {
     id,
     description,
     version,
-    patterns,
     contexts,
     activation,
     supersedes,
@@ -184,25 +169,8 @@ export function parseSkill(raw: string): AgentSkill {
   };
 }
 
-/**
- * Legacy diagnostic helper. Automatic routing must not call this function.
- */
-export function matchesSkill(
-  skill: AgentSkill,
-  request: Pick<AgentRuntimeRequest, "userText">,
-): boolean {
-  const text = (request.userText || "").trim();
-  if (!text || !skill.patterns.length) return false;
-  return skill.patterns.some((pattern) => pattern.test(text));
-}
-
 export function getSkillRoutingDiagnostics(skill: AgentSkill): string[] {
   const diagnostics: string[] = [];
-  if (skill.patterns.length) {
-    diagnostics.push(
-      "Legacy match: patterns are preserved but no longer activate this skill automatically.",
-    );
-  }
   const description = skill.description.trim();
   const normalizedDescription = description
     .toLowerCase()

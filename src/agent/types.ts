@@ -464,6 +464,7 @@ export type AgentEvent =
       text?: string;
       codeBlock?: string;
       artifacts?: AgentToolArtifact[];
+      actionReceipts?: AgentActionReceipt[];
     }
   | {
       type: "usage";
@@ -660,7 +661,11 @@ export type ClassifiedTurnIntent = {
   wantedSections: Array<"methods" | "results" | "limitations">;
   queryLanguage?: string;
   writeDisposition?: "none" | "required" | "uncertain";
-  actionInterpretationSource?: "classifier" | "deterministic_fallback";
+  actionInterpretationSource?:
+    | "semantic"
+    | "classifier"
+    | "deterministic_fallback";
+  semantic?: import("./model/semanticDecisions").SemanticIntent;
   actionIntents: AgentActionIntent[];
 };
 
@@ -673,6 +678,10 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   actionContract?: AgentActionContract;
   /** Mutable completion state kept separate from the immutable contract. */
   actionProgress?: AgentActionProgressLedger;
+  actionPreparation?: import("./contracts/actionPreparation").ActionPreparation;
+  semanticProvider?: { kind: "claude"; baseUrl: string };
+  clarificationHistory?: Array<{ question: string; answer: string }>;
+
   /** One-shot Plan collaboration state owned by the durable plan store. */
   planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
@@ -952,7 +961,10 @@ export type AgentToolInputValidation<T> =
 
 export type AgentToolGuidance = {
   matches: (
-    request: AgentRuntimeRequest,
+    request: Omit<
+      AgentRuntimeRequest,
+      "userText" | "history" | "clarificationHistory"
+    >,
     context?: { matchedSkillIds: ReadonlyArray<string> },
   ) => boolean;
   instruction: string;

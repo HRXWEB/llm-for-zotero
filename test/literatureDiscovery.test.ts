@@ -1,3 +1,4 @@
+import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
@@ -240,6 +241,12 @@ describe("ranked literature discovery workflow", function () {
     it(`expands ${count} ranked choices from saved candidates and preserves selections`, async function () {
       const context = makeContext();
       context.request.userText = text;
+      context.request.classifiedIntent = classifiedFixture({
+        semantic: semanticFixture({
+          literature: "discover",
+          requestedCount: count,
+        }),
+      });
       const candidates = await search(context);
       const tool = createLiteratureReviewTool(gateway as never);
       const review = async (indices: number[], extra = {}) => {
@@ -377,6 +384,14 @@ describe("ranked literature discovery workflow", function () {
   it("never substitutes keyword matches for an unavailable reference list", async function () {
     const context = makeContext();
     context.request.userText = "Find five papers cited by this paper";
+    context.request.classifiedIntent = classifiedFixture({
+      externalSearchIntent: "literature",
+      semantic: semanticFixture({
+        literature: "discover",
+        literatureMode: "references",
+        requestedCount: 5,
+      }),
+    });
     let networkCalls = 0;
     globalThis.fetch = (async () => {
       networkCalls++;

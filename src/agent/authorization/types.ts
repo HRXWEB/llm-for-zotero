@@ -84,12 +84,10 @@ export type AuthorizationDecision =
 
 export type OriginalAuthorizationContext = {
   mode: OriginalAgentPermissionMode;
-  userText: string;
+  semantic?: import("../model/semanticDecisions").SemanticIntent;
   constraints?: readonly ActionConstraint[];
   /** The exact typed proposal passed the current turn's Action Contract. */
   hasMatchingActionIntent?: boolean;
   /** Host-verified approved-plan scope; never supplied by model tool input. */
   hasApprovedPlanAuthority?: boolean;
-  /** Legacy caller compatibility; new persisted contracts use constraints. */
-  hasExplicitNoWrite?: boolean;
 };

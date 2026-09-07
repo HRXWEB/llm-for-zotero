@@ -33,6 +33,7 @@ export type DocumentOutcomePolicy = Readonly<{
   documentKind: DocumentSpec["kind"];
   integrityPolicy: DocumentIntegrityPolicy;
   trigger:
+    | "workflow_material"
     | "plan_deliverable"
     | "literature_review_skill"
     | "literature_review_intent"
@@ -219,10 +220,20 @@ export function getPlannedDocumentOrigin(document: DocumentArtifact):
       : undefined;
 }
 
+export type DocumentNoteBinding = Readonly<{
+  libraryID: number;
+  itemKey: string;
+  documentVersion?: number;
+  contentHash?: string;
+  nativeContentHash?: string;
+  parentItemId?: number;
+  finalized?: boolean;
+}>;
 export type DocumentActionState = Readonly<{
   version: 1;
   documentId: string;
-  savedNote?: Readonly<{ libraryID: number; itemKey: string }>;
+  savedNote?: DocumentNoteBinding;
+  pendingNote?: DocumentNoteBinding;
   lastExportedAt?: number;
   lastExportedName?: string;
   updatedAt: number;

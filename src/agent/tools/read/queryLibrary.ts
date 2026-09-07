@@ -462,11 +462,11 @@ export function createQueryLibraryTool(
     },
     guidance: {
       matches: (request) =>
-        /\b(unfiled|folder|folders|collection|collections|move|file|organize|organise|categorize|categorise)\b/i.test(
-          request.userText,
-        ),
+        request.classifiedIntent?.actionIntents.some(
+          (action) => action.capability === "zotero.collections",
+        ) === true,
       instruction:
-        "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, call library_update with {kind:'collections', action:'add', itemIds:[...]} and let the confirmation card collect the target folders. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices.",
+        "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, resolve the destination with library_search or request clarification before proposing a library_update. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices.",
     },
     presentation: {
       label: "Query Library",
