@@ -163,6 +163,24 @@ export type WebChatSendOptions = {
   ) => void;
 };
 
+export function selectWebChatExpectedConversation(input: {
+  explicitUrl?: string;
+  explicitId?: string;
+  historicalUrl?: string;
+  historicalId?: string;
+}): { expectedChatUrl?: string; expectedChatId?: string } {
+  if (input.explicitUrl || input.explicitId) {
+    return {
+      expectedChatUrl: input.explicitUrl,
+      expectedChatId: input.explicitId,
+    };
+  }
+  return {
+    expectedChatUrl: input.historicalUrl,
+    expectedChatId: input.historicalId,
+  };
+}
+
 /**
  * Send a question to a registered web provider via the embedded Zotero relay.
  * Attaches the exact selected paper PDF only when `sendPdf` is true.

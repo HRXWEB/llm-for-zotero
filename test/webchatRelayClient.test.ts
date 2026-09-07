@@ -683,6 +683,70 @@ describe("webchat relay/client", function () {
     assert.equal(relayServer.relayPollQuery().query?.target, "gemini");
   });
 
+  it("rejects Gemini readiness without a canonical active-site URL", async function () {
+    relayServer.relayResetForTests();
+    await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
+      chatTabAlive: true,
+      supportedDeliveryContracts: [1],
+      supportedTargets: ["gemini"],
+      answerCapture: "dom",
+    });
+
+    const result = relayServer.relaySubmitQuery({
+      prompt: "must verify active Gemini tab",
+      target: "gemini",
+      delivery_contract_version:
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    });
+
+    assert.isFalse(result.ok);
+    assert.match(result.error || "", /canonical Gemini URL/i);
+  });
+
+  it("rejects Gemini readiness when content and composer fields were omitted", async function () {
+    relayServer.relayResetForTests();
+    await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
+      chatTabAlive: true,
+      chatUrl: "https://gemini.google.com/app/thread-1",
+      siteId: "gemini",
+      supportedDeliveryContracts: [1],
+      supportedTargets: ["gemini"],
+      answerCapture: "dom",
+    });
+
+    const result = relayServer.relaySubmitQuery({
+      prompt: "must verify explicit DOM readiness",
+      target: "gemini",
+      delivery_contract_version:
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    });
+
+    assert.isFalse(result.ok);
+    assert.match(
+      result.error || "",
+      /explicitly report.*content script.*composer/i,
+    );
+  });
+
+  it("keeps legacy preload readiness closed when the composer is missing", async function () {
+    relayServer.relayResetForTests();
+    await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
+      chatTabAlive: true,
+      chatUrl: "https://chatgpt.com/",
+      siteId: "chatgpt",
+      contentScriptAlive: true,
+      mainWorldInjected: true,
+      composerFound: false,
+      networkHookActive: true,
+      supportedDeliveryContracts: [1],
+    });
+
+    assert.match(
+      relayServer.relayGetExtensionReadinessError("chatgpt") || "",
+      /cannot find.*composer/i,
+    );
+  });
+
   it("rejects a foreign-site heartbeat for Gemini", async function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
@@ -826,6 +890,47 @@ describe("webchat relay/client", function () {
       "https://gemini.google.com/app/caller-thread",
     );
     assert.equal(query.expected_chat_id, "caller-thread");
+  });
+
+  it("rejects a mismatched explicit binding before direct dispatch", function () {
+    const before = relayServer.relayGetStateSnapshot();
+
+    const result = relayServer.relaySubmitQuery({
+      prompt: "must not become unbound",
+      target: "chatgpt",
+      expected_chat_url: "https://chatgpt.com/c/conversation-b",
+      expected_chat_id: "conversation-a",
+      delivery_contract_version:
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    });
+
+    assert.isFalse(result.ok);
+    assert.match(result.error || "", /conversation binding/i);
+    const after = relayServer.relayGetStateSnapshot();
+    assert.equal(after.query.seq, before.query.seq);
+    assert.isNull(after.query.prompt);
+  });
+
+  it("rejects an unsupported explicit conversation URL before HTTP dispatch", async function () {
+    const before = relayServer.relayGetStateSnapshot();
+
+    const response = await invokeEndpoint(
+      "/llm-for-zotero/webchat/submit_query",
+      "POST",
+      {
+        prompt: "must not become unbound",
+        target: "chatgpt",
+        expected_chat_url: "https://chatgpt.com/share/not-a-conversation",
+        expected_chat_id: "not-a-conversation",
+        delivery_contract_version:
+          relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+      },
+    );
+
+    assert.match(String(response.error), /conversation binding/i);
+    const after = relayServer.relayGetStateSnapshot();
+    assert.equal(after.query.seq, before.query.seq);
+    assert.isNull(after.query.prompt);
   });
 
   it("clears conversation binding for a forced new chat", async function () {

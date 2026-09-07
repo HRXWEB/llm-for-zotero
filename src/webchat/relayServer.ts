@@ -217,8 +217,10 @@ interface ExtensionStatus {
   siteId: string | null;
   url: string | null;
   contentScriptAlive: boolean;
+  contentScriptAliveExplicit: boolean;
   mainWorldInjected: boolean;
   composerFound: boolean;
+  composerFoundExplicit: boolean;
   sendControlState: string | null;
   uploadControlFound: boolean;
   networkHookActive: boolean;
@@ -691,20 +693,32 @@ function validateTargetCapabilityForDispatch(
   }
 
   if (targetId === "gemini") {
+    const reportedUrl = status.url || status.chatUrl;
+    if (!reportedUrl || !isWebChatUrlForTarget(reportedUrl, "gemini")) {
+      return "Sync for Zotero has not reported a canonical Gemini URL for the active tab. Open gemini.google.com and try again.";
+    }
     if (!status.supportedTargets.includes("gemini")) {
       return "The installed Sync for Zotero browser extension does not advertise Gemini support. Update the extension, reload Gemini, and try again.";
     }
     if (status.answerCapture !== "dom") {
       return "The installed Sync for Zotero browser extension has not advertised Gemini DOM answer capture. Update the extension, reload Gemini, and try again.";
     }
-    if (!status.contentScriptAlive || !status.composerFound) {
-      return "Sync for Zotero cannot verify the Gemini content script and composer. Reload Gemini and try again.";
+    if (
+      !status.contentScriptAliveExplicit ||
+      !status.composerFoundExplicit ||
+      !status.contentScriptAlive ||
+      !status.composerFound
+    ) {
+      return "Sync for Zotero must explicitly report a ready Gemini content script and composer. Reload Gemini and try again.";
     }
     return null;
   }
 
   // Legacy ChatGPT and DeepSeek extensions did not advertise these additive
   // capability fields. Their existing network bridge remains authoritative.
+  if (!status.composerFound) {
+    return `The ${target.label} extension cannot find the chat composer. Wait for the page to finish loading or reload the tab.`;
+  }
   if (!status.mainWorldInjected || !status.networkHookActive) {
     return `The ${target.label} page network bridge is inactive. Reload the chat tab and try again.`;
   }
@@ -745,7 +759,11 @@ function resolveExpectedChatBinding(
   input: Record<string, unknown>,
   targetId: string | null,
   forceNewChat: boolean,
-): { expectedChatUrl: string | null; expectedChatId: string | null } {
+): {
+  expectedChatUrl: string | null;
+  expectedChatId: string | null;
+  error?: string;
+} {
   if (forceNewChat) {
     return { expectedChatUrl: null, expectedChatId: null };
   }
@@ -759,22 +777,50 @@ function resolveExpectedChatBinding(
     "expected_chat_id",
   );
   if (hasExplicitUrl || hasExplicitId) {
-    const expectedChatUrl = readNullableString(input.expected_chat_url);
-    let expectedChatId = readNullableString(input.expected_chat_id);
+    const expectedChatUrl = readNullableString(input.expected_chat_url)?.trim();
+    let expectedChatId = readNullableString(input.expected_chat_id)?.trim();
+    if (!expectedChatUrl && !expectedChatId) {
+      return { expectedChatUrl: null, expectedChatId: null };
+    }
+    if (!targetId) {
+      return {
+        expectedChatUrl: null,
+        expectedChatId: null,
+        error:
+          "WebChat conversation binding requires a registered target before dispatch.",
+      };
+    }
     if (expectedChatUrl) {
       const derivedChatId = getWebChatConversationId(expectedChatUrl, targetId);
-      if (!targetId || !derivedChatId) {
-        return { expectedChatUrl: null, expectedChatId: null };
+      if (!derivedChatId) {
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error:
+            "WebChat conversation binding URL is not a recognized conversation for the selected target.",
+        };
       }
       if (expectedChatId && expectedChatId !== derivedChatId) {
-        return { expectedChatUrl: null, expectedChatId: null };
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error:
+            "WebChat conversation binding URL and ID do not identify the same conversation.",
+        };
       }
       expectedChatId = derivedChatId;
     }
-    if (!expectedChatUrl && expectedChatId && S().active_target !== targetId) {
-      return { expectedChatUrl: null, expectedChatId: null };
+    if (expectedChatId && !/^[A-Za-z0-9_-]+$/.test(expectedChatId)) {
+      return {
+        expectedChatUrl: null,
+        expectedChatId: null,
+        error: "WebChat conversation binding ID is invalid.",
+      };
     }
-    return { expectedChatUrl, expectedChatId };
+    return {
+      expectedChatUrl: expectedChatUrl || null,
+      expectedChatId: expectedChatId || null,
+    };
   }
 
   const derivedChatId = getWebChatConversationId(S().remote_chat_url, targetId);
@@ -782,7 +828,12 @@ function resolveExpectedChatBinding(
     return { expectedChatUrl: null, expectedChatId: null };
   }
   if (S().remote_chat_id && S().remote_chat_id !== derivedChatId) {
-    return { expectedChatUrl: null, expectedChatId: null };
+    return {
+      expectedChatUrl: null,
+      expectedChatId: null,
+      error:
+        "WebChat conversation binding state has conflicting URL and ID values.",
+    };
   }
   return {
     expectedChatUrl: S().remote_chat_url,
@@ -1256,6 +1307,12 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
     requestedTarget,
     forceNewChat,
   );
+  if (expectedBinding.error) {
+    return jsonReply(
+      { error: expectedBinding.error, reason: "invalid_conversation_binding" },
+      409,
+    );
+  }
 
   // Clear stale state
   S().responses = [];
@@ -1890,8 +1947,10 @@ const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
     siteId: readNullableString(body.siteId),
     url: readNullableString(body.url) || readNullableString(body.chatUrl),
     contentScriptAlive: body.contentScriptAlive !== false,
+    contentScriptAliveExplicit: body.contentScriptAlive === true,
     mainWorldInjected: body.mainWorldInjected !== false,
     composerFound: body.composerFound !== false,
+    composerFoundExplicit: body.composerFound === true,
     sendControlState: readNullableString(body.sendControlState),
     uploadControlFound: body.uploadControlFound === true,
     networkHookActive: body.networkHookActive !== false,
@@ -1997,6 +2056,9 @@ export function relaySubmitQuery(opts: {
     opts.target || null,
     forceNewChat,
   );
+  if (expectedBinding.error) {
+    return { ok: false, seq: 0, error: expectedBinding.error };
+  }
 
   S().responses = [];
   S().active_seq = 0;
@@ -2389,8 +2451,10 @@ export function relaySetExtensionCapabilitiesForTests(
     siteId: "chatgpt",
     url: "https://chatgpt.com/",
     contentScriptAlive: true,
+    contentScriptAliveExplicit: true,
     mainWorldInjected: true,
     composerFound: true,
+    composerFoundExplicit: true,
     sendControlState: "enabled",
     uploadControlFound: true,
     networkHookActive: true,

@@ -224,6 +224,32 @@ describe("webchat PDF pipeline", function () {
     }
   });
 
+  it("selects explicit and historical conversation context as whole pairs", function () {
+    const selectBinding = pipeline.selectWebChatExpectedConversation;
+
+    assert.deepEqual(
+      selectBinding({
+        explicitUrl: "https://chatgpt.com/c/conversation-b",
+        historicalUrl: "https://chatgpt.com/c/conversation-a",
+        historicalId: "conversation-a",
+      }),
+      {
+        expectedChatUrl: "https://chatgpt.com/c/conversation-b",
+        expectedChatId: undefined,
+      },
+    );
+    assert.deepEqual(
+      selectBinding({
+        historicalUrl: "https://chatgpt.com/c/conversation-a",
+        historicalId: "conversation-a",
+      }),
+      {
+        expectedChatUrl: "https://chatgpt.com/c/conversation-a",
+        expectedChatId: "conversation-a",
+      },
+    );
+  });
+
   it("preserves selected PDF order across different papers", async function () {
     items.set(20, parent(20));
     items.set(10, parent(10));

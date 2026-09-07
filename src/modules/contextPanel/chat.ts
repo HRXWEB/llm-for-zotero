@@ -10891,7 +10891,8 @@ export async function sendQuestion(
             Boolean(message.webchatChatUrl || message.webchatChatId),
         );
       setStatusSafely(`Sending to ${webchatLabel}…`, "sending");
-      const { sendWebChatQuestion } = await import("../../webchat/pipeline");
+      const { selectWebChatExpectedConversation, sendWebChatQuestion } =
+        await import("../../webchat/pipeline");
       if (await stopInactiveRequest()) {
         reportWebChatSendOutcome("cancelled");
         return;
@@ -10906,6 +10907,12 @@ export async function sendQuestion(
       // [webchat] Send PDF only when the caller explicitly requests it via chip state.
       // Always use dynamic port for the embedded relay server
       const { getRelayBaseUrl } = await import("../../webchat/relayServer");
+      const expectedConversation = selectWebChatExpectedConversation({
+        explicitUrl: opts.webchatExpectedChatUrl,
+        explicitId: opts.webchatExpectedChatId,
+        historicalUrl: previousWebChatAssistant?.webchatChatUrl,
+        historicalId: previousWebChatAssistant?.webchatChatId,
+      });
       notifyProviderDispatch(body, ui, opts.onProviderDispatch);
       const answer = await sendWebChatQuestion({
         item,
@@ -10920,14 +10927,7 @@ export async function sendQuestion(
             : undefined,
         chatgptMode,
         target: webchatTarget,
-        expectedChatUrl:
-          opts.webchatExpectedChatUrl ||
-          previousWebChatAssistant?.webchatChatUrl ||
-          undefined,
-        expectedChatId:
-          opts.webchatExpectedChatId ||
-          previousWebChatAssistant?.webchatChatId ||
-          undefined,
+        ...expectedConversation,
         signal: getAbortController(conversationKey)?.signal,
         onAnswerSnapshot: (text, snapshot) => {
           applyWebChatAnswerSnapshot(assistantMessage, text, snapshot);
