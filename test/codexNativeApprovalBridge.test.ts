@@ -6,6 +6,105 @@ import type {
 import { resolveCodexNativeApprovalWithOptionalReviewCard } from "../src/modules/contextPanel/chat";
 
 describe("Codex native approval bridge", function () {
+  it("does not display a resolved native question or invent an answer", async function () {
+    const controller = new AbortController();
+    controller.abort();
+    let shown = false;
+    const response = await resolveCodexNativeApprovalWithOptionalReviewCard({
+      body: {} as Element,
+      request: {
+        method: "item/tool/requestUserInput",
+        signal: controller.signal,
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "question",
+          questions: [
+            {
+              id: "q",
+              question: "Choose?",
+              options: [{ label: "Yes" }, { label: "No" }],
+            },
+          ],
+        },
+      },
+      setStatusSafely: () => {},
+      showActionCard: async () => {
+        shown = true;
+        return { approved: true };
+      },
+    });
+    assert.isFalse(shown);
+    assert.deepEqual(response, { answers: {} });
+  });
+  it("renders native planning questions and returns exact labels and free text", async function () {
+    let action: AgentPendingAction | undefined;
+    const questionEvents: string[] = [];
+    const result = await resolveCodexNativeApprovalWithOptionalReviewCard({
+      body: {} as Element,
+      trace: {
+        noteMcpConfirmationRequired: () => {
+          questionEvents.push("required");
+        },
+        noteMcpConfirmationResolved: () => {
+          questionEvents.push("resolved");
+        },
+      },
+      request: {
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "question",
+          questions: [
+            {
+              id: "format",
+              header: "Format",
+              question: "Which format?",
+              options: [
+                { label: "Review", description: "A review" },
+                { label: "Table", description: "A table" },
+              ],
+            },
+            {
+              id: "focus",
+              header: "Focus",
+              question: "Which focus?",
+              options: null,
+            },
+          ],
+        },
+      },
+      setStatusSafely: () => {},
+      showActionCard: async (_body, _id, pending) => {
+        action = pending;
+        return {
+          approved: true,
+          data: {
+            format: { kind: "option", optionId: "option-1" },
+            focus: "Representational drift",
+          },
+        };
+      },
+    });
+    assert.equal(action?.toolName, "request_user_input");
+    assert.deepEqual(
+      questionEvents,
+      ["required", "resolved"],
+      "the existing trace restores pending questions after a panel is rebuilt and closes resolved cards",
+    );
+    assert.deepEqual(
+      action?.fields.map((field) => field.type),
+      ["choice", "choice"],
+      "free text uses the shared planning question card",
+    );
+    assert.deepEqual(result, {
+      answers: {
+        format: { answers: ["Review"] },
+        focus: { answers: ["Representational drift"] },
+      },
+    });
+  });
   const body = {} as Element;
   const commandRequest = {
     method: "item/commandExecution/requestApproval",

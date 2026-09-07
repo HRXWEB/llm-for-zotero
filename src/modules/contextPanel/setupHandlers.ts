@@ -2257,20 +2257,20 @@ export function setupHandlers(
       : isCodexConversationSystem()
         ? "codex"
         : "original";
+  const isPlanAvailable = () =>
+    !isWebChatModeActive() &&
+    (isRuntimeConversationSystem() || getCurrentRuntimeMode() === "agent");
   const syncPlanModeChip = () => {
     if (!planModeChip || !item) return;
     const state = getComposePlanState(getConversationKey(item));
-    const eligible =
-      !isWebChatModeActive() &&
-      (isRuntimeConversationSystem() || getCurrentRuntimeMode() === "agent");
     planModeChip.style.display =
-      eligible && state?.enabled ? "inline-flex" : "none";
+      isPlanAvailable() && state?.enabled ? "inline-flex" : "none";
     planModeChip.dataset.planId = state?.planId || "";
     planModeChip.dataset.planRevision = state ? `${state.revision}` : "";
   };
   const activatePlanMode = () => {
     if (!item || isWebChatModeActive()) return;
-    if (getCurrentRuntimeMode() !== "agent") {
+    if (!isPlanAvailable()) {
       if (status) {
         setStatus(status, "Plan mode is available in Agent mode", "warning");
       }
@@ -6903,6 +6903,7 @@ export function setupHandlers(
       ztoolkit.log(message, error);
     },
     activatePlanMode,
+    isPlanAvailable,
   });
   const {
     isActionPickerOpen,
@@ -7336,7 +7337,12 @@ export function setupHandlers(
     });
     syncPlanModeChip();
     void doSend({
-      overrideText: `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
+      // Native Plan receives the prior artifact and revision instructions in
+      // its turn context. Keep the user's request intact for action contracts.
+      overrideText:
+        detail.provider === "codex" && isCodexAppServerModeEnabled()
+          ? detail.comment.trim()
+          : `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
     });
   };
   const handlePlanCancel = () => {
@@ -7926,7 +7932,7 @@ export function setupHandlers(
       e.preventDefault();
       e.stopPropagation();
       if (!item || isWebChatModeActive()) return;
-      if (getCurrentRuntimeMode() !== "agent") return;
+      if (!isPlanAvailable()) return;
       const enabled = toggleComposePlanMode({
         conversationKey: getConversationKey(item),
         provider: getCurrentPlanProvider(),

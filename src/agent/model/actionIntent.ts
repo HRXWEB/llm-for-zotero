@@ -245,6 +245,17 @@ function literalTargetSelectors(
       kind: "item_key",
       value: match[0].toUpperCase(),
     }));
+  const ids = text.match(
+    new RegExp(
+      String.raw`\bitems?(?:\s+ids?)?\s+(\d+(?:${separator}\d+)*)\b`,
+      "i",
+    ),
+  )?.[1];
+  if (ids) {
+    const values = [...ids.matchAll(/\d+/g)].map((match) => Number(match[0]));
+    if (values.every((value) => Number.isSafeInteger(value) && value > 0))
+      return values.map((value) => ({ kind: "item_id", value }));
+  }
   const quoted = String.raw`["“']([^"”']+)["”']`;
   const titles = text.match(
     new RegExp(

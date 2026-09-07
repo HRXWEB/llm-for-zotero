@@ -1,251 +1,17 @@
-import type {
-  AgentToolDefinition,
-  AgentToolInputValidation,
-} from "../../types";
-import { planExecutionCoordinator } from "../../plans/coordinator";
+import type { AgentToolDefinition } from "../../types";
+import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import {
-  buildDefaultPlanContract,
-  decodePlanContract,
-} from "../../plans/contracts";
-import type {
-  PlanAcceptanceCriterion,
-  PlanCompletionRequirementKind,
-  PlanContract,
-  PlanStepEffect,
-} from "../../plans/types";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { resolvePlanDocumentCitationPreference } from "../../documents/citationPreference";
-import { materializeResearchScopeSnapshot } from "../../research/scopeSnapshot";
-import { fail, ok, validateObject } from "../shared";
-
-export type UpdatePlanInput = {
-  explanation?: string;
-  ready: boolean;
-  contract?: unknown;
-  steps: Array<{
-    planStepId?: string;
-    content: string;
-    activeForm: string;
-    acceptanceCriteria: PlanAcceptanceCriterion[];
-    expectedCapability?: string;
-    expectedEffect: PlanStepEffect;
-  }>;
-};
-
-const EFFECTS = new Set<PlanStepEffect>([
-  "read",
-  "artifact",
-  "mutation",
-  "reasoning",
-]);
-
-const CRITERION_VERIFIERS = new Set<PlanCompletionRequirementKind>([
-  "verified_read",
-  "bounded_reasoning",
-  "research_coverage",
-  "document_integrity",
-  "document_published",
-  "mutation_receipts",
-  "user_decision",
-]);
-
-/**
- * Preserve an explicit user-selected corpus size without treating a separate
- * deep-read count as the scope boundary.
- */
-export function extractExplicitResearchScopeCount(
-  requestText: string,
-): number | undefined {
-  const patterns = [
-    /\b(?:use|using|cover|covering|screen|screening|review|reviewing)\s+exactly\s+(?:the\s+)?(?:first\s+)?(\d+)\s+(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
-    /\bexactly\s+the\s+first\s+(\d+)\s+(?:alphabetically\s+(?:listed|sorted)\s+)?(?:bibliographic\s+)?(?:papers?|articles?|items?|records?)\b/i,
-  ];
-  for (const pattern of patterns) {
-    const matched = requestText.match(pattern);
-    const count = matched ? Number(matched[1]) : Number.NaN;
-    if (Number.isSafeInteger(count) && count > 0) return count;
-  }
-  return undefined;
-}
-
-export function validateUpdatePlanInput(
-  args: unknown,
-): AgentToolInputValidation<UpdatePlanInput> {
-  if (!validateObject<Record<string, unknown>>(args)) {
-    return fail("update_plan expects an object");
-  }
-  if (!Array.isArray(args.steps) || !args.steps.length) {
-    return fail("update_plan requires at least one step");
-  }
-  const steps: UpdatePlanInput["steps"] = [];
-  for (let index = 0; index < args.steps.length; index += 1) {
-    const raw = args.steps[index];
-    if (!validateObject<Record<string, unknown>>(raw)) {
-      return fail(`steps[${index}] must be an object`);
-    }
-    const content = typeof raw.content === "string" ? raw.content.trim() : "";
-    const activeForm =
-      typeof raw.activeForm === "string" ? raw.activeForm.trim() : "";
-    const acceptanceCriteria = Array.isArray(raw.acceptanceCriteria)
-      ? raw.acceptanceCriteria.flatMap((entry) => {
-          if (!validateObject<Record<string, unknown>>(entry)) return [];
-          const criterionId =
-            typeof entry.criterionId === "string"
-              ? entry.criterionId.trim()
-              : "";
-          const description =
-            typeof entry.description === "string"
-              ? entry.description.trim()
-              : "";
-          const verifier = entry.verifier as PlanCompletionRequirementKind;
-          return criterionId && description && CRITERION_VERIFIERS.has(verifier)
-            ? [{ criterionId, description, verifier }]
-            : [];
-        })
-      : [];
-    const expectedEffect = raw.expectedEffect as PlanStepEffect;
-    if (!content || !activeForm || !acceptanceCriteria.length) {
-      return fail(
-        `steps[${index}] requires content, activeForm, and acceptanceCriteria`,
-      );
-    }
-    if (!EFFECTS.has(expectedEffect)) {
-      return fail(`steps[${index}].expectedEffect is invalid`);
-    }
-    if (
-      Array.isArray(raw.acceptanceCriteria) &&
-      acceptanceCriteria.length !== raw.acceptanceCriteria.length
-    ) {
-      return fail(`steps[${index}].acceptanceCriteria is invalid`);
-    }
-    steps.push({
-      planStepId:
-        typeof raw.planStepId === "string" && raw.planStepId.trim()
-          ? raw.planStepId.trim()
-          : undefined,
-      content,
-      activeForm,
-      acceptanceCriteria,
-      expectedCapability:
-        typeof raw.expectedCapability === "string" &&
-        raw.expectedCapability.trim()
-          ? raw.expectedCapability.trim()
-          : undefined,
-      expectedEffect,
-    });
-  }
-  if (args.ready === true && (steps.length < 3 || steps.length > 7)) {
-    return fail("A ready plan requires 3–7 user-visible steps");
-  }
-  return ok({
-    explanation:
-      typeof args.explanation === "string" && args.explanation.trim()
-        ? args.explanation.trim()
-        : undefined,
-    ready: args.ready === true,
-    contract: validateObject(args.contract) ? args.contract : undefined,
-    steps,
-  });
-}
-
-export async function resolvePlanContract(params: {
-  raw: unknown;
-  steps: UpdatePlanInput["steps"];
-  actionContract?: NonNullable<
-    import("../../types").AgentRuntimeRequest["actionContract"]
-  >;
-  ready: boolean;
-  gateway?: ZoteroGateway;
-  planId: string;
-  revision: number;
-  conversationKey: number;
-}): Promise<PlanContract> {
-  const defaultContract = buildDefaultPlanContract({
-    actionContract: params.actionContract,
-    steps: params.steps,
-  });
-  const raw: Record<string, unknown> = validateObject<Record<string, unknown>>(
-    params.raw,
-  )
-    ? { ...params.raw }
-    : { ...defaultContract };
-  const deliverable = validateObject<Record<string, unknown>>(raw.deliverable)
-    ? { ...raw.deliverable }
-    : defaultContract.deliverable;
-  if (
-    validateObject<Record<string, unknown>>(deliverable) &&
-    deliverable.kind === "document"
-  ) {
-    const spec = validateObject<Record<string, unknown>>(deliverable.spec)
-      ? { ...deliverable.spec }
-      : {};
-    if (!validateObject(spec.citationStyle)) {
-      spec.citationStyle = resolvePlanDocumentCitationPreference(
-        params.gateway,
-      );
-    }
-    raw.deliverable = { ...deliverable, spec };
-  }
-  if (validateObject<Record<string, unknown>>(raw.effects)) {
-    const effects = { ...raw.effects };
-    if (validateObject<Record<string, unknown>>(effects.libraryMutation)) {
-      const mutation = { ...effects.libraryMutation };
-      if (mutation.approval === "initial" && !mutation.contract) {
-        if (!params.actionContract) {
-          throw new Error(
-            "An initially approved library mutation requires a frozen action contract",
-          );
-        }
-        mutation.contract = params.actionContract;
-      }
-      effects.libraryMutation = mutation;
-      raw.effects = effects;
-    }
-  }
-  let contract = decodePlanContract(raw, { requireSnapshot: false });
-  if (
-    contract.investigation?.reviewMode === "systematic" &&
-    !contract.investigation.criteria.length
-  ) {
-    throw new Error(
-      "A systematic review requires at least one explicit inclusion or exclusion criterion",
-    );
-  }
-  if (
-    contract.investigation?.readingStrategy === "adaptive" &&
-    contract.investigation.estimatedDeepReadPapers !== 0
-  ) {
-    throw new Error(
-      "An adaptive review must not preselect a paper count; set estimatedDeepReadPapers to 0",
-    );
-  }
-  if (params.ready && contract.investigation) {
-    if (!params.gateway) {
-      throw new Error(
-        "The Zotero gateway is required to freeze research scope",
-      );
-    }
-    const snapshot = await materializeResearchScopeSnapshot({
-      gateway: params.gateway,
-      planId: params.planId,
-      revision: params.revision,
-      conversationKey: params.conversationKey,
-      scope: contract.investigation.scope,
-    });
-    contract = decodePlanContract(
-      {
-        ...contract,
-        investigation: {
-          ...contract.investigation,
-          scopeSnapshot: snapshot.ref,
-        },
-      },
-      { requireSnapshot: true },
-    );
-  }
-  return contract;
-}
+  preparePlanExecution,
+  validateUpdatePlanInput,
+  type UpdatePlanInput,
+} from "../../plans/preparation";
+export {
+  validateUpdatePlanInput,
+  extractExplicitResearchScopeCount,
+  resolvePlanContract,
+  type UpdatePlanInput,
+} from "../../plans/preparation";
 
 export function createUpdatePlanTool(
   gateway?: ZoteroGateway,
@@ -571,7 +337,9 @@ export function createUpdatePlanTool(
       executionClass: "control",
       requiresConfirmation: false,
     },
-    isAvailable: (request) => request.planContext?.phase === "planning",
+    isAvailable: (request) =>
+      request.planContext?.phase === "planning" &&
+      !request.planContext.nativePlanning,
     guidance: {
       matches: (request) => request.planContext?.phase === "planning",
       instruction:
@@ -585,61 +353,7 @@ export function createUpdatePlanTool(
           "This host-owned control updates only the active plan representation.",
       }),
     execute: async (input, context) => {
-      const plan = context.request.planContext;
-      if (!plan || plan.phase !== "planning") {
-        throw new Error("update_plan is available only during planning");
-      }
-      const contract = await resolvePlanContract({
-        raw: input.contract,
-        steps: input.steps,
-        actionContract: context.request.actionContract,
-        ready: input.ready,
-        gateway,
-        planId: plan.planId,
-        revision: plan.revision,
-        conversationKey: context.request.conversationKey,
-      });
-      const explicitScopeCount = extractExplicitResearchScopeCount(
-        context.request.userText,
-      );
-      if (
-        input.ready &&
-        explicitScopeCount !== undefined &&
-        contract.investigation?.scopeSnapshot?.itemCount !== explicitScopeCount
-      ) {
-        throw new Error(
-          `The user requested exactly ${explicitScopeCount} research items, but the frozen scope contains ${contract.investigation?.scopeSnapshot?.itemCount ?? 0}. Resolve exactly those items with a bounded sorted metadata query and use investigation.scope kind 'items' with their exact itemKeys.`,
-        );
-      }
-      const artifact = await planExecutionCoordinator.updateDraft({
-        planId: plan.planId,
-        conversationKey: context.request.conversationKey,
-        provider: plan.provider,
-        revision: plan.revision,
-        explanation: input.explanation,
-        steps: input.steps,
-        contract,
-        actionContractId: context.request.actionContract?.id,
-        actionContract: context.request.actionContract,
-        sourceRunId: context.runId || "external-mcp-structured",
-        skillRoutingReceipt: context.request.skillRoutingReceipt
-          ? {
-              routerSchemaVersion:
-                context.request.skillRoutingReceipt.routerSchemaVersion,
-              skillManifestHash:
-                context.request.skillRoutingReceipt.skillManifestHash,
-              skills: context.request.skillRoutingReceipt.skills.map(
-                ({ id, version, instructionHash, source }) => ({
-                  id,
-                  version,
-                  instructionHash,
-                  source,
-                }),
-              ),
-            }
-          : undefined,
-        ready: input.ready,
-      });
+      const artifact = await preparePlanExecution(input, context, gateway);
       await context.publishPlanEvent?.({
         type: input.ready ? "plan_ready" : "plan_updated",
         artifact,

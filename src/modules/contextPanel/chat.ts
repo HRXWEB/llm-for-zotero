@@ -1,3 +1,8 @@
+import {
+  readNativeQuestions,
+  buildNativeQuestionAction,
+  nativeQuestionAnswers,
+} from "../../codexAppServer/nativeQuestions";
 import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
 import {
   disposePlanProgress,
@@ -360,10 +365,7 @@ import {
 } from "./agentTrace/render";
 import { applyStableAnimationPhase } from "./stableAnimationPhase";
 import type { AgentActionContract } from "../../agent/contracts/types";
-import {
-  inferPlanStepEffect,
-  planExecutionCoordinator,
-} from "../../agent/plans/coordinator";
+import { planExecutionCoordinator } from "../../agent/plans/coordinator";
 import {
   TOOL_ACTIVITY_VISIBLE_DEDUPE_WINDOW_MS,
   hasSameToolActivityVisibleIdentity,
@@ -422,6 +424,7 @@ import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
 import {
   appendAgentRunEventAfterLatest,
   getAgentRunTrace,
+  saveAgentRunTraceSnapshot,
 } from "../../agent/store/traceStore";
 import { deliverPendingPlanDocumentMessage } from "../../agent/documents/finalizer";
 import { loadDocumentIdForMessageOwner } from "../../agent/documents/store";
@@ -3021,8 +3024,17 @@ function showNativeMcpActionCard(
   body: Element,
   requestId: string,
   action: AgentPendingAction,
+  signal?: AbortSignal,
+  traceOwnsCard = false,
 ): Promise<AgentConfirmationResolution> {
   return new Promise((resolve) => {
+    const cancel = () => {
+      getAgentApi().resolveConfirmation(requestId, false);
+    };
+    if (signal?.aborted) {
+      resolve({ approved: false });
+      return;
+    }
     ztoolkit.log("Codex app-server native confirmation requested", {
       requestId,
       toolName: action.toolName,
@@ -3048,6 +3060,7 @@ function showNativeMcpActionCard(
           approved: resolution.approved,
           actionId: resolution.actionId,
         });
+        signal?.removeEventListener("abort", cancel);
         closeNativeMcpActionCard(body, requestId);
         resolve(resolution);
       });
@@ -3063,6 +3076,14 @@ function showNativeMcpActionCard(
       );
     }
 
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
+    // The queued assistant trace owns persistent review cards. Register the
+    // response now, but do not race that render with a second inline card.
+    if (traceOwnsCard) return;
     const renderedCard = findNativeMcpActionCard(ui.chatBox, requestId);
     if (renderedCard) {
       scrollNativeMcpActionCardIntoView(ui.chatBox, renderedCard);
@@ -3117,17 +3138,51 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
     body: Element,
     requestId: string,
     action: AgentPendingAction,
+    signal?: AbortSignal,
+    traceOwnsCard?: boolean,
   ) => Promise<AgentConfirmationResolution>;
   nextRequestId?: () => string;
   isCurrent?: () => boolean;
 }): Promise<unknown> {
+  const questions = readNativeQuestions(params.request);
   const defaultDecision = resolveCodexNativeApprovalRequest(params.request);
-  if (params.isCurrent && !params.isCurrent()) {
-    return defaultDecision.response;
+  if (
+    params.request.signal?.aborted ||
+    (params.isCurrent && !params.isCurrent())
+  ) {
+    return questions ? { answers: {} } : defaultDecision.response;
   }
   if (defaultDecision.approved) {
     params.setStatusSafely("Codex approved Zotero MCP access", "sending");
     return defaultDecision.response;
+  }
+  if (questions) {
+    const requestId = `codex-question-${Date.now()}-${++codexNativeApprovalRequestCounter}`;
+    const action = buildNativeQuestionAction(questions);
+    params.setStatusSafely("Codex is waiting for your input", "sending");
+    params.trace?.noteMcpConfirmationRequired?.(requestId, action);
+    let resolution: AgentConfirmationResolution;
+    try {
+      resolution = await (params.showActionCard || showNativeMcpActionCard)(
+        params.body,
+        requestId,
+        action,
+        params.request.signal,
+        Boolean(params.trace?.noteMcpConfirmationRequired),
+      );
+    } catch (error) {
+      params.trace?.noteMcpConfirmationResolved?.(requestId, {
+        approved: false,
+      });
+      throw error;
+    }
+    if (
+      params.request.signal?.aborted ||
+      (params.isCurrent && !params.isCurrent())
+    )
+      resolution = { approved: false };
+    params.trace?.noteMcpConfirmationResolved?.(requestId, resolution);
+    return nativeQuestionAnswers(questions, resolution);
   }
   if (defaultDecision.reason === "unsupported_mcp_elicitation") {
     params.setStatusSafely(
@@ -3152,7 +3207,13 @@ export async function resolveCodexNativeApprovalWithOptionalReviewCard(params: {
   try {
     params.setStatusSafely("Codex is waiting for your approval", "sending");
     params.trace?.noteMcpConfirmationRequired?.(requestId, action);
-    const resolution = await showActionCard(params.body, requestId, action);
+    const resolution = await showActionCard(
+      params.body,
+      requestId,
+      action,
+      params.request.signal,
+      Boolean(params.trace?.noteMcpConfirmationRequired),
+    );
     if (params.isCurrent && !params.isCurrent()) {
       return defaultDecision.response;
     }
@@ -3717,6 +3778,8 @@ type CodexNativeTurnCallbacks = Pick<
   | "onItemStarted"
   | "onItemCompleted"
   | "onPlanUpdated"
+  | "onPlanDelta"
+  | "onPlanArtifact"
   | "onPlanExecutionUpdated"
   | "onMcpToolActivity"
   | "onMcpSetupWarning"
@@ -3764,6 +3827,15 @@ function buildCodexNativeTurnCallbacks(ctx: {
       ctx.conversationKey,
       ctx.conversationGeneration,
     );
+  if (ctx.planContext)
+    codexActivityTrace?.appendPlanEvent({
+      type: "provider_event",
+      providerType: "codex_plan_context",
+      payload: {
+        planContext: ctx.planContext,
+        actionContract: ctx.actionContract,
+      },
+    });
   return {
     onSkillActivated: (skillId) => {
       if (!isLive()) return;
@@ -3805,53 +3877,12 @@ function buildCodexNativeTurnCallbacks(ctx: {
         setStatusSafely(`Codex: ${itemType} completed`, "sending");
       }
     },
-    onPlanUpdated: async (event) => {
-      const planning = ctx.planContext;
-      if (!isLive() || planning?.phase !== "planning") return;
+    onPlanDelta: (event) => {
+      if (isLive()) handleDelta(event.delta);
+    },
+    onPlanArtifact: (artifact) => {
+      if (!isLive()) return;
       flushResponseStream("event");
-      const { loadPlanArtifact } = await import("../../agent/plans/store");
-      const structured = await loadPlanArtifact(
-        planning.planId,
-        planning.revision,
-      );
-      if (structured?.sourceRunId) {
-        codexActivityTrace?.appendPlanEvent({
-          type:
-            structured.status === "awaiting_approval"
-              ? "plan_ready"
-              : "plan_updated",
-          artifact: structured,
-        });
-        return;
-      }
-      const artifact = await planExecutionCoordinator.updateDraft({
-        planId: planning.planId,
-        conversationKey: ctx.conversationKey,
-        provider: "codex",
-        revision: planning.revision,
-        explanation: event.explanation,
-        steps: event.steps.map((step, index) => ({
-          planStepId: `${planning.planId}:r${planning.revision}:s${index + 1}`,
-          content: step.content,
-          activeForm: step.content,
-          acceptanceCriteria: [
-            {
-              criterionId: `${planning.planId}:r${planning.revision}:s${index + 1}:criterion`,
-              description: `Verify: ${step.content}`,
-              verifier:
-                inferPlanStepEffect(step.content) === "mutation"
-                  ? "mutation_receipts"
-                  : inferPlanStepEffect(step.content) === "read"
-                    ? "verified_read"
-                    : "bounded_reasoning",
-            },
-          ],
-          expectedEffect: inferPlanStepEffect(step.content),
-        })),
-        actionContractId: ctx.actionContract?.id,
-        actionContract: ctx.actionContract,
-        ready: event.steps.every((step) => step.status === "completed"),
-      });
       codexActivityTrace?.appendPlanEvent({
         type:
           artifact.status === "awaiting_approval"
@@ -3859,6 +3890,10 @@ function buildCodexNativeTurnCallbacks(ctx: {
             : "plan_updated",
         artifact,
       });
+    },
+    onPlanUpdated: (event) => {
+      if (!isLive()) return;
+      codexActivityTrace?.appendNativePlanProgress(event.steps);
     },
     onPlanExecutionUpdated: (ledger) => {
       if (!isLive()) return;
@@ -3878,26 +3913,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
       );
       if (event.phase === "completed" && event.ok) {
         void (async () => {
-          if (
-            event.toolName === "update_plan" &&
-            ctx.planContext?.phase === "planning"
-          ) {
-            const { loadPlanArtifact } =
-              await import("../../agent/plans/store");
-            const artifact = await loadPlanArtifact(
-              ctx.planContext.planId,
-              ctx.planContext.revision,
-            );
-            if (artifact) {
-              codexActivityTrace?.appendPlanEvent({
-                type:
-                  artifact.status === "awaiting_approval"
-                    ? "plan_ready"
-                    : "plan_updated",
-                artifact,
-              });
-            }
-          }
           if (
             event.toolName === "research_update" &&
             ctx.planContext?.phase === "executing"
@@ -6617,13 +6632,15 @@ function createCodexNativeActivityTraceController(
     createdAt: Date.now(),
   });
 
+  const snapshotEvents = () =>
+    events.map((entry, index) => ({
+      ...entry,
+      seq: index + 1,
+      payload: { ...entry.payload } as AgentEvent,
+    }));
   const sync = () => {
     assistantMessage.pendingAgentTraceEvents = events.length
-      ? events.map((entry, index) => ({
-          ...entry,
-          seq: index + 1,
-          payload: { ...entry.payload } as AgentEvent,
-        }))
+      ? snapshotEvents()
       : undefined;
     queueRefresh();
   };
@@ -7055,6 +7072,9 @@ function createCodexNativeActivityTraceController(
     phase: "started" | "completed",
   ): void => {
     if (isCodexNativeAgentMessageItem(event)) return;
+    // Proposals and user inputs have their own views and must not be repeated
+    // as generic tool/status text in the persisted assistant trace.
+    if (isCodexNativeItemType(event, ["plan", "usermessage"])) return;
     flushAllProgressCoalescers("event");
     if (appendStructuredOperationStatus(event, phase)) {
       sync();
@@ -7202,6 +7222,14 @@ function createCodexNativeActivityTraceController(
   };
 
   const appendPlanEvent = (event: AgentEvent): void => {
+    if (
+      event.type === "provider_event" &&
+      event.providerType === "codex_plan_context"
+    ) {
+      events.push(createEvent(event));
+      sync();
+      return;
+    }
     if (event.type === "plan_scope_amended") {
       events.push(createEvent(event));
       sync();
@@ -7253,8 +7281,60 @@ function createCodexNativeActivityTraceController(
   };
 
   return {
+    persist: async (
+      conversationKey: number,
+      generation: number,
+      status?: import("../../agent/types").AgentRunStatus,
+    ) => {
+      if (!events.length) return;
+      await withConversationWriteLock(conversationKey, async () => {
+        if (
+          areConversationWritesFrozen(conversationKey) ||
+          !isConversationWriteGenerationCurrent(conversationKey, generation)
+        )
+          return;
+        const snapshot = snapshotEvents();
+        await saveAgentRunTraceSnapshot(
+          {
+            runId,
+            conversationKey,
+            mode: "agent",
+            model: assistantMessage.modelName,
+            status:
+              status ||
+              (events.some((entry) => entry.payload.type === "final")
+                ? "completed"
+                : "failed"),
+            createdAt: events[0].createdAt,
+            completedAt: Date.now(),
+            finalText: assistantMessage.text,
+          },
+          snapshot,
+        );
+        assistantMessage.agentRunId = runId;
+        agentRunTraceCache.set(runId, snapshot);
+      });
+    },
     appendAgentMessageDelta,
     appendPlanEvent,
+    appendNativePlanProgress: (
+      steps: Array<{ content: string; status?: string }>,
+    ) => {
+      const changed = upsertProgressText(
+        "codex-plan-checklist",
+        steps
+          .map(
+            (step) =>
+              `${step.status === "completed" ? "✓" : "•"} ${step.content}`,
+          )
+          .join("\n"),
+        "replace",
+        steps.every((step) => step.status === "completed")
+          ? "completed"
+          : "running",
+      );
+      if (changed) sync();
+    },
     appendItemStatus,
     finish,
     noteSkillActivated,
@@ -8540,7 +8620,33 @@ export async function retryLatestAssistantResponse(
   const conversationGeneration = getConversationWriteGeneration(
     getConversationKey(item),
   );
+  const retryTraceEvents =
+    retryPair.assistantMessage.pendingAgentTraceEvents ||
+    (retryPair.assistantMessage.agentRunId
+      ? (await getAgentRunTrace(retryPair.assistantMessage.agentRunId)).events
+      : []);
+  const retryPlanEvent = retryTraceEvents
+    .map((event) => event.payload)
+    .find(
+      (event) =>
+        event.type === "provider_event" &&
+        event.providerType === "codex_plan_context",
+    );
+  const retryPlanContext =
+    retryPlanEvent?.type === "provider_event"
+      ? (retryPlanEvent.payload?.planContext as
+          | import("../../agent/plans/types").PlanRuntimeContext
+          | undefined)
+      : undefined;
+  const retryActionContract =
+    retryPlanEvent?.type === "provider_event"
+      ? (retryPlanEvent.payload?.actionContract as
+          | AgentActionContract
+          | undefined)
+      : undefined;
+
   const assistantMessage = retryPair.assistantMessage;
+  let codexActivityTrace: CodexNativeActivityTraceController | null = null;
   const assistantSnapshot = takeAssistantSnapshot(assistantMessage);
   const continueIncomplete = Boolean(
     retryOptions?.continueIncomplete &&
@@ -8771,6 +8877,11 @@ export async function retryLatestAssistantResponse(
   const finalizeCancelledAssistant = async () => {
     flushResponseStream("cancel");
     finalizeCancelledAssistantMessage(assistantMessage);
+    await codexActivityTrace?.persist(
+      conversationKey,
+      conversationGeneration,
+      "cancelled",
+    );
     refreshChatSafely();
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await updateStoredLatestAssistantMessageByConversation(
@@ -8956,7 +9067,7 @@ export async function retryLatestAssistantResponse(
       () => refreshAssistantMessageSafely(assistantMessage),
       body,
     );
-    const codexActivityTrace = isCodexNativeTurn
+    codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
     noteExplicitCodexNativeSkillInvocations(
@@ -9071,6 +9182,8 @@ export async function retryLatestAssistantResponse(
             scope: codexScope!,
             conversationGeneration,
             sourceMessageTimestamp: retryPair.userMessage.timestamp,
+            planContext: retryPlanContext,
+            actionContract: retryActionContract,
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
@@ -9110,13 +9223,24 @@ export async function retryLatestAssistantResponse(
               handleUsage,
               conversationKey,
               conversationGeneration,
+              planContext: retryPlanContext,
+              actionContract: retryActionContract,
             }),
           });
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
+          await finalizeCodexPlanExecution({
+            planContext: retryPlanContext,
+            answer: result.text,
+            assistantMessage,
+            trace: codexActivityTrace,
+          });
           return {
-            text: result.text,
+            text:
+              retryPlanContext?.phase === "planning"
+                ? "The plan is ready for review."
+                : result.text,
             completion: { status: "complete" as const },
           };
         })()
@@ -9174,6 +9298,7 @@ export async function retryLatestAssistantResponse(
       conversationKey,
     });
     codexActivityTrace?.finish(assistantMessage.text);
+    await codexActivityTrace?.persist(conversationKey, conversationGeneration);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
     assistantMessage.modelEntryId = effectiveRequestConfig.modelEntryId;
@@ -9263,6 +9388,10 @@ export async function retryLatestAssistantResponse(
       assistantMessage.reasoningDetails = streamedReasoningDetails;
       assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
       assistantMessage.streaming = false;
+      await codexActivityTrace?.persist(
+        conversationKey,
+        conversationGeneration,
+      );
       refreshChatSafely();
       const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
       await updateStoredLatestAssistantMessageByConversation(
@@ -11561,10 +11690,18 @@ export async function sendQuestion(
   refreshChatSafely();
 
   let assistantPersisted = false;
-  const persistAssistantOnce = async () => {
+  let codexActivityTrace: CodexNativeActivityTraceController | null = null;
+  const persistAssistantOnce = async (
+    status?: import("../../agent/types").AgentRunStatus,
+  ) => {
     if (assistantPersisted) return;
     assistantPersisted = true;
     if (!shouldPersistTurn) return;
+    await codexActivityTrace?.persist(
+      conversationKey,
+      conversationGeneration,
+      status,
+    );
     await persistConversationMessage(
       conversationKey,
       {
@@ -11603,7 +11740,7 @@ export async function sendQuestion(
     flushResponseStream("cancel");
     finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
-    await persistAssistantOnce();
+    await persistAssistantOnce("cancelled");
     setStatusSafely("Cancelled", "ready");
   };
   const stopInactiveRequest = async () => {
@@ -11865,7 +12002,7 @@ export async function sendQuestion(
       () => refreshAssistantMessageSafely(assistantMessage),
       body,
     );
-    const codexActivityTrace = isCodexNativeTurn
+    codexActivityTrace = isCodexNativeTurn
       ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
     noteExplicitCodexNativeSkillInvocations(
@@ -12010,8 +12147,6 @@ export async function sendQuestion(
             model: effectiveRequestConfig.model,
             messages: finalPrepared.messages,
             reasoning: effectiveRequestConfig.reasoning,
-            collaborationMode:
-              opts.planContext?.phase === "planning" ? "plan" : "default",
             planContext: opts.planContext,
             actionContract: codexPlanActionContract,
             signal: getAbortController(conversationKey)?.signal,
@@ -12056,7 +12191,10 @@ export async function sendQuestion(
             assistantMessage.documentId = result.documentId;
           }
           return {
-            text: result.text,
+            text:
+              opts.planContext?.phase === "planning"
+                ? "The plan is ready for review."
+                : result.text,
             completion: { status: "complete" as const },
           };
         })()

@@ -150,6 +150,7 @@ type ActionCommandControllerDeps = {
   setStatusMessage?: (message: string, level: StatusLevel) => void;
   logError: (message: string, error?: unknown) => void;
   activatePlanMode: () => void;
+  isPlanAvailable: () => boolean;
 };
 
 export function createActionCommandController(
@@ -1568,7 +1569,7 @@ export function createActionCommandController(
     executeAgentAction,
     buildActionRequestContext,
     activatePlanMode: deps.activatePlanMode,
-    isPlanAvailable: () => deps.getCurrentRuntimeMode() === "agent",
+    isPlanAvailable: deps.isPlanAvailable,
   };
 
   const renderSkillsInSlashMenu = (query = ""): void =>

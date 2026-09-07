@@ -579,6 +579,11 @@ export class AgentToolRegistry {
     let amendablePlanScopeFailure: ScopeValidationFailure | null = null;
     let activePlanScopeFailure: ScopeValidationFailure | null = null;
     let initialScopeValidated = false;
+    // Plan approval already covers the whole frozen request. Individual
+    // checkpoint calls may execute a subset; exact targets and parameters are
+    // still validated before every write, and receipts track remaining work.
+    const approvedPlanCoverage =
+      context.request.planContext?.phase === "executing";
     let approvedPlanScopeProposalDigest: string | undefined;
     let activePlanAmendmentGrant: PlanAmendmentGrant | undefined;
     const decidePlanScopeAmendment = (
@@ -640,7 +645,8 @@ export class AgentToolRegistry {
         preparedAction,
         {
           allowPartialCoverage: Boolean(
-            options.callerKind === "action" && context.journalActionScope,
+            approvedPlanCoverage ||
+            (options.callerKind === "action" && context.journalActionScope),
           ),
           progress: context.request.actionProgress,
         },
@@ -949,8 +955,9 @@ export class AgentToolRegistry {
           executionPrepared,
           {
             allowPartialCoverage: Boolean(
-              options.callerKind === "action" &&
-              executionContext.journalActionScope,
+              approvedPlanCoverage ||
+              (options.callerKind === "action" &&
+                executionContext.journalActionScope),
             ),
             concreteWrite: executionInvocationPlan.impact !== "read_only",
             progress: context.request.actionProgress,
@@ -1428,7 +1435,8 @@ export class AgentToolRegistry {
           confirmedInvocation.preparedAction,
           {
             allowPartialCoverage: Boolean(
-              options.callerKind === "action" && context.journalActionScope,
+              approvedPlanCoverage ||
+              (options.callerKind === "action" && context.journalActionScope),
             ),
             concreteWrite: confirmedInvocation.plan.impact !== "read_only",
             progress: context.request.actionProgress,

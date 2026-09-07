@@ -88,6 +88,18 @@ export type PlanContract = Readonly<{
   researchPolicy?: ResearchPolicySnapshot;
 }>;
 
+export type NativePlanAttempt = Readonly<{
+  attemptId: string;
+  threadId: string;
+  /** Absent only while turn/start has not returned; a finalized proposal requires it. */
+  turnId?: string;
+  ephemeral: boolean;
+}>;
+export type NativePlanBinding = NativePlanAttempt &
+  Readonly<{
+    proposal?: Readonly<{ itemId: string; markdown: string }>;
+  }>;
+
 /** A revision is editable only while drafting and is frozen by approval. */
 export type PlanArtifact = Readonly<{
   version: 1 | 2 | 3 | 4;
@@ -102,6 +114,7 @@ export type PlanArtifact = Readonly<{
   /** Frozen scope/effect contract that the approval grant authorizes. */
   actionContract?: AgentActionContract;
   sourceRunId?: string;
+  nativePlanning?: NativePlanBinding;
   /** Present on v2 artifacts; binds planning-time skill instructions. */
   skillRoutingReceipt?: PlanSkillRoutingReceipt;
   /** Required and centrally validated on v3 artifacts. */
@@ -326,6 +339,7 @@ export type TaskTransitionRequest = Readonly<{
 export type PlanRuntimeContext =
   | Readonly<{
       phase: "planning";
+      nativePlanning?: NativePlanAttempt;
       planId: string;
       revision: number;
       provider: PlanProvider;

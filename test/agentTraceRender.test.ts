@@ -2296,6 +2296,54 @@ describe("agentTrace render", function () {
     );
   });
 
+  it("keeps native proposal and user-message items out of generic activity text", function () {
+    const message: any = {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+    };
+    const controller = createCodexNativeActivityTraceControllerForTests(
+      message,
+      () => {},
+    );
+    for (const type of ["plan", "userMessage"]) {
+      controller.appendItemStatus(
+        { id: type, type, details: "Already rendered by its owning view" },
+        "started",
+      );
+      controller.appendItemStatus(
+        { id: type, type, details: "Already rendered by its owning view" },
+        "completed",
+      );
+    }
+    assert.isUndefined(message.pendingAgentTraceEvents);
+  });
+
+  it("refreshes native checklist progress without creating a reviewable proposal", function () {
+    const message: any = {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+    };
+    let refreshes = 0;
+    const controller = createCodexNativeActivityTraceControllerForTests(
+      message,
+      () => {
+        refreshes += 1;
+      },
+    );
+    controller.appendNativePlanProgress([
+      { content: "Inspect the scope", status: "completed" },
+    ]);
+    assert.equal(refreshes, 1);
+    assert.deepEqual(
+      message.pendingAgentTraceEvents.map((e: any) => e.eventType),
+      ["codex_progress"],
+    );
+  });
+
   it("preserves every native Codex agent message and tool trace after completion", function () {
     const message = {
       role: "assistant" as const,

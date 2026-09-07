@@ -571,19 +571,34 @@ export async function getCodexPermissionOptionCatalog(
 }
 
 export async function resolveCodexPermissionExecution(params: {
+  planning?: boolean;
   proc: CodexAppServerProcess;
   cwd?: string;
   fresh?: boolean;
   hasExistingThread?: boolean;
   appliedState?: CodexPermissionState | null;
 }): Promise<CodexPermissionExecution> {
-  const preference = readCodexPermissionStatePref();
-  if (preference.error) throw new Error(preference.error);
+  const savedPreference = readCodexPermissionStatePref();
+  if (savedPreference.error) throw new Error(savedPreference.error);
   const capabilities = await getCodexPermissionCapabilities({
     proc: params.proc,
     cwd: params.cwd,
     fresh: params.fresh ?? true,
   });
+  const preference =
+    params.planning && capabilities.protocol !== "legacy"
+      ? {
+          ...savedPreference,
+          hasUserValue: true,
+          state: {
+            boundary: { kind: "profile" as const, profileId: ":read-only" },
+            approvalOverride: {
+              policy: "never" as const,
+              reviewer: "user" as const,
+            },
+          },
+        }
+      : savedPreference;
   return buildCodexPermissionExecution({
     preference,
     capabilities,

@@ -1,3 +1,7 @@
+import {
+  exerciseNativePlanReview,
+  exerciseNativeQuestionReview,
+} from "./nativePlanReviewReplay";
 import { exercisePlanHistoryReplay } from "./planHistoryReplay";
 import { exerciseStreamingReplay } from "./streamingReplay";
 import { buildUI } from "./buildUI";
@@ -4707,6 +4711,15 @@ export function installWorkflowTestHarness(targetAddon: {
     createStandaloneNoteFixture,
     renderPanelForItem,
     exerciseBackgroundAgentPublication,
+    exerciseNativePlanReview: () => {
+      assertWorkflowTestEnabled();
+      return exerciseNativePlanReview();
+    },
+    exerciseNativeQuestionReview: (panelId: string) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      return exerciseNativeQuestionReview(panel.body, panel.item);
+    },
     exercisePlanHistoryReplay: (input) =>
       exercisePlanHistoryReplay(getPanel(input.panelId), input),
     exerciseStreamingReplay: (input) =>

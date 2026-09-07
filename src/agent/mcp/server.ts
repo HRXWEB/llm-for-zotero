@@ -1,3 +1,4 @@
+import { createAbortController } from "../../utils/apiHelpers";
 /**
  * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
  *
@@ -57,7 +58,7 @@ import {
   type McpToolDefinition,
   type McpToolsListResult,
 } from "./protocol";
-import { loadPlanArtifact } from "../plans/store";
+import { loadPlanArtifact, loadPlanExecutionLedger } from "../plans/store";
 import { loadLatestResearchMutationApprovalGrant } from "../research/store";
 import { validateResearchMutationGrant } from "../research/mutationApproval";
 import { extractVerifiedReadSources } from "../plans/readEvidence";
@@ -87,6 +88,7 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
 ] as const;
 export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "update_plan",
+  "prepare_plan_execution",
   "amend_plan",
   "task_update",
   "research_update",
@@ -192,6 +194,8 @@ const RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES = new Set(["literature_search"]);
 
 type ZoteroMcpScopeMetadata = {
   runtimeAuthority?: "claude" | "codex";
+  /** Host lifecycle signal; never supplied by MCP tool arguments. */
+  signal?: AbortSignal;
   /** Durable provider run that owns direct document artifacts. */
   runId?: string;
   sourceMessageTimestamp?: number;
@@ -295,7 +299,12 @@ type McpHttpResponse = {
 
 const scopedZoteroMcpScopes = new Map<
   string,
-  { createdAt: number; expiresAt: number; scope: ZoteroMcpActiveScope }
+  {
+    createdAt: number;
+    expiresAt: number;
+    scope: ZoteroMcpActiveScope;
+    controller: AbortController;
+  }
 >();
 const conversationScopeTokens = new Map<
   string,
@@ -765,6 +774,7 @@ function normalizeActiveScope(
     model: normalizeText(scope.model, 256),
     codexPath: normalizeText(scope.codexPath, 4096),
     reasoning: normalizeReasoningConfig(scope.reasoning),
+    signal: scope.signal,
     planContext: scope.planContext,
     actionContract: scope.actionContract,
     documentOutcomePolicy: scope.documentOutcomePolicy,
@@ -807,8 +817,7 @@ function pruneExpiredScopedMcpScopes(): void {
   const now = Date.now();
   for (const [token, entry] of scopedZoteroMcpScopes) {
     if (entry.expiresAt <= now) {
-      scopedZoteroMcpScopes.delete(token);
-      clearMcpReadDedupeCacheForScopeToken(token);
+      releaseScopedMcpScope(token);
     }
   }
 }
@@ -823,18 +832,28 @@ export function registerScopedZoteroMcpScope(
     Number.isFinite(options.ttlMs) && Number(options.ttlMs) > 0
       ? Math.floor(Number(options.ttlMs))
       : SCOPED_MCP_SCOPE_TTL_MS;
-  scopedZoteroMcpScopes.set(token, {
+  releaseScopedMcpScope(token);
+  const controller = createAbortController();
+  const entry = {
     createdAt: Date.now(),
     expiresAt: Date.now() + ttlMs,
-    scope: normalizeActiveScope(scope),
-  });
+    controller,
+    scope: normalizeActiveScope({ ...scope, signal: controller.signal }),
+  };
+  scopedZoteroMcpScopes.set(token, entry);
   return {
     token,
     clear: () => {
-      scopedZoteroMcpScopes.delete(token);
-      clearMcpReadDedupeCacheForScopeToken(token);
+      if (scopedZoteroMcpScopes.get(token) === entry)
+        releaseScopedMcpScope(token);
     },
   };
+}
+
+function releaseScopedMcpScope(token: string): void {
+  scopedZoteroMcpScopes.get(token)?.controller.abort();
+  scopedZoteroMcpScopes.delete(token);
+  clearMcpReadDedupeCacheForScopeToken(token);
 }
 
 /** Refreshes the mutable per-turn authority carried by an already-issued
@@ -920,8 +939,7 @@ export function releaseConversationScopeToken(params: {
       const legacyEntry = conversationScopeTokens.get(legacyKey);
       if (legacyEntry) {
         conversationScopeTokens.delete(legacyKey);
-        scopedZoteroMcpScopes.delete(legacyEntry.token);
-        clearMcpReadDedupeCacheForScopeToken(legacyEntry.token);
+        releaseScopedMcpScope(legacyEntry.token);
       }
     }
     return;
@@ -931,8 +949,7 @@ export function releaseConversationScopeToken(params: {
   // conversation. Legacy callers may still release legacy tokens by key.
   if (instanceID && entry.instanceID !== instanceID) return;
   conversationScopeTokens.delete(key);
-  scopedZoteroMcpScopes.delete(entry.token);
-  clearMcpReadDedupeCacheForScopeToken(entry.token);
+  releaseScopedMcpScope(entry.token);
 }
 
 function getHeader(
@@ -1330,7 +1347,12 @@ function isMcpToolVisibleInScope(
       return scope?.documentOutcomePolicy?.required === true;
     }
     const phase = scope?.planContext?.phase;
-    if (tool.name === "update_plan") return phase === "planning";
+    if (tool.name === "update_plan")
+      return phase === "planning" && !scope?.planContext?.nativePlanning;
+    if (tool.name === "prepare_plan_execution")
+      return (
+        phase === "planning" && Boolean(scope?.planContext?.nativePlanning)
+      );
     if (phase !== "executing") return false;
   }
   if (!hasRawPdfScope(scope)) return true;
@@ -1754,6 +1776,7 @@ function createToolContext(
       );
   return {
     request,
+    signal: scope?.signal,
     runId: scope?.runId,
     item,
     currentAnswerText: "",
@@ -1763,14 +1786,28 @@ function createToolContext(
   };
 }
 
-async function restoreResearchMutationAuthority(
+async function restorePlanExecutionContext(
   context: AgentToolContext,
   toolRegistry: AgentToolRegistry,
 ): Promise<void> {
   const plan = context.request.planContext;
-  if (plan?.phase !== "executing" || context.request.actionContract) {
-    return;
+  if (plan?.phase !== "executing") return;
+  const ledger = await loadPlanExecutionLedger(plan.executionId);
+  if (
+    !ledger ||
+    ledger.planId !== plan.planId ||
+    ledger.revision !== plan.revision ||
+    ledger.planDigest !== plan.approvedDigest ||
+    ledger.conversationKey !== context.request.conversationKey
+  ) {
+    throw new Error(
+      "The MCP plan execution no longer matches its saved ledger",
+    );
   }
+  // A scoped token lasts for the provider turn, while each successful tool may
+  // advance the durable task. Never use the dispatch-time active task hint.
+  context.request.planContext = { ...plan, activeTaskId: ledger.activeTaskId };
+  if (context.request.actionContract) return;
   const artifact = await loadPlanArtifact(plan.planId, plan.revision);
   if (
     !artifact ||
@@ -2106,7 +2143,7 @@ async function handleToolsCall(
       callScope,
       deps.zoteroGateway,
     );
-    await restoreResearchMutationAuthority(toolContext, deps.toolRegistry);
+    await restorePlanExecutionContext(toolContext, deps.toolRegistry);
     const prepared = await deps.toolRegistry.prepareExecution(
       {
         id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2369,7 +2406,8 @@ export async function invokeRegisteredZoteroMcpEndpoint(
  * Removes the MCP endpoint from Zotero's server (call on plugin shutdown).
  */
 export function unregisterMcpServer(): void {
-  scopedZoteroMcpScopes.clear();
+  for (const token of scopedZoteroMcpScopes.keys())
+    releaseScopedMcpScope(token);
   mcpReadDedupeCache.clear();
   registeredMcpDeps = null;
   delete Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];

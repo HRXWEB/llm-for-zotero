@@ -38,6 +38,7 @@ import {
 } from "../research/store";
 import { resolvePlannedReadingPapers } from "../research/readingBudget";
 import { resolveResearchPolicy } from "../research/policy";
+import { withConversationWriteLock } from "../../shared/conversationWriteFence";
 
 function normalizedText(value: unknown, label: string): string {
   const text = typeof value === "string" ? value.trim() : "";
@@ -384,6 +385,7 @@ export async function computePlanDigest(params: {
   actionContractId?: string;
   steps: readonly PlanStep[];
   skillRoutingReceipt?: PlanSkillRoutingReceipt;
+  nativePlanning?: import("./types").NativePlanBinding;
   contract?: PlanContract;
   contractDigest?: string;
 }): Promise<string> {
@@ -572,6 +574,16 @@ export function canonicalizePlanVerifierOwnership(params: {
   return steps;
 }
 
+function requireFrozenWriteObligations(
+  contract: AgentActionContract | undefined,
+): void {
+  if (!contract?.obligations.some((entry) => entry.operation !== "read_full")) {
+    throw new Error(
+      "This mutation plan has no frozen write obligations. Ask the user to state the requested action and exact targets explicitly, then revise the plan before approval.",
+    );
+  }
+}
+
 function validatePlanStepContract(params: {
   contract: PlanContract;
   steps: readonly PlanStep[];
@@ -580,6 +592,8 @@ function validatePlanStepContract(params: {
     .map((step, index) => (step.expectedEffect === "mutation" ? index : -1))
     .filter((index) => index >= 0);
   const effect = params.contract.effects?.libraryMutation;
+  if (effect?.approval === "initial")
+    requireFrozenWriteObligations(effect.contract);
   if (Boolean(effect) !== Boolean(mutationIndexes.length)) {
     throw new Error(
       effect
@@ -866,10 +880,20 @@ export class PlanExecutionCoordinator {
     actionContractId?: string;
     actionContract?: AgentActionContract;
     sourceRunId?: string;
+    nativePlanning?: import("./types").NativePlanBinding;
     skillRoutingReceipt?: PlanSkillRoutingReceipt;
     ready?: boolean;
     now?: number;
   }): Promise<PlanArtifact> {
+    if (
+      params.nativePlanning &&
+      params.ready &&
+      !params.nativePlanning.proposal?.markdown.trim()
+    ) {
+      throw new Error(
+        "A completed native proposal is required before plan review",
+      );
+    }
     const now = params.now ?? Date.now();
     const existing = await loadPlanArtifact(params.planId, params.revision);
     if (existing?.status === "approved") {
@@ -971,6 +995,9 @@ export class PlanExecutionCoordinator {
       actionContractId,
       steps,
       skillRoutingReceipt: params.skillRoutingReceipt,
+      ...(params.nativePlanning
+        ? { nativePlanning: params.nativePlanning }
+        : {}),
       contract: decodedContract,
       contractDigest,
     });
@@ -986,6 +1013,9 @@ export class PlanExecutionCoordinator {
       actionContractId,
       actionContract,
       sourceRunId: params.sourceRunId || existing?.sourceRunId,
+      ...(params.nativePlanning
+        ? { nativePlanning: params.nativePlanning }
+        : {}),
       skillRoutingReceipt:
         params.skillRoutingReceipt || existing?.skillRoutingReceipt,
       contract: decodedContract,
@@ -994,20 +1024,7 @@ export class PlanExecutionCoordinator {
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
-    if (params.revision > 1) {
-      const prior = await loadPlanArtifact(params.planId, params.revision - 1);
-      if (
-        prior &&
-        prior.status !== "approved" &&
-        prior.status !== "cancelled"
-      ) {
-        await savePlanArtifact({
-          ...prior,
-          status: "superseded",
-          updatedAt: now,
-        });
-      }
-    }
+    await this.supersedePriorDraft(params.planId, params.revision, now);
     await savePlanArtifact(artifact);
     if (params.ready && params.revision > 1) {
       const priorAmendment = await loadOpenContractRevisionProposal(
@@ -1065,7 +1082,27 @@ export class PlanExecutionCoordinator {
     return artifact;
   }
 
+  async supersedePriorDraft(
+    planId: string,
+    revision: number,
+    now = Date.now(),
+  ): Promise<void> {
+    if (revision <= 1) return;
+    const prior = await loadPlanArtifact(planId, revision - 1);
+    if (
+      prior &&
+      (prior.status === "drafting" || prior.status === "awaiting_approval")
+    ) {
+      await savePlanArtifact({
+        ...prior,
+        status: "superseded",
+        updatedAt: now,
+      });
+    }
+  }
+
   async approve(params: {
+    expectedDigest?: string;
     planId: string;
     revision: number;
     conversationGeneration: number;
@@ -1076,6 +1113,18 @@ export class PlanExecutionCoordinator {
   }): Promise<PlanExecutionLedger> {
     const artifact = await loadPlanArtifact(params.planId, params.revision);
     if (!artifact) throw new Error("Plan revision not found");
+    return withConversationWriteLock(artifact.conversationKey, () =>
+      this.approveCurrent(params),
+    );
+  }
+
+  private async approveCurrent(
+    params: Parameters<PlanExecutionCoordinator["approve"]>[0],
+  ): Promise<PlanExecutionLedger> {
+    const artifact = await loadPlanArtifact(params.planId, params.revision);
+    if (!artifact) throw new Error("Plan revision not found");
+    if (params.expectedDigest && artifact.digest !== params.expectedDigest)
+      throw new Error("The plan changed after this review card was rendered");
     if (artifact.status !== "awaiting_approval") {
       throw new Error("Only a plan awaiting approval can be approved");
     }
@@ -1091,12 +1140,9 @@ export class PlanExecutionCoordinator {
     }
     if (
       artifact.steps.some((step) => step.expectedEffect === "mutation") &&
-      !actionContract &&
       artifact.contract?.effects?.libraryMutation.approval !== "after_research"
     ) {
-      throw new Error(
-        "This mutation plan has no frozen action contract and cannot be approved safely",
-      );
+      requireFrozenWriteObligations(actionContract);
     }
     const now = params.now ?? Date.now();
     let amendmentService:
@@ -1209,7 +1255,11 @@ export class PlanExecutionCoordinator {
       conversationKey: artifact.conversationKey,
       attempt: 1,
       provider: artifact.provider,
-      providerContinuationId: params.providerContinuationId,
+      providerContinuationId:
+        params.providerContinuationId ||
+        (artifact.nativePlanning && !artifact.nativePlanning.ephemeral
+          ? artifact.nativePlanning.threadId
+          : undefined),
       actionContractId: artifact.actionContractId,
       grant,
       status: "pending",

@@ -443,6 +443,12 @@ export type WorkflowTestApi = {
     noteHtml: string;
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
+  exerciseNativePlanReview: typeof import("./nativePlanReviewReplay").exerciseNativePlanReview;
+  exerciseNativeQuestionReview: (
+    panelId: string,
+  ) => ReturnType<
+    typeof import("./nativePlanReviewReplay").exerciseNativeQuestionReview
+  >;
   exercisePlanHistoryReplay: (input: {
     panelId: string;
     historyTurns: number;

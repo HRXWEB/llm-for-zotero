@@ -774,6 +774,28 @@ export function decodeActionContract(value: unknown): AgentActionContract {
             if (constraint.kind === "no_write") {
               return { kind: "no_write" as const, description };
             }
+            if (constraint.kind === "deny_mechanisms") {
+              const mechanisms = stringArray(
+                constraint.mechanisms,
+                `effects.libraryMutation.contract.hardConstraints[${index}].mechanisms`,
+              );
+              if (
+                !mechanisms.length ||
+                mechanisms.some(
+                  (mechanism) =>
+                    mechanism !== "shell" && mechanism !== "zotero_script",
+                )
+              ) {
+                throw new Error(
+                  "Invalid denied mechanism in action hard constraint",
+                );
+              }
+              return {
+                kind: "deny_mechanisms" as const,
+                mechanisms: mechanisms as ("shell" | "zotero_script")[],
+                description,
+              };
+            }
             if (constraint.kind !== "deny_effects") {
               throw new Error("Unsupported action hard constraint");
             }

@@ -364,6 +364,9 @@ export function decodePlanArtifact(value: unknown): PlanArtifact {
       ? decodeActionContract(input.actionContract)
       : undefined,
     sourceRunId: optionalString(input.sourceRunId),
+    ...(input.nativePlanning
+      ? { nativePlanning: decodeNativePlanBinding(input.nativePlanning) }
+      : {}),
     skillRoutingReceipt: decodeSkillRoutingReceipt(input.skillRoutingReceipt),
     contract,
     contractDigest:
@@ -813,5 +816,36 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
     reference: optionalString(input.reference),
     summary: optionalString(input.summary),
     createdAt: requiredNumber(input.createdAt, "createdAt"),
+  };
+}
+
+function decodeNativePlanBinding(
+  value: unknown,
+): import("./types").NativePlanBinding {
+  const input = requiredRecord(value, "native plan binding");
+  const proposal =
+    input.proposal === undefined
+      ? undefined
+      : requiredRecord(input.proposal, "native proposal");
+  if (typeof input.ephemeral !== "boolean")
+    throw new Error("Invalid native session persistence");
+  return {
+    attemptId: requiredString(input.attemptId, "native plan attempt"),
+    threadId: requiredString(input.threadId, "native plan thread"),
+    turnId: proposal
+      ? requiredString(input.turnId, "native plan turn")
+      : optionalString(input.turnId),
+    ephemeral: input.ephemeral,
+    ...(proposal
+      ? {
+          proposal: {
+            itemId: requiredString(proposal.itemId, "native proposal item"),
+            markdown: requiredString(
+              proposal.markdown,
+              "native proposal Markdown",
+            ),
+          },
+        }
+      : {}),
   };
 }

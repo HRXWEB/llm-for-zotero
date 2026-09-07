@@ -62,6 +62,7 @@ import type { AgentToolDefinition } from "../types";
 import { inferNoteIntent, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { ActionContractService } from "../contracts/actionContract";
+import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
 import { createUpdatePlanTool } from "./plan/updatePlan";
 import { createTaskUpdateTool } from "./plan/taskUpdate";
 import { createRequestUserInputTool } from "./plan/requestUserInput";
@@ -709,6 +710,7 @@ export function createBuiltInToolRegistry(
   registry.register(markToolTier(zoteroScript, "advanced"));
   registry.register(createToolResultReadTool());
   registry.register(createUpdatePlanTool(deps.zoteroGateway));
+  registry.register(createPreparePlanExecutionTool(deps.zoteroGateway));
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));

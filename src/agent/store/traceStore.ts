@@ -531,6 +531,7 @@ export async function appendAgentRunEvent(
   runId: string,
   seq: number,
   event: AgentEvent,
+  createdAt = Date.now(),
 ): Promise<void> {
   const conversationKey = runConversationKeys.get(runId);
   if (conversationKey && isConversationKeyRetiredInMemory(conversationKey)) {
@@ -540,9 +541,32 @@ export async function appendAgentRunEvent(
     `INSERT INTO ${AGENT_RUN_EVENTS_TABLE}
       (run_id, seq, event_type, payload_json, created_at)
      VALUES (?, ?, ?, ?, ?)`,
-    [runId, seq, event.type, JSON.stringify(event), Date.now()],
+    [runId, seq, event.type, JSON.stringify(event), createdAt],
   );
   scheduleAgentRunTraceExport(runId);
+}
+
+/** Save a provider's coalesced trace before publishing the message that refers to it. */
+export async function saveAgentRunTraceSnapshot(
+  record: AgentRunRecord,
+  events: readonly AgentRunEventRecord[],
+): Promise<void> {
+  await Zotero.DB.executeTransaction(async () => {
+    await createAgentRun(record);
+    if (!runConversationKeys.has(record.runId)) return;
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${AGENT_RUN_EVENTS_TABLE} WHERE run_id = ?`,
+      [record.runId],
+    );
+    for (const [index, event] of events.entries()) {
+      await appendAgentRunEvent(
+        record.runId,
+        index + 1,
+        event.payload,
+        event.createdAt,
+      );
+    }
+  });
 }
 
 export async function appendAgentRunEventAfterLatest(

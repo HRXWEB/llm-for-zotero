@@ -1,3 +1,7 @@
+import {
+  createNativeLifecycleTestProcess,
+  installDirectPathTestPrefs,
+} from "./helpers/codexNativeLifecycle";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,233 +52,6 @@ import { clearCodexNativeSkillClassifierCache } from "../src/codexAppServer/nati
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-function createNativeLifecycleTestProcess(params: {
-  newThreadIds: string[];
-  requests: Array<{ method: string; params: Record<string, any> }>;
-  deltaForTurn?: (turnNumber: number) => string;
-  skillsListResult?: unknown;
-  permissionProfilesResult?: unknown;
-  resumeEffectiveSettings?: {
-    permissions?: string;
-    approvalPolicy?: string;
-    approvalsReviewer?: string;
-  };
-  settingsUpdateMethodNotFound?: boolean;
-}): CodexAppServerProcess {
-  let turnNumber = 0;
-  const threadIds = [...params.newThreadIds];
-  const proc = CodexAppServerProcess.forTest({
-    stdin: {
-      write: (chunk: string) => {
-        const request = JSON.parse(chunk) as {
-          id: number;
-          method: string;
-          params?: Record<string, any>;
-        };
-        const requestParams = request.params || {};
-        params.requests.push({ method: request.method, params: requestParams });
-        const handleMessage = (
-          proc as unknown as {
-            handleMessage: (message: Record<string, unknown>) => void;
-          }
-        ).handleMessage.bind(proc);
-        if (
-          request.method === "permissionProfile/list" &&
-          params.permissionProfilesResult !== undefined
-        ) {
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: params.permissionProfilesResult,
-              }),
-            0,
-          );
-          return;
-        }
-        if (request.method === "experimentalFeature/list") {
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: {
-                  data: [{ name: "guardian_approval", enabled: true }],
-                },
-              }),
-            0,
-          );
-          return;
-        }
-        if (request.method === "configRequirements/read") {
-          setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
-          return;
-        }
-        if (request.method === "thread/settings/update") {
-          if (params.settingsUpdateMethodNotFound) {
-            setTimeout(
-              () =>
-                handleMessage({
-                  id: request.id,
-                  error: { code: -32601, message: "Method not found" },
-                }),
-              0,
-            );
-            return;
-          }
-          setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
-          setTimeout(
-            () =>
-              handleMessage({
-                method: "thread/settings/updated",
-                params: {
-                  threadId: requestParams.threadId,
-                  threadSettings: {
-                    activePermissionProfile: requestParams.permissions
-                      ? { id: requestParams.permissions }
-                      : null,
-                    approvalPolicy: requestParams.approvalPolicy,
-                    approvalsReviewer: requestParams.approvalsReviewer,
-                  },
-                },
-              }),
-            2,
-          );
-          return;
-        }
-        if (
-          request.method === "skills/list" &&
-          params.skillsListResult !== undefined
-        ) {
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: params.skillsListResult,
-              }),
-            0,
-          );
-          return;
-        }
-        if (request.method === "thread/resume") {
-          const effective = params.resumeEffectiveSettings || requestParams;
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: {
-                  thread: { id: requestParams.threadId },
-                  activePermissionProfile: effective.permissions
-                    ? { id: effective.permissions }
-                    : null,
-                  approvalPolicy: effective.approvalPolicy,
-                  approvalsReviewer: effective.approvalsReviewer,
-                },
-              }),
-            0,
-          );
-          return;
-        }
-        if (request.method === "thread/start") {
-          const threadId = threadIds.shift() || "thread-native-test";
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: { thread: { id: threadId } },
-              }),
-            0,
-          );
-          return;
-        }
-        if (
-          request.method === "thread/archive" ||
-          request.method === "thread/name/set" ||
-          request.method === "thread/read" ||
-          request.method === "thread/inject_items"
-        ) {
-          setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
-          return;
-        }
-        if (request.method === "turn/start") {
-          turnNumber += 1;
-          const turnId = `turn-lifecycle-${turnNumber}`;
-          setTimeout(
-            () =>
-              handleMessage({
-                id: request.id,
-                result: { turn: { id: turnId } },
-              }),
-            0,
-          );
-          const delta = params.deltaForTurn?.(turnNumber) || "";
-          if (delta) {
-            setTimeout(
-              () =>
-                handleMessage({
-                  method: "item/agentMessage/delta",
-                  params: { turnId, delta },
-                }),
-              2,
-            );
-          }
-          setTimeout(
-            () =>
-              handleMessage({
-                method: "turn/completed",
-                params: { turn: { id: turnId, status: "completed" } },
-              }),
-            5,
-          );
-        }
-      },
-    },
-    kill: () => {},
-  });
-  if (params.permissionProfilesResult !== undefined) {
-    proc.isProtocolInitialized = () => true;
-  }
-  return proc;
-}
-
-function installDirectPathTestPrefs(
-  skillMode: "native" | "off" = "off",
-  permissionProfile = ":read-only",
-) {
-  const originalZotero = (globalThis as any).Zotero;
-  const canonicalPermissionState =
-    permissionProfile === ":read-only"
-      ? undefined
-      : JSON.stringify({
-          boundary: { kind: "profile", profileId: permissionProfile },
-          approvalOverride: { policy: "on-request", reviewer: "user" },
-        });
-  (globalThis as any).Zotero = {
-    ...(originalZotero || {}),
-    debug: () => undefined,
-    DataDirectory: { dir: "/tmp/lfz-direct-pdf-skill-data" },
-    Profile: { dir: "/tmp/lfz-direct-pdf-skill-profile" },
-    Prefs: {
-      get: (key: string) => {
-        if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled")) return false;
-        if (key.endsWith(".codexNativeSkillMode")) return skillMode;
-        if (key.endsWith(".codexAppServerPermissionState")) {
-          return canonicalPermissionState;
-        }
-        if (key.endsWith(".codexAppServerPermissionProfile")) {
-          return permissionProfile;
-        }
-        return undefined;
-      },
-      prefHasUserValue: (key: string) =>
-        key.endsWith(".codexAppServerPermissionState") &&
-        canonicalPermissionState !== undefined,
-    },
-  };
-  return () => {
-    (globalThis as any).Zotero = originalZotero;
-  };
-}
-
 function createDirectPdfSelection(params: {
   itemId: number;
   contextItemId: number;
@@ -304,6 +81,193 @@ function createDirectPdfSelection(params: {
 }
 
 describe("Codex app-server native client", function () {
+  it("uses native Plan settings with read-only permissions and explicitly restores Default", async function () {
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["planning-thread", "ordinary-thread"],
+      requests,
+      permissionProfilesResult: {
+        data: [
+          { id: ":read-only", description: "Read only" },
+          { id: ":danger-full-access", description: "Full access" },
+        ],
+      },
+      deltaForTurn: () => "A response without a finalized plan",
+    });
+    const restorePrefs = installDirectPathTestPrefs(
+      "off",
+      ":danger-full-access",
+    );
+    const originalDB = (globalThis as any).Zotero.DB;
+    (globalThis as any).Zotero.DB = { queryAsync: async () => [] };
+    const originalSpawn = CodexAppServerProcess.spawn;
+    CodexAppServerProcess.spawn = async () => proc;
+    const processKey = "native-plan-transition";
+    const base = {
+      scope: {
+        conversationKey: 6_000_000_899,
+        libraryID: 1,
+        kind: "global" as const,
+      },
+      model: "gpt-5.6",
+      reasoning: { effort: "high" } as any,
+      messages: [{ role: "user" as const, content: "Plan an explanation" }],
+      processKey,
+      hooks: {
+        loadProviderSessionId: async () => undefined,
+        persistProviderSessionId: async () => {},
+      },
+    };
+    try {
+      let planningError: unknown;
+      try {
+        await runCodexAppServerNativeTurn({
+          ...base,
+          planContext: {
+            phase: "planning",
+            planId: "plan-transition",
+            revision: 1,
+            provider: "codex",
+          },
+        });
+      } catch (error) {
+        planningError = error;
+      }
+      assert.match(
+        String(planningError),
+        /did not finish a native plan proposal/,
+      );
+      await runCodexAppServerNativeTurn(base);
+      const turns = requests.filter(
+        (request) => request.method === "turn/start",
+      );
+      assert.equal(turns[0].params.collaborationMode.mode, "plan");
+      assert.equal(turns[1].params.collaborationMode.mode, "default");
+      assert.equal(
+        turns[0].params.collaborationMode.settings.developer_instructions,
+        null,
+      );
+      assert.equal(
+        turns[0].params.collaborationMode.settings.reasoning_effort,
+        "high",
+      );
+      const starts = requests.filter(
+        (request) => request.method === "thread/start",
+      );
+      assert.equal(starts[0].params.permissions, ":read-only");
+      assert.equal(starts[0].params.approvalPolicy, "never");
+      assert.equal(starts[1].params.permissions, ":danger-full-access");
+    } finally {
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      CodexAppServerProcess.spawn = originalSpawn;
+      (globalThis as any).Zotero.DB = originalDB;
+      restorePrefs();
+    }
+  });
+  it("cancels planning from a native question and denies native effect escalation", async function () {
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    let finishTurn: (() => void) | undefined;
+    const responses: Array<Record<string, any>> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["question-thread"],
+      requests,
+      permissionProfilesResult: {
+        data: [{ id: ":read-only", description: "Read only" }],
+      },
+      onServerResponse: (response) => {
+        responses.push(response);
+        if (response.id === "question-request") finishTurn?.();
+      },
+      onTurn: ({ threadId, turnId, emit }) => {
+        finishTurn = () =>
+          emit({
+            method: "turn/completed",
+            params: { threadId, turn: { id: turnId, status: "interrupted" } },
+          });
+        emit({
+          id: "write-request",
+          method: "item/fileChange/requestApproval",
+          params: { threadId, turnId, itemId: "write" },
+        });
+        emit({
+          id: "question-request",
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId,
+            turnId,
+            itemId: "question",
+            questions: [
+              {
+                id: "q",
+                header: "Scope",
+                question: "Which scope?",
+                options: [{ label: "Current paper" }, { label: "Collection" }],
+              },
+            ],
+          },
+        });
+      },
+    });
+    const restorePrefs = installDirectPathTestPrefs();
+    const originalDB = (globalThis as any).Zotero.DB;
+    (globalThis as any).Zotero.DB = { queryAsync: async () => [] };
+    const originalSpawn = CodexAppServerProcess.spawn;
+    CodexAppServerProcess.spawn = async () => proc;
+    const shown: string[] = [];
+    let error: unknown;
+    try {
+      try {
+        await runCodexAppServerNativeTurn({
+          scope: {
+            conversationKey: 6_000_000_898,
+            libraryID: 1,
+            kind: "global",
+          },
+          model: "gpt-5.6",
+          processKey: "native-question-cancel",
+          messages: [{ role: "user", content: "Plan an explanation" }],
+          planContext: {
+            phase: "planning",
+            planId: "question-plan",
+            revision: 1,
+            provider: "codex",
+          },
+          hooks: {
+            loadProviderSessionId: async () => undefined,
+            persistProviderSessionId: async () => {},
+          },
+          onApprovalRequest: async (request) => {
+            shown.push(request.method);
+            return { answers: {} };
+          },
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      assert.equal((error as Error).name, "AbortError");
+      assert.deepEqual(shown, ["item/tool/requestUserInput"]);
+      assert.deepEqual(
+        responses.find((response) => response.id === "write-request")?.result,
+        { decision: "decline" },
+      );
+      assert.equal(
+        requests.filter((request) => request.method === "turn/interrupt")
+          .length,
+        1,
+      );
+      assert.equal(
+        responses.filter((response) => response.id === "question-request")
+          .length,
+        1,
+      );
+    } finally {
+      destroyCachedCodexAppServerProcess("native-question-cancel", proc);
+      CodexAppServerProcess.spawn = originalSpawn;
+      (globalThis as any).Zotero.DB = originalDB;
+      restorePrefs();
+    }
+  });
+
   it("renders exact original PDF paths and identities in selection order", function () {
     const first = createDirectPdfSelection({
       itemId: 10,

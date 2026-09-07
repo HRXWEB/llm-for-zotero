@@ -25,6 +25,23 @@ function request(
 }
 
 describe("Agent action intent", function () {
+  it("binds a numeric item list before preservation language can imply library-wide coverage", function () {
+    const intents = inferActionIntentsFromRequest(
+      request({
+        userText:
+          'Add the tag "codex-native-plan-20260906" to exactly Zotero items 3900, 3920, and 3930 in library 1. Preserve all existing tags, notes, attachments, and collection memberships. Do not modify any other items.',
+      }),
+    );
+    assert.lengthOf(intents, 1);
+    assert.deepEqual(
+      intents[0].targetSelectors,
+      [3900, 3920, 3930].map((value) => ({ kind: "item_id", value })),
+    );
+    assert.equal(intents[0].coverage, "some");
+    assert.deepEqual(intents[0].parameters, {
+      tags: ["codex-native-plan-20260906"],
+    });
+  });
   it("does not turn a prohibition on other fields into a requested metadata edit", function () {
     const intents = inferActionIntentsFromRequest(
       request({

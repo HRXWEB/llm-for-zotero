@@ -4865,16 +4865,33 @@ function renderPlanContainer(params: {
   const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
     const markdown = params.doc.createElement("div");
     markdown.className = "llm-plan-markdown";
-    const source = [
-      artifact.explanation?.trim() || "",
-      ...artifact.steps.map((step, index) => `${index + 1}. ${step.content}`),
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+    const source =
+      artifact.nativePlanning?.proposal?.markdown ||
+      [
+        artifact.explanation?.trim() || "",
+        ...artifact.steps.map((step, index) => `${index + 1}. ${step.content}`),
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     try {
       renderRenderedMarkdownInto(markdown, source, params.doc);
     } catch {
       markdown.textContent = source;
+    }
+    if (artifact.nativePlanning?.proposal && artifact.contract) {
+      const summary = params.doc.createElement("p");
+      summary.className = "llm-plan-contract-summary";
+      const investigation = artifact.contract.investigation;
+      summary.textContent = [
+        investigation?.scopeSnapshot
+          ? `Research scope: ${investigation.scopeSnapshot.itemCount} papers`
+          : "Scope: the approved request",
+        `Deliverable: ${artifact.contract.deliverable.kind}`,
+        artifact.contract.effects?.libraryMutation
+          ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
+          : "Library changes: none",
+      ].join(" · ");
+      markdown.appendChild(summary);
     }
     return markdown;
   };
@@ -5011,6 +5028,7 @@ function renderPlanContainer(params: {
           .approve({
             planId: reviewArtifact.planId,
             revision: reviewArtifact.revision,
+            expectedDigest: reviewArtifact.digest,
             conversationGeneration: getConversationWriteGeneration(
               reviewArtifact.conversationKey,
             ),
