@@ -1843,6 +1843,7 @@ function renderPlanningQuestionCard(
   let mountedAllPanels = false;
   let advanceTimer: ReturnType<typeof setTimeout> | null = null;
   let counterTimer: ReturnType<typeof setTimeout> | null = null;
+  let resizeObserver: ResizeObserver | null = null;
 
   const hasAnswer = (index: number) => answers.has(fields[index].id);
   const clearAdvanceTimer = () => {
@@ -2105,6 +2106,7 @@ function renderPlanningQuestionCard(
   function submitAnswers(): void {
     clearAdvanceTimer();
     if (!fields.every((_, index) => hasAnswer(index))) return;
+    resizeObserver?.disconnect();
     for (const button of allButtons) button.disabled = true;
     for (const panel of panels) {
       if (panel.customInput) panel.customInput.disabled = true;
@@ -2126,6 +2128,7 @@ function renderPlanningQuestionCard(
   });
   cancelButton.addEventListener("click", () => {
     clearAdvanceTimer();
+    resizeObserver?.disconnect();
     for (const button of allButtons) button.disabled = true;
     getAgentRuntime().resolveConfirmation(pending.requestId, {
       approved: false,
@@ -2146,6 +2149,18 @@ function renderPlanningQuestionCard(
       mountedAllPanels = true;
       syncPanelState();
       layoutTrack(false);
+      // The viewport follows the active question when panel width or text size
+      // changes. Observe content, not the viewport height that layoutTrack sets.
+      if (win.ResizeObserver) {
+        resizeObserver = new win.ResizeObserver(() => {
+          if (!card.isConnected) {
+            resizeObserver?.disconnect();
+            return;
+          }
+          layoutTrack(false);
+        });
+        resizeObserver.observe(track);
+      }
       card.dataset.questionStackReady = "true";
     });
   }
