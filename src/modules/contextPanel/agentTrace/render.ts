@@ -5,6 +5,7 @@ import {
 } from "../streamingMarkdown";
 import { getAgentRuntime } from "../../../agent";
 import type {
+  AgentConfirmationResolution,
   AgentPendingChoiceValue,
   AgentPendingAction,
   AgentPendingField,
@@ -916,7 +917,8 @@ function renderTagAssignmentTableField(
   };
 } {
   const wrap = doc.createElement("div");
-  wrap.className = "llm-agent-hitl-assignment-table";
+  wrap.className =
+    "llm-agent-hitl-assignment-table llm-agent-hitl-tag-assignment-table";
 
   const rows: Array<{
     buttons: HTMLButtonElement[];
@@ -968,11 +970,6 @@ function renderTagAssignmentTableField(
 
     const control = doc.createElement("div");
     control.className = "llm-agent-hitl-assignment-control";
-
-    const inputLabel = doc.createElement("div");
-    inputLabel.className = "llm-agent-hitl-assignment-select-label";
-    inputLabel.textContent = "Suggested tags";
-    control.appendChild(inputLabel);
 
     const editor = doc.createElement("div");
     editor.className = "llm-agent-hitl-tag-editor";
@@ -1035,6 +1032,7 @@ function renderTagAssignmentTableField(
         "llm-paper-context-chip-label llm-agent-hitl-tag-chip-input";
       input.value = initialValue;
       input.placeholder = item.placeholder || "tag";
+      input.setAttribute("aria-label", `Tag for ${item.label}`);
       updateChipInputSize(input);
       input.addEventListener("input", () => {
         updateChipInputSize(input);
@@ -1072,6 +1070,7 @@ function renderTagAssignmentTableField(
       removeButton.className =
         "llm-remove-img-btn llm-paper-context-clear llm-agent-hitl-tag-chip-remove";
       removeButton.textContent = "×";
+      removeButton.setAttribute("aria-label", "Remove tag");
       removeButton.addEventListener("click", () => {
         removeChip(chip, input);
       });
@@ -1788,6 +1787,10 @@ const PLANNING_QUESTION_TRANSITION_MS = 360;
 function renderPlanningQuestionCard(
   doc: Document,
   pending: { requestId: string; action: AgentPendingAction },
+  resolveConfirmation: (
+    requestId: string,
+    resolution: AgentConfirmationResolution,
+  ) => void,
 ): HTMLDivElement {
   const fields = pending.action.fields.filter(
     (field): field is Extract<AgentPendingField, { type: "choice" }> =>
@@ -2111,7 +2114,7 @@ function renderPlanningQuestionCard(
     for (const panel of panels) {
       if (panel.customInput) panel.customInput.disabled = true;
     }
-    getAgentRuntime().resolveConfirmation(pending.requestId, {
+    resolveConfirmation(pending.requestId, {
       approved: true,
       actionId: normalizedActions.defaultActionId,
       data: Object.fromEntries(
@@ -2130,7 +2133,7 @@ function renderPlanningQuestionCard(
     clearAdvanceTimer();
     resizeObserver?.disconnect();
     for (const button of allButtons) button.disabled = true;
-    getAgentRuntime().resolveConfirmation(pending.requestId, {
+    resolveConfirmation(pending.requestId, {
       approved: false,
       actionId: normalizedActions.cancelActionId,
     });
@@ -2171,9 +2174,15 @@ function renderPlanningQuestionCard(
 export function renderPendingActionCard(
   doc: Document,
   pending: { requestId: string; action: AgentPendingAction },
+  resolveConfirmation: (
+    requestId: string,
+    resolution: AgentConfirmationResolution,
+  ) => void = (requestId, resolution) => {
+    getAgentRuntime().resolveConfirmation(requestId, resolution);
+  },
 ): HTMLDivElement {
   if (isPlanningQuestionAction(pending.action)) {
-    return renderPlanningQuestionCard(doc, pending);
+    return renderPlanningQuestionCard(doc, pending, resolveConfirmation);
   }
   const noteContent = getNoteReviewContent(pending.action);
   if (noteContent) {
@@ -2185,7 +2194,7 @@ export function renderPendingActionCard(
       confirmActionId: actions.defaultActionId,
       cancelActionId: actions.cancelActionId,
       resolve: (resolution) => {
-        getAgentRuntime().resolveConfirmation(pending.requestId, resolution);
+        resolveConfirmation(pending.requestId, resolution);
       },
       renderChanges: (field) => renderDiffPreviewField(doc, field),
     });
@@ -2377,12 +2386,11 @@ export function renderPendingActionCard(
       label.className = "llm-agent-hitl-label";
       const isPagedPageSizeField = isPagedReviewCard && field.id === "pageSize";
       const isPagedTagsField = isPagedReviewCard && field.id === "tagsPerPaper";
-      const isPagedInlineSelect = isPagedPageSizeField || isPagedTagsField;
       if (isPagedPageSizeField) {
         label.textContent = "items on this page";
         label.title = field.label;
       } else if (isPagedTagsField) {
-        label.textContent = "of tags per paper";
+        label.textContent = field.label;
         label.title = field.label;
       } else {
         label.textContent = field.label;
@@ -2397,11 +2405,8 @@ export function renderPendingActionCard(
         select.appendChild(optionEl);
       }
       select.value = field.value || field.options[0]?.id || "";
-      if (isPagedInlineSelect) {
-        fieldContainer.append(select, label);
-      } else {
-        fieldContainer.append(label, select);
-      }
+      select.setAttribute("aria-label", field.label);
+      fieldContainer.append(label, select);
       fieldAccessors.push({
         field,
         container: fieldContainer,
@@ -2428,6 +2433,11 @@ export function renderPendingActionCard(
       ) {
         fieldContainer.className += " llm-agent-hitl-paged-top-field";
         pagedTopControls.appendChild(fieldContainer);
+        const help = doc.createElement("div");
+        help.className = "llm-agent-hitl-control-help";
+        help.textContent =
+          "Changing this regenerates suggestions and replaces your edits.";
+        pagedTopControls.appendChild(help);
       } else if (
         isPagedReviewCard &&
         field.id === "pageSize" &&
@@ -2735,7 +2745,7 @@ export function renderPendingActionCard(
       fieldAccessors.map((accessor) => [accessor.id, accessor.getValue()]),
     );
     const activeAction = getActionById(actionId);
-    getAgentRuntime().resolveConfirmation(pending.requestId, {
+    resolveConfirmation(pending.requestId, {
       approved:
         activeAction?.approved ?? actionId !== normalizedActions.cancelActionId,
       actionId,
@@ -2818,7 +2828,7 @@ export function renderPendingActionCard(
     cancelButton.addEventListener("click", () => {
       setAlternativesOpen(false);
       setButtonsDisabled(true);
-      getAgentRuntime().resolveConfirmation(pending.requestId, {
+      resolveConfirmation(pending.requestId, {
         approved: false,
         actionId: normalizedActions.cancelActionId,
       });
@@ -2961,6 +2971,11 @@ export function renderPendingActionCard(
   syncActionUi();
   for (const accessor of fieldAccessors) {
     accessor.bindValidity?.(syncActionUi);
+  }
+  if (isPagedReviewCard && getActionById("refresh")?.approved === false) {
+    liveFieldBindings
+      .get("tagsPerPaper")
+      ?.bindChange(() => executeAction("refresh"));
   }
 
   return card;

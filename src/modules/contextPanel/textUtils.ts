@@ -84,11 +84,17 @@ export function sanitizeText(text: string) {
   return out;
 }
 
-export function normalizeSelectedText(text: string): string {
-  return sanitizeText(text)
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, SELECTED_TEXT_MAX_LENGTH);
+export function normalizeSelectedText(
+  text: string,
+  source?: SelectedTextSource,
+): string {
+  const sanitized = sanitizeText(text);
+  // Editing needs the selected characters, including paragraph boundaries.
+  const normalized =
+    source === "note-edit"
+      ? sanitized.replace(/\r\n?/g, "\n")
+      : sanitized.replace(/\s+/g, " ");
+  return normalized.trim().slice(0, SELECTED_TEXT_MAX_LENGTH);
 }
 
 export function isLikelyCorruptedSelectedText(text: string): boolean {

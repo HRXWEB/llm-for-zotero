@@ -681,6 +681,52 @@ describe("editCurrentNote create tracking", function () {
   });
 
   for (const example of [
+    ...["\n", "\n\n", "\r\n", "\r\n\r\n"].map((separator) => ({
+      name: `paragraph selection with ${JSON.stringify(separator)}`,
+      before: "<p>First paragraph</p><p>Second paragraph</p><p>Keep me.</p>",
+      find: `First paragraph${separator}Second paragraph`,
+      replacement: "Replacement",
+      after: "<p>Replacement</p><p></p><p>Keep me.</p>",
+    })),
+    {
+      name: "line breaks and nested blocks",
+      before: "<div><h2>Heading</h2><p>First<br/>Second</p></div><p>After</p>",
+      find: "Heading\nFirst\nSecond\nAfter",
+      replacement: "Combined",
+      after: "<div><h2>Combined</h2><p><br/></p></div><p></p>",
+    },
+    {
+      name: "list items and inline formatting around a multiline match",
+      before:
+        "<ol><li>Before <em>alpha</em></li><li><strong>beta</strong> after</li></ol>",
+      find: "alpha\nbeta",
+      replacement: "delta",
+      after:
+        "<ol><li>Before <em>delta</em></li><li><strong></strong> after</li></ol>",
+    },
+    {
+      name: "images inside and outside a multiline selection",
+      before:
+        '<p>Start<img data-attachment-key="IMAGE001"/></p><p>End</p><p><img data-attachment-key="IMAGE002"/>Keep</p>',
+      find: "Start\nEnd",
+      replacement: "Changed",
+      after:
+        '<p>Changed<img data-attachment-key="IMAGE001"/></p><p></p><p><img data-attachment-key="IMAGE002"/>Keep</p>',
+    },
+    {
+      name: "multiline Unicode entities and first-occurrence selection",
+      before: "<p>&#x1F9E0; A &amp; B</p><p>C</p><p>🧠 A &amp; B</p><p>C</p>",
+      find: "🧠 A & B\nC",
+      replacement: "Result",
+      after: "<p>Result</p><p></p><p>🧠 A &amp; B</p><p>C</p>",
+    },
+    {
+      name: "serialized newlines alongside paragraph boundaries",
+      before: "<p>First</p>\r\n<p>Second</p>",
+      find: "First\n\nSecond",
+      replacement: "Result",
+      after: "<p>Result</p><p></p>",
+    },
     {
       name: "visible text rather than an attribute",
       before: '<p title="copper-limitation">copper-limitation</p>',
@@ -751,6 +797,72 @@ describe("editCurrentNote create tracking", function () {
           field.after.includes("These proposals are ours."),
       ),
     );
+  });
+
+  it("reviews and applies multiline Markdown from the note reader without rewriting surrounding HTML", async function () {
+    const before =
+      "<h2>Topic</h2><p><strong>First</strong> paragraph.</p><p>Second paragraph.</p>";
+    const existing = saveExistingNote(60, 9, before);
+    const gateway = new ZoteroGateway();
+    const reading = gateway.getStandaloneNoteContent({ noteId: 60 })!;
+    const tool = createEditCurrentNoteTool(gateway);
+    const validated = tool.validate({
+      mode: "edit",
+      targetNoteId: 60,
+      patches: [
+        {
+          find: reading.noteText,
+          findFormat: "markdown",
+          replace: "Revised summary.",
+        },
+      ],
+    });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    await tool.planInvocation!(validated.value, baseContext);
+    const review = await tool.createPendingAction!(
+      validated.value,
+      baseContext,
+    );
+    assert.equal(
+      existing.getNote(),
+      before,
+      "Preparing review must not mutate the note",
+    );
+    assert.equal(review.mode, "review");
+    const approved = await tool.applyConfirmation!(
+      validated.value,
+      {},
+      baseContext,
+    );
+    assert.isTrue(approved.ok);
+    if (!approved.ok) return;
+    await tool.execute(approved.value, baseContext);
+    assert.equal(
+      existing.getNote(),
+      "<h2>Revised summary.</h2><p><strong></strong></p><p></p>",
+    );
+  });
+
+  it("does not match across a paragraph boundary that is missing from the selection", async function () {
+    const before = "<p>alpha</p><p>beta</p>";
+    const existing = saveExistingNote(60, 9, before);
+    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const input = tool.validate({
+      mode: "edit",
+      targetNoteId: 60,
+      patches: [{ find: "alphabeta", replace: "changed" }],
+    });
+    assert.isTrue(input.ok);
+    if (!input.ok) return;
+    let error: unknown;
+    try {
+      await tool.execute(input.value, baseContext);
+    } catch (caught) {
+      error = caught;
+    }
+    assert.match(String(error), /patch.*not found/i);
+    assert.equal(existing.getNote(), before);
   });
 
   it("rejects a missing patch match without flattening or changing the note", async function () {

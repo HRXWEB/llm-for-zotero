@@ -515,15 +515,28 @@ export async function markPlanDocumentDelivered(params: {
   return updated;
 }
 
-export async function saveDocumentActionState(
-  state: DocumentActionState,
+/** Merge an action's fields with current state in a short, database-only transaction. */
+export async function updateDocumentActionState(
+  documentId: string,
+  update: (current: DocumentActionState) => DocumentActionState,
 ): Promise<void> {
-  decodeDocumentActionState(state);
-  await Zotero.DB.queryAsync(
-    `INSERT OR REPLACE INTO ${PLAN_DOCUMENT_ACTION_STATE_TABLE}
-     (document_id, payload_json, updated_at) VALUES (?, ?, ?)`,
-    [state.documentId, JSON.stringify(state), state.updatedAt],
-  );
+  await Zotero.DB.executeTransaction(async () => {
+    const current = (await loadDocumentActionState(documentId)) || {
+      version: 1 as const,
+      documentId,
+      updatedAt: Date.now(),
+    };
+    const next = decodeDocumentActionState(update(current));
+    if (next.documentId !== documentId)
+      throw new Error(
+        "A document action update cannot change its document identity.",
+      );
+    await Zotero.DB.queryAsync(
+      `INSERT OR REPLACE INTO ${PLAN_DOCUMENT_ACTION_STATE_TABLE}
+       (document_id, payload_json, updated_at) VALUES (?, ?, ?)`,
+      [documentId, JSON.stringify(next), next.updatedAt],
+    );
+  });
 }
 
 export async function loadDocumentActionState(

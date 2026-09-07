@@ -14,7 +14,7 @@ import {
 import {
   loadDocumentActionState,
   loadPlanDocument,
-  saveDocumentActionState,
+  updateDocumentActionState,
 } from "./store";
 import {
   getPlannedDocumentOrigin,
@@ -72,6 +72,42 @@ async function noteContentHash(html: string) {
   return sha256Text(stripZoteroNoteWrapper(html));
 }
 
+/** A checkpoint may advance only the reservation it actually read. */
+function assertNoteReservation(
+  current: DocumentActionState,
+  expected: DocumentActionState["pendingNote"],
+): void {
+  const binding = current.savedNote || current.pendingNote;
+  if (
+    current.savedNote ||
+    binding?.libraryID !== expected?.libraryID ||
+    binding?.itemKey !== expected?.itemKey ||
+    binding?.documentVersion !== expected?.documentVersion ||
+    binding?.contentHash !== expected?.contentHash ||
+    binding?.parentItemId !== expected?.parentItemId ||
+    binding?.nativeContentHash !== expected?.nativeContentHash ||
+    binding?.finalized !== expected?.finalized
+  )
+    throw new Error(
+      "The document note reservation changed before it could be updated.",
+    );
+}
+
+async function promoteDocumentNote(
+  documentId: string,
+  binding: NonNullable<DocumentActionState["pendingNote"]>,
+): Promise<void> {
+  await updateDocumentActionState(documentId, (current) => {
+    assertNoteReservation(current, binding);
+    return {
+      ...current,
+      savedNote: binding,
+      pendingNote: undefined,
+      updatedAt: Date.now(),
+    };
+  });
+}
+
 async function saveDocumentNote(
   documentId: string,
   target?: DocumentNoteTarget,
@@ -108,6 +144,9 @@ async function saveDocumentNote(
         (target &&
           (existing.parentID !== target.parentItemId ||
             existing.libraryID !== target.libraryID)) ||
+        (binding.documentVersion !== undefined &&
+          ((existing.parentID || undefined) !== binding.parentItemId ||
+            existing.libraryID !== binding.libraryID)) ||
         (binding.contentHash && binding.contentHash !== document.contentHash) ||
         (binding.documentVersion &&
           binding.documentVersion !== document.documentVersion) ||
@@ -118,13 +157,7 @@ async function saveDocumentNote(
           "The saved note no longer matches this exact document and parent, or its assets are incomplete. Resolve that note before saving again.",
         );
       }
-      if (!prior?.savedNote)
-        await saveDocumentActionState({
-          ...prior!,
-          savedNote: binding,
-          pendingNote: undefined,
-          updatedAt: Date.now(),
-        });
+      if (!prior?.savedNote) await promoteDocumentNote(documentId, binding);
       return {
         libraryID: existing.libraryID,
         itemKey: existing.key,
@@ -191,16 +224,19 @@ async function saveDocumentNote(
     nativeContentHash: await noteContentHash(document.visibleHtml),
     finalized: document.assets.length === 0,
   };
-  const persistPending = () =>
-    saveDocumentActionState({
-      version: 1,
-      documentId,
-      ...prior,
-      savedNote: undefined,
-      pendingNote,
-      updatedAt: Date.now(),
+  const persistPending = (
+    next: NonNullable<DocumentActionState["pendingNote"]>,
+    expected: DocumentActionState["pendingNote"],
+  ) =>
+    updateDocumentActionState(documentId, (current) => {
+      assertNoteReservation(current, expected);
+      return {
+        ...current,
+        pendingNote: next,
+        updatedAt: Date.now(),
+      };
     });
-  await persistPending();
+  await persistPending(pendingNote, prior?.pendingNote);
   const persisted = await createFinalizedZoteroNote({
     note,
     initialHtml: document.visibleHtml,
@@ -227,12 +263,13 @@ async function saveDocumentNote(
           const html = blocks.length
             ? `${document.visibleHtml}<h2>Figures</h2>${blocks.join("")}`
             : document.visibleHtml;
-          pendingNote = {
+          const candidate = {
             ...pendingNote,
             nativeContentHash: await noteContentHash(html),
             finalized: warnings.length === 0,
           };
-          await persistPending();
+          await persistPending(candidate, pendingNote);
+          pendingNote = candidate;
           return { html, warnings };
         }
       : undefined,
@@ -240,28 +277,18 @@ async function saveDocumentNote(
   });
   const created = Zotero.Items.get(persisted.noteId) || note;
   if (!created.key) throw new Error("Created note has no stable Zotero key");
-  if (!pendingNote.finalized)
+  if (
+    !pendingNote.finalized ||
+    (await noteContentHash(created.getNote())) !==
+      pendingNote.nativeContentHash ||
+    created.key !== pendingNote.itemKey ||
+    created.libraryID !== pendingNote.libraryID ||
+    (created.parentID || undefined) !== pendingNote.parentItemId
+  )
     throw new Error(
-      "The note text was preserved but its requested assets are incomplete.",
+      "The note was preserved but its requested content or assets are incomplete, or its parent changed.",
     );
-  const now = Date.now();
-  const nextState: DocumentActionState = {
-    version: 1,
-    documentId,
-    savedNote: {
-      libraryID: created.libraryID,
-      itemKey: created.key,
-      documentVersion: document.documentVersion,
-      contentHash: document.contentHash,
-      nativeContentHash: await noteContentHash(created.getNote()),
-      finalized: true,
-      parentItemId: created.parentID || undefined,
-    },
-    lastExportedAt: prior?.lastExportedAt,
-    lastExportedName: prior?.lastExportedName,
-    updatedAt: now,
-  };
-  await saveDocumentActionState(nextState);
+  await promoteDocumentNote(documentId, pendingNote);
   return {
     libraryID: created.libraryID,
     itemKey: created.key,
@@ -354,14 +381,11 @@ export async function exportPlanDocumentMarkdown(
     throw error;
   }
 
-  const prior = await loadDocumentActionState(documentId);
-  await saveDocumentActionState({
-    version: 1,
-    documentId,
-    savedNote: prior?.savedNote,
+  await updateDocumentActionState(documentId, (current) => ({
+    ...current,
     lastExportedAt: Date.now(),
     lastExportedName: outputPath.split(/[\\/]/).pop(),
     updatedAt: Date.now(),
-  });
+  }));
   return outputPath;
 }

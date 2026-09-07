@@ -25,7 +25,10 @@ import {
   persistVerifiedNoteHtml,
 } from "../../../modules/contextPanel/notePersistence";
 import { escapeNoteHtml } from "../../../modules/contextPanel/textUtils";
-import { decodeNoteHtmlEntities } from "../../../utils/noteText";
+import {
+  decodeNoteHtmlEntities,
+  NOTE_TEXT_BREAK_PATTERN,
+} from "../../../utils/noteText";
 import {
   ok,
   fail,
@@ -134,6 +137,11 @@ function resolveEditSnapshot(
   };
 }
 
+const NOTE_TEXT_BREAK_TAG = new RegExp(
+  `^(?:${NOTE_TEXT_BREAK_PATTERN.source})$`,
+  "i",
+);
+
 /**
  * Find plain text content within HTML (skipping tags and decoding common
  * entities) and replace it, preserving surrounding HTML structure.
@@ -151,36 +159,50 @@ function replaceTextContentInHtml(
   // rather than serializing a parsed document or replacing an HTML range that
   // may contain just one side of an inline element.
   const textChars: string[] = [];
-  const htmlStarts: number[] = [];
-  const htmlEnds: number[] = [];
+  type TextSpan = { start: number; end: number };
+  const spans: TextSpan[][] = [];
+  const append = (character: string, span?: TextSpan) => {
+    const normalized = character === "\r" ? "\n" : character;
+    if (normalized === "\n" && textChars.at(-1) === "\n") {
+      if (span) spans[spans.length - 1].push(span);
+      return;
+    }
+    textChars.push(normalized);
+    // Synthetic separators match visible boundaries but never consume markup.
+    spans.push(span ? [span] : []);
+  };
   const tokens =
     /<!--[\s\S]*?(?:-->|$)|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>|<\/?[a-z][a-z\d:-]*\b(?:"[^"]*"|'[^']*'|[^'">])*\s*\/?\s*>|&(?:#x[0-9a-f]+|#\d+|[a-z]+);|[\s\S]/gi;
   for (const match of html.matchAll(tokens)) {
     const token = match[0];
     if (token.length > 1 && token.startsWith("<")) {
+      if (NOTE_TEXT_BREAK_TAG.test(token)) append("\n");
       continue;
     }
     const decoded = decodeNoteHtmlEntities(token);
     // String.indexOf uses UTF-16 offsets, including both halves of an astral
     // character. The mapping must use the same units.
     for (let offset = 0; offset < decoded.length; offset++) {
-      textChars.push(decoded[offset]);
       const isEntity = decoded !== token;
-      htmlStarts.push(match.index + (isEntity ? 0 : offset));
-      htmlEnds.push(match.index + (isEntity ? token.length : offset + 1));
+      append(decoded[offset], {
+        start: match.index + (isEntity ? 0 : offset),
+        end: match.index + (isEntity ? token.length : offset + 1),
+      });
     }
   }
 
   const text = textChars.join("");
-  const findIdx = text.indexOf(find);
+  const normalizedFind = find.replace(/[\r\n]+/g, "\n");
+  const findIdx = text.indexOf(normalizedFind);
   if (findIdx < 0) return null;
 
-  const parts = [html.slice(0, htmlStarts[findIdx]), escapeNoteHtml(replace)];
-  let cursor = htmlEnds[findIdx];
-  for (let offset = findIdx + 1; offset < findIdx + find.length; offset++) {
-    if (htmlStarts[offset] >= cursor)
-      parts.push(html.slice(cursor, htmlStarts[offset]));
-    cursor = Math.max(cursor, htmlEnds[offset]);
+  const matched = spans.slice(findIdx, findIdx + normalizedFind.length).flat();
+  if (!matched.length) return null;
+  const parts = [html.slice(0, matched[0].start), escapeNoteHtml(replace)];
+  let cursor = matched[0].end;
+  for (const span of matched.slice(1)) {
+    if (span.start >= cursor) parts.push(html.slice(cursor, span.start));
+    cursor = Math.max(cursor, span.end);
   }
   parts.push(html.slice(cursor));
   return parts.join("");

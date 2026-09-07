@@ -6142,8 +6142,9 @@ label.llm-search-results-item:hover {
 
 .llm-agent-hitl-paged-top-controls {
   display: flex;
-  justify-content: center;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
   width: 100%;
   min-height: 0;
 }
@@ -6151,6 +6152,8 @@ label.llm-search-results-item:hover {
 .llm-agent-hitl-paged-top-field,
 .llm-agent-hitl-paged-footer-field {
   display: inline-flex;
+  flex-direction: row;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   width: auto;
@@ -6159,31 +6162,33 @@ label.llm-search-results-item:hover {
 
 .llm-agent-hitl-paged-top-field .llm-agent-hitl-label,
 .llm-agent-hitl-paged-footer-field .llm-agent-hitl-label {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: var(--llm-fs-10);
-  line-height: 1.2;
+  font-size: var(--llm-fs-11);
+  color: var(--fill-secondary);
+  line-height: 1.4;
   letter-spacing: 0;
   text-transform: none;
-  white-space: nowrap;
+  font-weight: 500;
 }
 
 .llm-agent-hitl-paged-top-field .llm-agent-hitl-page-input,
 .llm-agent-hitl-paged-footer-field .llm-agent-hitl-page-input {
   appearance: none;
   -moz-appearance: none;
-  flex: 0 0 50px;
-  width: 50px;
-  min-width: 50px;
-  max-width: 50px;
-  min-height: 30px;
-  padding: 5px 8px;
-  border-radius: 999px;
-  background: var(--fill-quaternary);
+  flex: 0 0 auto;
+  width: 40px;
+  min-width: 40px;
+  min-height: 26px;
+  padding: 2px 4px;
+  border-radius: 6px;
   text-align: center;
   text-align-last: center;
+  cursor: pointer;
+}
+
+.llm-agent-hitl-control-help {
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  line-height: 1.4;
 }
 
 .llm-agent-hitl-refresh-btn {
@@ -6700,6 +6705,17 @@ label.llm-search-results-item:hover {
   min-width: 0;
 }
 
+.llm-agent-hitl-tag-assignment-table .llm-agent-hitl-assignment-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.llm-agent-hitl-tag-assignment-table .llm-agent-hitl-assignment-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .llm-agent-hitl-tag-editor {
   display: flex;
   flex-direction: column;
@@ -6709,9 +6725,9 @@ label.llm-search-results-item:hover {
 
 .llm-agent-hitl-tag-chip-list {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   align-items: flex-start;
-  gap: 10px;
+  gap: 6px;
 }
 
 .llm-agent-hitl-tag-chip {
@@ -6925,7 +6941,6 @@ label.llm-search-results-item:hover {
   align-items: center;
   gap: 8px 10px;
   width: 100%;
-  margin-top: 0;
 }
 
 .llm-agent-hitl-paged-actions-slot {
@@ -6997,10 +7012,6 @@ label.llm-search-results-item:hover {
 
   .llm-agent-hitl-paged-actions {
     column-gap: 6px;
-  }
-
-  .llm-agent-hitl-paged-footer-field .llm-agent-hitl-label {
-    display: none;
   }
 
   .llm-agent-hitl-paged-actions .llm-agent-hitl-btn {

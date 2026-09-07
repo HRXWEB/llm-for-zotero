@@ -21,12 +21,15 @@ export function decodeNoteHtmlEntities(text: string): string {
   );
 }
 
+/** Block endings and explicit breaks used by both note reading and patch matching. */
+export const NOTE_TEXT_BREAK_PATTERN =
+  /<\/(p|div|h[1-6]|li|tr|blockquote)\s*>|<br\s*\/?>/i;
+
 /** Preserve entities while composing Markdown; decode only the final text. */
 export function stripNoteMarkup(html: string): string {
   if (!html) return "";
   let text = html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "");
-  text = text.replace(/<\/(p|div|h[1-6]|li|tr|blockquote)\s*>/gi, "\n");
-  text = text.replace(/<br\s*\/?>/gi, "\n");
+  text = text.replace(new RegExp(NOTE_TEXT_BREAK_PATTERN.source, "gi"), "\n");
   text = text.replace(/<[^>]+>/g, "");
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }

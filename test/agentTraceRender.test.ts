@@ -4,6 +4,8 @@ import {
   isFloatingPlanExecutionStatus,
 } from "../src/modules/contextPanel/agentTrace/planProgressView";
 import { assert } from "chai";
+import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
+import type { AgentConfirmationResolution } from "../src/agent/types";
 import { readFileSync } from "node:fs";
 import {
   buildAgentTraceChipDetails,
@@ -5661,6 +5663,94 @@ describe("agentTrace render", function () {
     );
   });
 
+  it("renders a single-paper auto-tag review and regenerates before applying", function () {
+    const tool = createApplyTagsTool({
+      getPaperTargetsByItemIds: () => [
+        {
+          itemId: 7,
+          title: "Distributed and drifting representations of working memory",
+          firstCreator: "Adam et al.",
+          year: "2025",
+          tags: [],
+        },
+      ],
+    } as never);
+    const input = tool.validate({
+      action: "add",
+      id: "auto_tag:page:1:1:size:20:tags:5",
+      assignments: [{ itemId: 7, tags: ["working memory", "fmri"] }],
+    });
+    assert.isTrue(input.ok);
+    if (!input.ok) return;
+    const action = tool.createPendingAction!(input.value, {} as never);
+    const resolutions: AgentConfirmationResolution[] = [];
+    const card = renderPendingActionCard(
+      fakeDocument,
+      {
+        requestId: "auto-tag-single",
+        action,
+      },
+      (_requestId, resolution) => {
+        resolutions.push(resolution);
+      },
+    ) as unknown as FakeElement;
+    assert.equal(action.title, "Add tags to 1 item");
+    assert.isNull(card.findByClass("llm-agent-hitl-page-indicator"));
+    assert.isNull(card.findByClass("llm-agent-hitl-paged-footer-field"));
+    assert.exists(card.findByClass("llm-agent-hitl-tag-assignment-table"));
+    const controls = card.findByClass("llm-agent-hitl-paged-top-controls")!;
+    assert.include(
+      controls.findByClass("llm-agent-hitl-control-help")!.textContent,
+      "regenerates",
+    );
+    const select = controls.findAllByTag("select")[0] as FakeElement & {
+      value: string;
+    };
+    assert.equal(select.getAttribute("aria-label"), "Tags per paper");
+    select.value = "3";
+    select.dispatchFakeEvent("change");
+    assert.lengthOf(resolutions, 1);
+    assert.isFalse(resolutions[0].approved);
+    assert.equal(resolutions[0].actionId, "refresh");
+    assert.equal(resolutions[0].data?.tagsPerPaper, "3");
+    assert.isTrue(select.disabled);
+    assert.isTrue(
+      card.findByClass("llm-agent-hitl-paged-confirm-btn")!.disabled,
+    );
+  });
+
+  it("keeps auto-tag controls compact, tags readable, and actions separated", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const footer = css.match(
+      /\.llm-agent-hitl-paged-actions\s*\{[\s\S]*?\}/,
+    )![0];
+    assert.notInclude(footer, "margin-top: 0");
+    const controls = css.match(
+      /\.llm-agent-hitl-paged-top-field,\s*\.llm-agent-hitl-paged-footer-field\s*\{[\s\S]*?\}/,
+    )![0];
+    assert.include(controls, "flex-direction: row");
+    const numberControl = css.match(
+      /\.llm-agent-hitl-paged-top-field \.llm-agent-hitl-page-input,\s*\.llm-agent-hitl-paged-footer-field \.llm-agent-hitl-page-input\s*\{[\s\S]*?\}/,
+    )![0];
+    assert.include(numberControl, "appearance: none");
+    assert.include(numberControl, "text-align: center");
+    assert.include(numberControl, "text-align-last: center");
+    assert.include(numberControl, "width: 40px");
+    assert.include(numberControl, "min-height: 26px");
+    assert.notInclude(
+      css,
+      ".llm-agent-hitl-paged-footer-field .llm-agent-hitl-label {\n    display: none",
+    );
+    assert.match(
+      css,
+      /\.llm-agent-hitl-tag-assignment-table \.llm-agent-hitl-assignment-row\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/,
+    );
+    assert.match(
+      css,
+      /\.llm-agent-hitl-tag-chip-list\s*\{[^}]*flex-wrap: wrap/,
+    );
+  });
+
   it("renders paged review controls with refresh in the card header and navigation split across the footer", function () {
     const action: AgentPendingAction = {
       toolName: "move_to_collection",
@@ -5732,7 +5822,7 @@ describe("agentTrace render", function () {
       topControls
         ?.findByClass("llm-agent-hitl-paged-top-field")
         ?.findAllByTag("label")[0]?.textContent,
-      "of tags per paper",
+      "Tags per paper",
     );
 
     const footer = card.findByClass("llm-agent-hitl-paged-actions");

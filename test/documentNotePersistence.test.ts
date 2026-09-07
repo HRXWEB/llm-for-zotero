@@ -1,6 +1,10 @@
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
 import { assert } from "chai";
-import { savePlanDocumentAsNote } from "../src/agent/documents/actions";
+import { createHash } from "node:crypto";
+import {
+  exportPlanDocumentMarkdown,
+  savePlanDocumentAsNote,
+} from "../src/agent/documents/actions";
 
 /** Exercises the actual document decoder, save action and native note persistence boundary. */
 describe("durable document note association", function () {
@@ -12,13 +16,25 @@ describe("durable document note association", function () {
   let nextId: number;
   let inTransaction: boolean;
   let document: any;
+  let originalIO: any;
+  let originalToolkit: any;
+  let failFinalization: boolean;
+  let requireAtomicState: boolean;
+  let imageImports: number;
   beforeEach(function () {
     original = globals.Zotero;
+    originalIO = globals.IOUtils;
+    originalToolkit = globals.ztoolkit;
+    globals.IOUtils = { write: async () => undefined };
+    globals.ztoolkit = { log: () => undefined };
     notes = new Map();
     state = undefined;
     failAssociation = false;
     nextId = 100;
     inTransaction = false;
+    failFinalization = false;
+    requireAtomicState = false;
+    imageImports = 0;
     document = {
       version: 2,
       documentId: "summary-document",
@@ -154,9 +170,13 @@ describe("durable document note association", function () {
               "INSERT OR REPLACE INTO llm_for_zotero_plan_document_action_state",
             )
           ) {
-            if (failAssociation && JSON.parse(args[1]).savedNote)
+            const next = JSON.parse(args[1]);
+            if (requireAtomicState) assert.isTrue(inTransaction);
+            if (failAssociation && next.savedNote)
               throw new Error("Association storage unavailable");
-            state = JSON.parse(args[1]);
+            if (failFinalization && next.pendingNote?.finalized)
+              throw new Error("Finalization checkpoint unavailable");
+            state = next;
             return [];
           }
           if (sql.includes("llm_for_zotero_plan_document_action_state"))
@@ -170,7 +190,44 @@ describe("durable document note association", function () {
   });
   afterEach(function () {
     globals.Zotero = original;
+    globals.IOUtils = originalIO;
+    globals.ztoolkit = originalToolkit;
   });
+  async function rejects(task: Promise<unknown>, message: RegExp) {
+    let failure: unknown;
+    try {
+      await task;
+    } catch (error) {
+      failure = error;
+    }
+    assert.match(String(failure), message);
+  }
+  function addFigure() {
+    const bytes = new Uint8Array([1, 2, 3]);
+    globals.IOUtils.read = async () => bytes;
+    globals.Zotero.Attachments = {
+      importEmbeddedImage: async () => {
+        imageImports++;
+        return { key: "IMAGE001" };
+      },
+    };
+    document.assets = [
+      {
+        assetId: "figure-1",
+        contentHash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+        mimeType: "image/png",
+        byteLength: bytes.length,
+        caption: "Requested figure",
+        durablePath: "/virtual/figure.png",
+        provenance: {
+          origin: "generated",
+          generator: "test",
+          generatorVersion: "1",
+          evidenceRefs: [],
+        },
+      },
+    ];
+  }
   it("prepares the exact stored document instead of asking the model to rewrite its body", async function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
@@ -247,6 +304,165 @@ describe("durable document note association", function () {
       libraryID: 1,
     });
     assert.equal(notes.get(saved.itemId).parentID, 42);
+  });
+  it("preserves a pending native identity across failure, export, state reload and retry", async function () {
+    failAssociation = true;
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /Association storage/,
+    );
+    assert.equal(notes.size, 1);
+    const reservedKey = state.pendingNote.itemKey;
+    await exportPlanDocumentMarkdown(
+      document.documentId,
+      "/virtual/summary.md",
+    );
+    assert.equal(state.pendingNote?.itemKey, reservedKey);
+    state = JSON.parse(JSON.stringify(state));
+    failAssociation = false;
+    const recovered = await savePlanDocumentAsNote(document.documentId);
+    assert.equal(notes.size, 1);
+    assert.equal(recovered.itemKey, reservedKey);
+    assert.isFalse(recovered.created);
+    assert.isUndefined(state.pendingNote);
+    assert.equal(state.lastExportedName, "summary.md");
+  });
+  it("retains export metadata written while native save notifications are pending", async function () {
+    let notifyReady!: () => void;
+    let resume!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      notifyReady = resolve;
+    });
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    globals.Zotero.Notifier = {
+      Queue: class {},
+      commit: async () => {
+        notifyReady();
+        await resumed;
+      },
+    };
+    const save = savePlanDocumentAsNote(document.documentId);
+    await ready;
+    try {
+      await exportPlanDocumentMarkdown(
+        document.documentId,
+        "/virtual/during-save.md",
+      );
+    } finally {
+      resume();
+    }
+    const saved = await save;
+    assert.equal(state.savedNote.itemKey, saved.itemKey);
+    assert.equal(state.lastExportedName, "during-save.md");
+    assert.isNumber(state.lastExportedAt);
+    assert.equal(notes.size, 1);
+  });
+  it("runs action-state writes atomically without nesting native save transactions", async function () {
+    requireAtomicState = true;
+    await savePlanDocumentAsNote(document.documentId);
+    await exportPlanDocumentMarkdown(
+      document.documentId,
+      "/virtual/summary.md",
+    );
+    assert.equal(notes.size, 1);
+  });
+  it("serializes concurrent saves of the same document", async function () {
+    const results = await Promise.all([
+      savePlanDocumentAsNote(document.documentId),
+      savePlanDocumentAsNote(document.documentId),
+    ]);
+    assert.equal(notes.size, 1);
+    assert.equal(results[0].itemId, results[1].itemId);
+    assert.deepEqual(
+      results.map((result) => result.created),
+      [true, false],
+    );
+  });
+  it("does not mark fallback text complete when the figure checkpoint fails", async function () {
+    addFigure();
+    failFinalization = true;
+    await rejects(savePlanDocumentAsNote(document.documentId), /incomplete/);
+    assert.equal(notes.size, 1);
+    assert.isUndefined(state.savedNote);
+    assert.isFalse(state.pendingNote.finalized);
+    const reservedKey = state.pendingNote.itemKey;
+    failFinalization = false;
+    state = JSON.parse(JSON.stringify(state));
+    await rejects(savePlanDocumentAsNote(document.documentId), /incomplete/);
+    assert.equal(state.pendingNote.itemKey, reservedKey);
+    assert.equal(notes.size, 1);
+    assert.equal(imageImports, 1, "Recovery must not import the figure again");
+  });
+  it("recovers a fully persisted figure without importing it twice", async function () {
+    addFigure();
+    failAssociation = true;
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /Association storage/,
+    );
+    const key = state.pendingNote.itemKey;
+    assert.isTrue(state.pendingNote.finalized);
+    failAssociation = false;
+    state = JSON.parse(JSON.stringify(state));
+    const saved = await savePlanDocumentAsNote(document.documentId);
+    assert.equal(saved.itemKey, key);
+    assert.isFalse(saved.created);
+    assert.include(
+      notes.get(saved.itemId).getNote(),
+      'data-attachment-key="IMAGE001"',
+    );
+    assert.equal(imageImports, 1);
+    assert.equal(notes.size, 1);
+  });
+  it("blocks recovery when a requested figure could not be imported", async function () {
+    addFigure();
+    globals.Zotero.Attachments.importEmbeddedImage = async () => null;
+    await rejects(savePlanDocumentAsNote(document.documentId), /incomplete/);
+    await rejects(savePlanDocumentAsNote(document.documentId), /incomplete/);
+    assert.equal(notes.size, 1);
+    assert.isUndefined(state.savedNote);
+  });
+  it("does not promote a reservation changed during native persistence", async function () {
+    globals.Zotero.Notifier = {
+      Queue: class {},
+      commit: async () => {
+        state.pendingNote = { ...state.pendingNote, itemKey: "OTHER001" };
+      },
+    };
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /reservation.*changed/i,
+    );
+    assert.equal(state.pendingNote.itemKey, "OTHER001");
+    assert.isUndefined(state.savedNote);
+    assert.equal(notes.size, 1);
+  });
+  it("does not recreate a deleted note or treat a lookup failure as absence", async function () {
+    const saved = await savePlanDocumentAsNote(document.documentId);
+    notes.get(saved.itemId).deleted = true;
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /removed or changed/,
+    );
+    globals.Zotero.Items.getByLibraryAndKey = () => {
+      throw new Error("Lookup unavailable");
+    };
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /Lookup unavailable/,
+    );
+    assert.equal(notes.size, 1);
+  });
+  it("rejects a changed parent on document-card recovery without an explicit target", async function () {
+    const saved = await savePlanDocumentAsNote(document.documentId, {
+      parentItemId: 42,
+      libraryID: 1,
+    });
+    notes.get(saved.itemId).parentID = 43;
+    await rejects(savePlanDocumentAsNote(document.documentId), /parent/);
+    assert.equal(notes.size, 1);
   });
   it("refuses to report an externally changed saved note as the original document", async function () {
     const saved = await savePlanDocumentAsNote(document.documentId);

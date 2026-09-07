@@ -857,6 +857,58 @@ describe("autoTag action", function () {
     assert.include(unavailable || "", "Incorrect API key");
   });
 
+  it("regenerates the current paper at the chosen tag count before any tags are applied", async function () {
+    const registry = new AgentToolRegistry();
+    const applied: Array<{ itemId: number; tags: string[] }> = [];
+    registerReviewApplyTagsTool(registry, (input) => {
+      applied.push(...input.assignments);
+    });
+    const reviews: string[][] = [];
+    const { ctx } = createActionContext(registry, {
+      zoteroGateway: {
+        listBibliographicItemTargets: async () => ({
+          items: [
+            makeBibliographicTarget(
+              7,
+              "Memory attention cortex neurons perception",
+            ),
+          ],
+          totalCount: 1,
+        }),
+        listLibraryTags: async () =>
+          ["memory", "attention", "cortex", "neurons", "perception"].map(
+            (name) => ({ name, type: 0 }),
+          ),
+        getEditableArticleMetadata: () => ({ fields: { abstractNote: "" } }),
+        getItem: (itemId: number) => ({ id: itemId }),
+      } as never,
+      requestConfirmation: async (_requestId, action) => {
+        assert.lengthOf(applied, 0);
+        const field = action.fields.find(
+          (field) => field.type === "tag_assignment_table",
+        );
+        assert.exists(field);
+        if (field?.type !== "tag_assignment_table")
+          throw new Error("Missing tag editor");
+        reviews.push(field.rows[0].value as string[]);
+        return reviews.length === 1
+          ? {
+              approved: false,
+              actionId: "refresh",
+              data: { tagsPerPaper: "3" },
+            }
+          : { approved: true, actionId: "confirm", data: {} };
+      },
+    });
+    const result = await autoTagAction.execute({ scope: "all" }, ctx);
+    assert.isTrue(result.ok);
+    assert.deepEqual(
+      reviews.map((tags) => tags.length),
+      [5, 3],
+    );
+    assert.deepEqual(applied, [{ itemId: 7, tags: reviews[1] }]);
+  });
+
   it("navigates to the next page without applying current-page tags", async function () {
     const registry = new AgentToolRegistry();
     const executedItemIds: number[] = [];

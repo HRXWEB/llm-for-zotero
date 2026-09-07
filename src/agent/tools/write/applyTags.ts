@@ -196,22 +196,27 @@ export function createApplyTagsTool(
         const operation = input.operation as ApplyTagsOperation;
         const tagField = buildTagAssignmentField(operation, zoteroGateway);
         const pageMeta = readPagedOperationMeta(operation.id);
+        const assignments = operation.assignments || [];
+        const itemCount = assignments.length || operation.itemIds?.length || 0;
+        const isSinglePaper = itemCount === 1 && pageMeta?.totalPages === 1;
         const fields = [
           ...(tagField ? [tagField] : []),
           ...(pageMeta
             ? [
                 buildTagsPerPaperSelectField(pageMeta.tagsPerPaper),
-                buildPageSizeSelectField(pageMeta.pageSize),
+                ...(!isSinglePaper
+                  ? [buildPageSizeSelectField(pageMeta.pageSize)]
+                  : []),
               ]
             : []),
         ];
 
-        const assignments = operation.assignments || [];
-        const itemCount = assignments.length || operation.itemIds?.length || 0;
-        const pageLabel = readPagedOperationLabel(operation.id);
+        const pageLabel = isSinglePaper
+          ? ""
+          : readPagedOperationLabel(operation.id);
         const tagSummary = operation.tags?.length
           ? `Tags to add: ${operation.tags.join(", ")}`
-          : "Review the suggested per-paper tag additions.";
+          : "Edit or remove suggested tags, or add your own. Existing tags are kept.";
 
         return {
           toolName: "apply_tags",
