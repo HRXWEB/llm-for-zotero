@@ -1,4 +1,3 @@
-import { createNoteConversationItem } from "../../noteEditing/conversationItem";
 import { createElement } from "../../../../utils/domHelpers";
 import { t } from "../../../../utils/i18n";
 import type { ConversationSystem } from "../../../../shared/types";
@@ -1539,6 +1538,14 @@ export function createHistoryLifecycleController(
     }
   };
 
+  const filterHistoryForCurrentNote = (entries: ConversationHistoryEntry[]) => {
+    if (!isNoteSession()) return entries;
+    const noteID = resolveCurrentPaperBaseItem()?.id;
+    return entries.filter(
+      (entry) => entry.kind === "paper" && entry.paperItemID === noteID,
+    );
+  };
+
   const refreshHistorySearchMenu = async () => {
     const requestId = ++historySearchLoadSeq;
     const normalizedSearchQuery =
@@ -1575,7 +1582,7 @@ export function createHistoryLifecycleController(
         ? await searchIndexedConversationHistory(libraryID, historySearchQuery)
         : { entries: [], resultsByKey: new Map<number, HistorySearchResult>() };
       if (requestId !== historySearchLoadSeq) return;
-      historySearchEntries = indexed.entries;
+      historySearchEntries = filterHistoryForCurrentNote(indexed.entries);
       historySearchResultsByKey = indexed.resultsByKey;
       historySearchLoading = false;
       renderGlobalHistoryMenu();
@@ -1597,7 +1604,7 @@ export function createHistoryLifecycleController(
         ? await searchLoadedConversationHistory(libraryID, historySearchQuery)
         : { entries: [], resultsByKey: new Map<number, HistorySearchResult>() };
       if (requestId !== historySearchLoadSeq) return;
-      historySearchEntries = loaded.entries;
+      historySearchEntries = filterHistoryForCurrentNote(loaded.entries);
       historySearchResultsByKey = loaded.resultsByKey;
       historySearchLoading = false;
       renderGlobalHistoryMenu();
@@ -2210,7 +2217,8 @@ export function createHistoryLifecycleController(
     }
     const hostLease = capturePanelOperationLease(body);
     if (!hostLease) return false;
-    const noteFocusItem = isNoteSession() ? item : null;
+    // A note can only navigate within its own item-scoped history.
+    if (isNoteSession()) return false;
     persistDraftInputForCurrentConversation();
     const libraryID = getCurrentLibraryID();
     if (!libraryID) return false;
@@ -2268,13 +2276,8 @@ export function createHistoryLifecycleController(
         setStatus(status, t("Could not load this conversation"), "error");
       return false;
     }
-    const nextItem = noteFocusItem
-      ? createNoteConversationItem(
-          noteFocusItem,
-          system,
-          normalizedConversationKey,
-        )
-      : system === "claude_code"
+    const nextItem =
+      system === "claude_code"
         ? createClaudeGlobalPortalItem(libraryID, normalizedConversationKey)
         : system === "codex"
           ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
@@ -2357,7 +2360,6 @@ export function createHistoryLifecycleController(
     ) {
       return false;
     }
-    const noteFocusItem = isNoteSession() ? item : null;
     const paperItem = options?.paperItem || resolveCurrentPaperBaseItem();
     if (!paperItem) return false;
     if (!isPanelHostCompatibleWithPaper(body, paperItem)) {
@@ -2487,66 +2489,57 @@ export function createHistoryLifecycleController(
     // legacy key-only compatibility tombstone; it never cancels a pending
     // deletion intent.
     forgetRecentlyDeletedConversation(resolvedConversationKey);
-    if (noteFocusItem) {
-      const nextItem = createNoteConversationItem(
-        noteFocusItem,
-        system,
+    if (system === "claude_code") {
+      const nextItem = createClaudePaperPortalItem(
+        paperItem,
         resolvedConversationKey,
-      );
-      if (!setCurrentItem(nextItem)) return false;
+      ) as any;
+      if (
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "switch-paper-conversation-commit",
+          hostLease,
+        ) ||
+        !setCurrentItem(nextItem)
+      ) {
+        return false;
+      }
+    } else if (system === "codex") {
+      const nextItem = createCodexPaperPortalItem(
+        paperItem,
+        resolvedConversationKey,
+      ) as any;
+      if (
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "switch-paper-conversation-commit",
+          hostLease,
+        ) ||
+        !setCurrentItem(nextItem)
+      ) {
+        return false;
+      }
     } else {
-      if (system === "claude_code") {
-        const nextItem = createClaudePaperPortalItem(
-          paperItem,
-          resolvedConversationKey,
-        ) as any;
-        if (
-          !canCommitPanelConversation(
-            body,
-            nextItem,
-            "switch-paper-conversation-commit",
-            hostLease,
-          ) ||
-          !setCurrentItem(nextItem)
-        ) {
-          return false;
-        }
-      } else if (system === "codex") {
-        const nextItem = createCodexPaperPortalItem(
-          paperItem,
-          resolvedConversationKey,
-        ) as any;
-        if (
-          !canCommitPanelConversation(
-            body,
-            nextItem,
-            "switch-paper-conversation-commit",
-            hostLease,
-          ) ||
-          !setCurrentItem(nextItem)
-        ) {
-          return false;
-        }
-      } else {
-        const nextItem =
-          resolvedConversationKey === paperItemID
-            ? paperItem
-            : createPaperPortalItem(
-                paperItem,
-                resolvedConversationKey,
-                targetSummary.sessionVersion || 1,
-              );
-        if (
-          !canCommitPanelConversation(
-            body,
-            nextItem,
-            "switch-paper-conversation-commit",
-            hostLease,
-          ) ||
-          !setCurrentItem(nextItem as any)
-        ) {
-          return false;
-        }
+      const nextItem =
+        resolvedConversationKey === paperItemID && !paperItem.isNote?.()
+          ? paperItem
+          : createPaperPortalItem(
+              paperItem,
+              resolvedConversationKey,
+              targetSummary.sessionVersion || 1,
+            );
+      if (
+        !canCommitPanelConversation(
+          body,
+          nextItem,
+          "switch-paper-conversation-commit",
+          hostLease,
+        ) ||
+        !setCurrentItem(nextItem as any)
+      ) {
+        return false;
       }
     }
     if (system === "claude_code") {
@@ -2793,6 +2786,7 @@ export function createHistoryLifecycleController(
     }
     const sourceLease = capturePanelOperationLease(body);
     if (!sourceLease) return false;
+    if (!filterHistoryForCurrentNote([entry]).length) return false;
     if (entry.kind === "paper") {
       if (isOrphanHistoryEntry(entry)) {
         if (status) {
@@ -3606,7 +3600,7 @@ export function createHistoryLifecycleController(
   ): Promise<boolean> => {
     const { excludeConversationKey, forceFresh } =
       normalizeCreateConversationOptions(options);
-    if (!item) return false;
+    if (!item || isNoteSession()) return false;
     const ownership = captureOwnedPanelOperation("new-global-conversation");
     if (!ownership) return false;
     closeHistoryNewMenu();

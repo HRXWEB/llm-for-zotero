@@ -559,7 +559,7 @@ export function isPanelHostCompatibleWithPaper(
   if (binding.noteID) {
     return (
       binding.libraryID === normalizePositiveInt(paperItem.libraryID) &&
-      binding.noteParentItemID === normalizePositiveInt(paperItem.id)
+      binding.noteID === normalizePositiveInt(paperItem.id)
     );
   }
   return (

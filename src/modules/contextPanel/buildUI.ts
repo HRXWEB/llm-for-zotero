@@ -62,8 +62,11 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const conversationItemId = hasItem && item ? getConversationKey(item) : 0;
   const basePaperItemId =
     hasItem && item
-      ? activeNoteSession?.parentItemId ||
-        (isPaperMode ? Number(resolveConversationBaseItem(item)?.id || 0) : 0)
+      ? activeNoteSession
+        ? activeNoteSession.parentItemId || 0
+        : isPaperMode
+          ? Number(resolveConversationBaseItem(item)?.id || 0)
+          : 0
       : 0;
   const hasPaperContext = basePaperItemId > 0;
 
@@ -169,9 +172,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   modeSwitchWrap.dataset.mode = hasItem && isGlobalMode ? "global" : "paper";
 
   const modeChipLabel = activeNoteSession
-    ? activeNoteSession.conversationKind === "global"
-      ? t("Library chat")
-      : t("Paper chat")
+    ? t("Note chat")
     : isGlobalMode
       ? t("Library chat")
       : t("Paper chat");

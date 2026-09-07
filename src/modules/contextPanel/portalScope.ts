@@ -125,6 +125,13 @@ export function createPaperPortalItem(
   conversationKey: number,
   sessionVersion: number,
 ): Zotero.Item {
+  if (basePaperItem.isNote?.()) {
+    return createNoteConversationItem(
+      basePaperItem,
+      "upstream",
+      conversationKey,
+    );
+  }
   const basePaperItemID = normalizePositiveInt(basePaperItem?.id) || 0;
   const normalizedLibraryID =
     normalizePositiveInt(basePaperItem?.libraryID) || 1;
@@ -262,12 +269,8 @@ export function resolveConversationBaseItem(
   if (isCodexPaperPortalItem(targetItem)) {
     return resolveCodexPaperPortalBaseItem(targetItem);
   }
-  const noteParentItem = resolveNoteParentItem(targetItem);
-  if (noteParentItem) {
-    return noteParentItem;
-  }
   if ((targetItem as any).isNote?.()) {
-    return targetItem;
+    return getNoteConversation(targetItem)?.note || targetItem;
   }
   return resolvePaperChatSourceItem(targetItem);
 }
@@ -303,7 +306,7 @@ export function resolvePaperChatSourceItem(
     return resolveCodexPaperPortalBaseItem(targetItem);
   }
   if ((targetItem as any).isNote?.()) {
-    return resolveNoteParentItem(targetItem);
+    return getNoteConversation(targetItem)?.note || targetItem;
   }
   if (targetItem.isAttachment() && targetItem.parentID) {
     if (!isSupportedContextAttachment(targetItem)) return null;
@@ -521,17 +524,10 @@ export function resolveConversationKeyForNoteFocus(
     item,
     preferredSystem: options?.conversationSystem,
   });
-  if (noteSession.noteKind === "standalone") {
-    return resolveGlobalConversationKey(
-      noteSession.libraryID,
-      conversationSystem,
-    );
-  }
-  const parentItem = noteSession.parentItemId
-    ? Zotero.Items.get(noteSession.parentItemId) || null
+  const note = getNoteConversation(item)?.note || item;
+  return note
+    ? resolvePaperConversationKeyForBaseItem(note, conversationSystem)
     : null;
-  if (!parentItem?.isRegularItem?.()) return null;
-  return resolvePaperConversationKeyForBaseItem(parentItem, conversationSystem);
 }
 
 export function resolveInitialPanelItemState(
@@ -559,10 +555,7 @@ export function resolveInitialPanelItemState(
         getNoteConversation(item)?.system === system
           ? item
           : createNoteConversationItem(item, system, key),
-      basePaperItem:
-        noteSession.noteKind === "item" && noteSession.parentItemId
-          ? Zotero.Items.get(noteSession.parentItemId) || null
-          : null,
+      basePaperItem: getNoteConversation(item)?.note || item,
     };
   }
   if (

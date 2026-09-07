@@ -7,6 +7,7 @@ import {
   bindStandalonePanelHost,
   clearPanelHostBinding,
   evaluatePanelOwnership,
+  isPanelHostCompatibleWithPaper,
   getConversationScopeIdentityForTests,
   requireCurrentPanelOwnership,
 } from "../src/modules/contextPanel/panelHostOwnership";
@@ -231,7 +232,7 @@ describe("panel host ownership", function () {
     items.set(parentA.id, parentA);
     items.set(parentB.id, parentB);
     const panel = fakePanel({
-      conversationKey: parentA.id,
+      conversationKey: noteA.id,
       paperItemID: parentA.id,
       noteID: noteA.id,
       noteParentItemID: parentA.id,
@@ -239,13 +240,16 @@ describe("panel host ownership", function () {
     bindEmbeddedPanelHost(panel.body, noteA, "library");
 
     assert.deepInclude(getConversationScopeIdentityForTests(noteA), {
-      conversationKey: parentA.id,
+      conversationKey: noteA.id,
       kind: "note",
       libraryID: 1,
       noteID: noteA.id,
       noteParentItemID: parentA.id,
     });
     assert.equal(evaluatePanelOwnership(panel.body, noteA), "match");
+    assert.isTrue(isPanelHostCompatibleWithPaper(panel.body, noteA));
+    assert.isFalse(isPanelHostCompatibleWithPaper(panel.body, parentA));
+    assert.isFalse(isPanelHostCompatibleWithPaper(panel.body, noteB));
     assert.equal(evaluatePanelOwnership(panel.body, noteB), "stale-candidate");
     assert.equal(
       evaluatePanelOwnership(panel.body, noteOnB),

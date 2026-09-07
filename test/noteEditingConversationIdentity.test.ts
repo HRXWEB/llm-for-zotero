@@ -26,7 +26,7 @@ describe("note editing conversation identity", function () {
     globalScope.Zotero = originalZotero;
   });
 
-  it("routes item notes through parent paper chat identity", function () {
+  it("routes item notes through their own conversation identity", function () {
     const parentItem = {
       id: 3612,
       libraryID: 1,
@@ -59,10 +59,10 @@ describe("note editing conversation identity", function () {
 
     assert.equal(resolveDisplayConversationKind(noteItem), "paper");
     assert.equal(session?.conversationKind, "paper");
-    assert.equal(getConversationKey(noteItem), 3612);
+    assert.equal(getConversationKey(noteItem), 3703);
   });
 
-  it("routes standalone notes through library chat identity", function () {
+  it("routes standalone notes through their own conversation identity", function () {
     const noteItem = {
       id: 3704,
       libraryID: 1,
@@ -85,11 +85,11 @@ describe("note editing conversation identity", function () {
 
     const session = resolveActiveNoteSession(noteItem);
 
-    assert.equal(resolveDisplayConversationKind(noteItem), "global");
-    assert.equal(session?.conversationKind, "global");
+    assert.equal(resolveDisplayConversationKind(noteItem), "paper");
+    assert.equal(session?.conversationKind, "paper");
     assert.equal(
       getConversationKey(noteItem),
-      buildDefaultConversationKey("upstream", "global", 1),
+      buildDefaultConversationKey("upstream", "paper", 3704),
     );
   });
   it("keeps each mounted note conversation stable when another surface navigates", function () {
@@ -108,8 +108,8 @@ describe("note editing conversation identity", function () {
     const first = resolveInitialPanelItemState(note).item!;
     activeGlobalConversationByLibrary.set(1, 2500000112);
     const second = resolveInitialPanelItemState(note).item!;
-    assert.equal(getConversationKey(first), 2500000111);
-    assert.equal(getConversationKey(second), 2500000112);
+    assert.equal(getConversationKey(first), 3975);
+    assert.equal(getConversationKey(second), 3975);
     assert.notStrictEqual(first, second);
     assert.equal(resolveActiveNoteSession(first)?.noteId, 3975);
   });

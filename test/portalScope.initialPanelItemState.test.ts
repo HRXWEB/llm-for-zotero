@@ -374,7 +374,7 @@ describe("portalScope resolveInitialPanelItemState", function () {
     assert.equal(resolved.item?.libraryID, 7);
   });
 
-  it("maps item notes onto parent paper chat while keeping note focus metadata", function () {
+  it("maps item notes onto their own chat while keeping parent context metadata", function () {
     const parentItem = {
       id: 42,
       libraryID: 7,
@@ -399,7 +399,7 @@ describe("portalScope resolveInitialPanelItemState", function () {
     assert.notStrictEqual(resolved.item, noteItem);
     assert.equal(resolved.item?.id, noteItem.id);
     assert.deepEqual(resolveActiveNoteSession(resolved.item), session);
-    assert.equal(resolved.basePaperItem, parentItem);
+    assert.equal(resolved.basePaperItem, noteItem);
     assert.deepEqual(session, {
       noteKind: "item",
       noteId: 99,
@@ -410,7 +410,7 @@ describe("portalScope resolveInitialPanelItemState", function () {
     });
   });
 
-  it("maps standalone notes onto library chat while keeping note focus metadata", function () {
+  it("maps standalone notes onto their own chat while keeping note focus metadata", function () {
     const noteItem = {
       id: 108,
       libraryID: 7,
@@ -427,7 +427,7 @@ describe("portalScope resolveInitialPanelItemState", function () {
     assert.notStrictEqual(resolved.item, noteItem);
     assert.equal(resolved.item?.id, noteItem.id);
     assert.deepEqual(resolveActiveNoteSession(resolved.item), session);
-    assert.isNull(resolved.basePaperItem);
+    assert.strictEqual(resolved.basePaperItem, noteItem);
     assert.isFalse(isPaperPortalItem(resolved.item));
     assert.deepEqual(session, {
       noteKind: "standalone",
@@ -435,7 +435,7 @@ describe("portalScope resolveInitialPanelItemState", function () {
       libraryID: 7,
       title: "Standalone Note",
       parentItemId: undefined,
-      conversationKind: "global",
+      conversationKind: "paper",
     });
   });
 

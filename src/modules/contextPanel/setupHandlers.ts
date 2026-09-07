@@ -1472,11 +1472,7 @@ export function setupHandlers(
       updateRuntimeModeButton();
       updateRuntimeSystemToggles();
       if (options?.forceFresh === true) {
-        if (noteSession.conversationKind === "global") {
-          await createAndSwitchGlobalConversation(true);
-        } else {
-          await createAndSwitchPaperConversation(true);
-        }
+        await createAndSwitchPaperConversation(true);
         return;
       }
       await ensureConversationLoaded(item);
@@ -1640,13 +1636,7 @@ export function setupHandlers(
   };
   const resolveCurrentPaperBaseItem = (): Zotero.Item | null => {
     const noteSession = resolveCurrentNoteSession();
-    if (noteSession?.noteKind === "item") {
-      const parentItem = resolveCurrentNoteParentItem();
-      if (parentItem) return parentItem;
-    }
-    if (noteSession) {
-      return null;
-    }
+    if (noteSession) return resolveConversationBaseItem(item);
     const resolvedBaseItem = chooseCurrentPaperBaseItemForMode({
       isGlobalMode: isGlobalMode(),
       liveRawBaseItem: resolvePaperChatBaseItem(resolveLiveRawPanelItem()),
@@ -1713,8 +1703,11 @@ export function setupHandlers(
     });
     panelRoot.dataset.conversationSystem = currentConversationSystem;
     syncQueuedFollowUpRegistration();
-    const currentBasePaperItemID =
-      mode === "paper" ? Number(resolveCurrentPaperBaseItem()?.id || 0) : 0;
+    const currentBasePaperItemID = noteSession
+      ? noteSession.parentItemId || 0
+      : mode === "paper"
+        ? Number(resolveCurrentPaperBaseItem()?.id || 0)
+        : 0;
     panelRoot.dataset.basePaperItemId =
       Number.isFinite(currentBasePaperItemID) && currentBasePaperItemID > 0
         ? `${Math.floor(currentBasePaperItemID)}`
@@ -1824,9 +1817,7 @@ export function setupHandlers(
       // [webchat] Don't overwrite — applyWebChatModeUI manages the chip in webchat mode
       if (!modeChipBtn.querySelector(".llm-webchat-dot")) {
         const currentLabel = noteSession
-          ? noteSession.conversationKind === "global"
-            ? t("Library chat")
-            : t("Paper chat")
+          ? t("Note chat")
           : mode === "global"
             ? t("Library chat")
             : t("Paper chat");

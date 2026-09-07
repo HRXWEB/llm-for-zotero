@@ -1,3 +1,10 @@
+import { createNoteConversationItem } from "../src/modules/contextPanel/noteEditing/conversationItem";
+import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
+import {
+  selectedPaperContextCache,
+  selectedCollectionContextCache,
+  selectedTagContextCache,
+} from "../src/modules/contextPanel/state";
 import { assert } from "chai";
 import type {
   ChatAttachment,
@@ -823,6 +830,92 @@ describe("sendFlowController", function () {
       getRestoredPaperModes: () => restoredPaperModes.slice(),
     };
   }
+
+  it("sends only the selected note conversation's context across new and return transitions", async function () {
+    const originalZotero = (globalThis as any).Zotero;
+    const note = {
+      id: 4070,
+      libraryID: 1,
+      isNote: () => true,
+      isAttachment: () => false,
+      getNoteTitle: () => "Note",
+      getNote: () => "<p>Native note</p>",
+    } as unknown as Zotero.Item;
+    const oldKey = 1500000400;
+    const newKey = 1500000401;
+    let current = createNoteConversationItem(note, "upstream", oldKey);
+    const requests: any[] = [];
+    (globalThis as any).Zotero = {
+      Prefs: { get: () => undefined },
+      DB: { queryAsync: async () => [] },
+      Items: { get: () => note },
+    };
+    selectedPaperContextCache.set(oldKey, [selectedPaper]);
+    selectedCollectionContextCache.set(oldKey, [selectedCollection]);
+    selectedTagContextCache.set(oldKey, [selectedTag]);
+    try {
+      const { controller, inputBox } = createBaseDeps({
+        getItem: () => current,
+        getConversationKey,
+        beginRequest: () => ({
+          conversationKey: getConversationKey(current),
+          requestId: 1,
+          signal: new AbortController().signal,
+        }),
+        isRequestOwner: () => true,
+        getSelectedTextContextEntries: () => [],
+        getSelectedPaperContexts: (key: number) =>
+          selectedPaperContextCache.get(key) || [],
+        getSelectedCollectionContexts: (key: number) =>
+          selectedCollectionContextCache.get(key) || [],
+        getSelectedTagContexts: (key: number) =>
+          selectedTagContextCache.get(key) || [],
+        getFullTextPaperContexts: (
+          _item: Zotero.Item,
+          contexts: PaperContextRef[],
+        ) => contexts,
+        getSelectedFiles: () => [],
+        getSelectedImages: () => [],
+        sendQuestion: async (request: any) => {
+          requests.push(request);
+          request.onProviderDispatch?.();
+        },
+      });
+      for (const key of [oldKey, newKey, oldKey]) {
+        current = createNoteConversationItem(note, "upstream", key);
+        inputBox.value = "Explain the note";
+        await controller.doSend();
+      }
+      assert.lengthOf(requests, 3);
+      assert.deepEqual(
+        requests.map((request) => request.conversationKey),
+        [oldKey, newKey, oldKey],
+      );
+      assert.deepEqual(
+        requests.map((request) => request.paperContexts.length),
+        [1, 0, 1],
+      );
+      assert.deepEqual(
+        requests.map((request) => request.selectedCollectionContexts.length),
+        [1, 0, 1],
+      );
+      assert.deepEqual(
+        requests.map((request) => request.selectedTagContexts.length),
+        [1, 0, 1],
+      );
+      assert.deepEqual(
+        requests.map((request) => request.activeNoteContext.noteId),
+        [4070, 4070, 4070],
+      );
+    } finally {
+      for (const key of [oldKey, newKey]) {
+        selectedPaperContextCache.delete(key);
+        selectedCollectionContextCache.delete(key);
+        selectedTagContextCache.delete(key);
+      }
+      (globalThis as any).Zotero = originalZotero;
+    }
+  });
 
   it("preserves the draft and produces no effects when panel ownership is poisoned", async function () {
     const { controller, inputBox, getCounts, getDraftValue } = createBaseDeps({

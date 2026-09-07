@@ -605,7 +605,7 @@ describe("conversation provisioning", function () {
     restore();
   });
 
-  it("provisions a standalone note through the Codex library conversation", async function () {
+  it("provisions a standalone note through its own Codex item conversation", async function () {
     const { queries, conversations, registry, restore } =
       installProvisioningDb();
     try {
@@ -639,14 +639,15 @@ describe("conversation provisioning", function () {
           registry: Array.from(registry.entries()),
         }),
       );
-      const conversationKey = buildDefaultCodexGlobalConversationKey(1);
-      assert.equal(registry.get(conversationKey)?.kind, "global");
+      const conversationKey = buildDefaultCodexPaperConversationKey(55);
+      assert.equal(registry.get(conversationKey)?.kind, "paper");
       assert.equal(
         await validateConversationScope({
           conversationKey,
           system: "codex",
-          kind: "global",
+          kind: "paper",
           libraryID: 1,
+          paperItemID: 55,
         }),
         true,
       );
@@ -655,7 +656,7 @@ describe("conversation provisioning", function () {
     }
   });
 
-  it("provisions an item note through the upstream parent paper conversation", async function () {
+  it("provisions an item note through its own upstream conversation", async function () {
     const { registry, restore } = installProvisioningDb();
     try {
       const parentItem = {
@@ -688,17 +689,17 @@ describe("conversation provisioning", function () {
       const conversationKey = buildDefaultConversationKey(
         "upstream",
         "paper",
-        3340,
+        55,
       );
       assert.equal(registry.get(conversationKey)?.kind, "paper");
-      assert.equal(registry.get(conversationKey)?.paperItemID, 3340);
+      assert.equal(registry.get(conversationKey)?.paperItemID, 55);
       assert.equal(
         await validateConversationScope({
           conversationKey,
           system: "upstream",
           kind: "paper",
           libraryID: 1,
-          paperItemID: 3340,
+          paperItemID: 55,
         }),
         true,
       );

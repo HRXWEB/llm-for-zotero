@@ -1,3 +1,4 @@
+import { getNoteConversation } from "./noteEditing/conversationItem";
 import { resolveNoteParentItem, resolveNoteTitle } from "./portalScope";
 import { stripNoteHtml } from "../../utils/noteText";
 export {
@@ -21,6 +22,7 @@ export type NoteSnapshot = {
 export function readNoteSnapshot(
   item: Zotero.Item | null | undefined,
 ): NoteSnapshot | null {
+  item = getNoteConversation(item)?.note || item;
   if (!(item as any)?.isNote?.()) return null;
   const noteId = Number(item?.id);
   if (!Number.isFinite(noteId) || noteId <= 0) return null;

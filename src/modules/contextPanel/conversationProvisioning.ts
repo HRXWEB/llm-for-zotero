@@ -1,5 +1,7 @@
 declare const Zotero: any;
 
+import { getNoteConversation } from "./noteEditing/conversationItem";
+
 import {
   buildDefaultClaudeGlobalConversationKey,
   buildDefaultClaudePaperConversationKey,
@@ -108,6 +110,11 @@ function bindSyntheticPortalItemToEntry(
   entry: ConversationCatalogEntry | null,
 ): void {
   if (!entry || !item || typeof item !== "object") return;
+  const noteConversation = getNoteConversation(item);
+  if (noteConversation) {
+    noteConversation.conversationKey = entry.conversationKey;
+    return;
+  }
   const candidate = item as Zotero.Item & {
     __llmGlobalPortalItem?: boolean;
     __llmPaperPortalItem?: boolean;

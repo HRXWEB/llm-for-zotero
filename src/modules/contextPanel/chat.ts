@@ -658,10 +658,13 @@ function collectMessagePaperContextIds(
   }
 }
 
-function storedMessagesMatchActivePaper(
+export function storedMessagesMatchActivePaper(
   item: Zotero.Item,
   storedMessages: StoredChatMessage[],
 ): boolean {
+  // Note ownership is checked against the registered note item before loading.
+  // A note's references need not contain its own ID as a paper citation.
+  if (resolveActiveNoteSession(item)) return true;
   if (resolveDisplayConversationKind(item) !== "paper") return true;
   const baseItem = resolveConversationBaseItem(item);
   const activePaperItemID = normalizeConversationScopeInt(baseItem?.id);

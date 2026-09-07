@@ -201,7 +201,7 @@ describe("workflow: note editing mode", function () {
     });
   });
 
-  it("keeps standalone notes on library chat without parent paper context", async function () {
+  it("keeps standalone notes in their own chat without parent paper context", async function () {
     const selectedSentence =
       "Standalone notes should not borrow a paper unless the user adds one.";
     fixture = await api.createStandaloneNoteFixture({
@@ -210,7 +210,7 @@ describe("workflow: note editing mode", function () {
 
     const panel = await api.renderPanelForItem(fixture.noteItemId);
     const initialDiagnostics = await api.getDiagnostics(panel.panelId);
-    assert.equal(initialDiagnostics.conversationKind, "global");
+    assert.equal(initialDiagnostics.conversationKind, "paper");
     assert.isTrue(
       initialDiagnostics.historyNewVisible,
       await diagnosticsMessage(api, panel.panelId),
@@ -236,7 +236,7 @@ describe("workflow: note editing mode", function () {
       send,
       system: "upstream",
       noteItemId: fixture.noteItemId,
-      conversationKind: "global",
+      conversationKind: "paper",
     });
   });
 
@@ -279,7 +279,7 @@ describe("workflow: note editing mode", function () {
     });
   }
 
-  it("routes upstream, Codex, and Claude Code sends through parent paper conversations", async function () {
+  it("routes upstream, Codex, and Claude Code sends through the note own conversations", async function () {
     const selectedSentence = "Runtime-specific note chats must stay isolated.";
     fixture = await api.createItemNoteFixture({
       title: "Workflow Runtime Note Parent",
