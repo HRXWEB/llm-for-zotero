@@ -182,9 +182,9 @@ describe("webchat relay/client", function () {
   it("filters history by exact canonical hostname", function () {
     const sessions = [
       {
-        id: "real-gemini",
+        id: "5555555555555555",
         title: "Real Gemini",
-        chatUrl: "https://gemini.google.com/app/real-gemini",
+        chatUrl: "https://gemini.google.com/app/5555555555555555",
       },
       {
         id: "www-lookalike",
@@ -402,7 +402,7 @@ describe("webchat relay/client", function () {
   it("stores explicit target and answer-capture capabilities", async function () {
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/thread-1",
+      chatUrl: "https://gemini.google.com/app/1111111111111111",
       siteId: "gemini",
       contentScriptAlive: true,
       composerFound: true,
@@ -465,7 +465,7 @@ describe("webchat relay/client", function () {
 
   it("rejects remote chat URL lookalikes without changing session state", async function () {
     await invokeEndpoint("/llm-for-zotero/webchat/update_chat_url", "POST", {
-      chatUrl: "https://gemini.google.com/app/real-thread",
+      chatUrl: "https://gemini.google.com/app/2222222222222222",
     });
 
     const rejected = await invokeEndpoint(
@@ -478,9 +478,9 @@ describe("webchat relay/client", function () {
     const state = relayServer.relayGetStateSnapshot();
     assert.equal(
       state.remote_chat_url,
-      "https://gemini.google.com/app/real-thread",
+      "https://gemini.google.com/app/2222222222222222",
     );
-    assert.equal(state.remote_chat_id, "real-thread");
+    assert.equal(state.remote_chat_id, "2222222222222222");
   });
 
   it("prevents query replay once submission is durably starting", async function () {
@@ -660,9 +660,9 @@ describe("webchat relay/client", function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/thread-1",
+      chatUrl: "https://gemini.google.com/app/1111111111111111",
       siteId: "gemini",
-      url: "https://gemini.google.com/app/thread-1",
+      url: "https://gemini.google.com/app/1111111111111111",
       contentScriptAlive: true,
       composerFound: true,
       mainWorldInjected: false,
@@ -707,7 +707,7 @@ describe("webchat relay/client", function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/thread-1",
+      chatUrl: "https://gemini.google.com/app/1111111111111111",
       siteId: "gemini",
       supportedDeliveryContracts: [1],
       supportedTargets: ["gemini"],
@@ -779,7 +779,7 @@ describe("webchat relay/client", function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/thread-1",
+      chatUrl: "https://gemini.google.com/app/1111111111111111",
       siteId: "gemini",
       contentScriptAlive: true,
       composerFound: true,
@@ -789,8 +789,8 @@ describe("webchat relay/client", function () {
     });
     relayServer.relaySetActiveTarget("gemini");
     relayServer.relayUpdateTurnState({
-      remote_chat_url: "https://gemini.google.com/app/thread-1",
-      remote_chat_id: "thread-1",
+      remote_chat_url: "https://gemini.google.com/app/1111111111111111",
+      remote_chat_id: "1111111111111111",
       turn_status: "ready",
     });
 
@@ -808,9 +808,9 @@ describe("webchat relay/client", function () {
     };
     assert.equal(
       query.expected_chat_url,
-      "https://gemini.google.com/app/thread-1",
+      "https://gemini.google.com/app/1111111111111111",
     );
-    assert.equal(query.expected_chat_id, "thread-1");
+    assert.equal(query.expected_chat_id, "1111111111111111");
   });
 
   it("does not bind a Gemini query to another target's session", async function () {
@@ -854,7 +854,7 @@ describe("webchat relay/client", function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/caller-thread",
+      chatUrl: "https://gemini.google.com/app/3333333333333333",
       siteId: "gemini",
       contentScriptAlive: true,
       composerFound: true,
@@ -864,15 +864,15 @@ describe("webchat relay/client", function () {
     });
     relayServer.relaySetActiveTarget("gemini");
     relayServer.relayUpdateTurnState({
-      remote_chat_url: "https://gemini.google.com/app/relay-thread",
-      remote_chat_id: "relay-thread",
+      remote_chat_url: "https://gemini.google.com/app/4444444444444444",
+      remote_chat_id: "4444444444444444",
     });
 
     const result = relayServer.relaySubmitQuery({
       prompt: "caller-bound follow-up",
       target: "gemini",
-      expected_chat_url: "https://gemini.google.com/app/caller-thread",
-      expected_chat_id: "caller-thread",
+      expected_chat_url: "https://gemini.google.com/app/3333333333333333",
+      expected_chat_id: "3333333333333333",
       delivery_contract_version:
         relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
     } as Parameters<typeof relayServer.relaySubmitQuery>[0] & {
@@ -887,10 +887,86 @@ describe("webchat relay/client", function () {
     };
     assert.equal(
       query.expected_chat_url,
-      "https://gemini.google.com/app/caller-thread",
+      "https://gemini.google.com/app/3333333333333333",
     );
-    assert.equal(query.expected_chat_id, "caller-thread");
+    assert.equal(query.expected_chat_id, "3333333333333333");
   });
+
+  for (const viaHttp of [false, true]) {
+    for (const field of ["expected_chat_url", "expected_chat_id"] as const) {
+      it(`rejects malformed Gemini ${field} without state mutation via ${viaHttp ? "HTTP" : "direct API"}`, async function () {
+        await invokeEndpoint(
+          "/llm-for-zotero/webchat/extension_status",
+          "POST",
+          {
+            chatTabAlive: true,
+            chatUrl: "https://gemini.google.com/app/1111111111111111",
+            siteId: "gemini",
+            contentScriptAlive: true,
+            composerFound: true,
+            supportedDeliveryContracts: [1],
+            supportedTargets: ["gemini"],
+            answerCapture: "dom",
+          },
+        );
+        const before = relayServer.relayGetStateSnapshot();
+        for (const id of [
+          "thread-1",
+          "A3BA6A650DC4B726",
+          "a3ba6a650dc4b72",
+          "a3ba6a650dc4b7260",
+          "g3ba6a650dc4b726",
+          "a3ba6a650dc4b72_",
+        ]) {
+          const input = {
+            prompt: "must preserve explicit context",
+            target: "gemini",
+            [field]:
+              field === "expected_chat_url"
+                ? `https://gemini.google.com/app/${id}`
+                : id,
+            delivery_contract_version:
+              relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+          };
+          const result = viaHttp
+            ? await invokeEndpoint(
+                "/llm-for-zotero/webchat/submit_query",
+                "POST",
+                input,
+              )
+            : relayServer.relaySubmitQuery(input);
+          assert.match(String(result.error), /conversation binding/i, id);
+          assert.deepEqual(relayServer.relayGetStateSnapshot(), before, id);
+        }
+        const valid = {
+          prompt: "valid explicit context",
+          target: "gemini",
+          [field]:
+            field === "expected_chat_url"
+              ? "https://gemini.google.com/app/a3ba6a650dc4b726"
+              : "a3ba6a650dc4b726",
+          delivery_contract_version:
+            relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+        };
+        const accepted = viaHttp
+          ? await invokeEndpoint(
+              "/llm-for-zotero/webchat/submit_query",
+              "POST",
+              valid,
+            )
+          : relayServer.relaySubmitQuery(valid);
+        assert.isTrue(accepted.ok);
+        assert.equal(
+          relayServer.relayGetStateSnapshot().query.seq,
+          before.query.seq + 1,
+        );
+        assert.equal(
+          relayServer.relayPollQuery().query?.expected_chat_id,
+          "a3ba6a650dc4b726",
+        );
+      });
+    }
+  }
 
   it("rejects a mismatched explicit binding before direct dispatch", function () {
     const before = relayServer.relayGetStateSnapshot();
@@ -978,7 +1054,7 @@ describe("webchat relay/client", function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
       chatTabAlive: true,
-      chatUrl: "https://gemini.google.com/app/thread-1",
+      chatUrl: "https://gemini.google.com/app/1111111111111111",
       siteId: "gemini",
       contentScriptAlive: true,
       composerFound: true,
@@ -988,8 +1064,8 @@ describe("webchat relay/client", function () {
     });
     relayServer.relaySetActiveTarget("gemini");
     relayServer.relayUpdateTurnState({
-      remote_chat_url: "https://gemini.google.com/app/thread-1",
-      remote_chat_id: "thread-1",
+      remote_chat_url: "https://gemini.google.com/app/1111111111111111",
+      remote_chat_id: "1111111111111111",
     });
 
     const result = relayServer.relaySubmitQuery({

@@ -54,7 +54,7 @@ export const WEBCHAT_TARGETS = [
     modelName: "gemini.google.com",
     hostname: "gemini.google.com",
     displayName: "gemini",
-    conversationPathPattern: /^\/app\/([A-Za-z0-9_-]+)\/?$/,
+    conversationPathPattern: /^\/app\/([a-f0-9]{16})\/?$/,
     answerCapture: "dom",
   },
 ] as const satisfies readonly WebChatTargetEntry[];

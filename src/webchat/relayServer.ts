@@ -831,7 +831,9 @@ function resolveExpectedChatBinding(
       }
       expectedChatId = derivedChatId;
     }
-    if (expectedChatId && !/^[A-Za-z0-9_-]+$/.test(expectedChatId)) {
+    const validIdPattern =
+      targetId === "gemini" ? /^[a-f0-9]{16}$/ : /^[A-Za-z0-9_-]+$/;
+    if (expectedChatId && !validIdPattern.test(expectedChatId)) {
       return {
         expectedChatUrl: null,
         expectedChatId: null,

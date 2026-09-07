@@ -38,12 +38,15 @@ describe("webchat target types", function () {
 
   it("routes only exact HTTPS provider hosts", function () {
     assert.equal(
-      getWebChatTargetByUrl("https://gemini.google.com.com/app/thread-1")?.id,
+      getWebChatTargetByUrl(
+        "https://gemini.google.com.com/app/1111111111111111",
+      )?.id,
       undefined,
     );
     assert.equal(
-      getWebChatTargetByUrl("https://gemini.google.com.evil.test/app/thread-1")
-        ?.id,
+      getWebChatTargetByUrl(
+        "https://gemini.google.com.evil.test/app/1111111111111111",
+      )?.id,
       undefined,
     );
     assert.equal(
@@ -51,22 +54,40 @@ describe("webchat target types", function () {
       undefined,
     );
     assert.equal(
-      getWebChatTargetByUrl("http://gemini.google.com/app/thread-1")?.id,
+      getWebChatTargetByUrl("http://gemini.google.com/app/1111111111111111")
+        ?.id,
       undefined,
     );
     assert.isFalse(
       isWebChatUrlForTarget(
-        "https://www.gemini.google.com/app/thread-1",
+        "https://www.gemini.google.com/app/1111111111111111",
         "gemini",
       ),
     );
     assert.equal(
-      getWebChatTargetByUrl("https://gemini.google.com/app/thread-1")?.id,
+      getWebChatTargetByUrl("https://gemini.google.com/app/1111111111111111")
+        ?.id,
       "gemini",
     );
   });
 
   it("extracts conversation ids only from observed provider paths", function () {
+    for (const id of [
+      "thread-1",
+      "A3BA6A650DC4B726",
+      "a3ba6a650dc4b72",
+      "a3ba6a650dc4b7260",
+      "g3ba6a650dc4b726",
+      "a3ba6a650dc4b72_",
+    ]) {
+      assert.isNull(
+        getWebChatConversationId(
+          `https://gemini.google.com/app/${id}`,
+          "gemini",
+        ),
+        id,
+      );
+    }
     assert.equal(
       getWebChatConversationId(
         "https://gemini.google.com/app/a3ba6a650dc4b726?hl=en",
