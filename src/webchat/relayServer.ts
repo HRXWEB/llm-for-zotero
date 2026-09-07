@@ -777,8 +777,29 @@ function resolveExpectedChatBinding(
     "expected_chat_id",
   );
   if (hasExplicitUrl || hasExplicitId) {
-    const expectedChatUrl = readNullableString(input.expected_chat_url)?.trim();
-    let expectedChatId = readNullableString(input.expected_chat_id)?.trim();
+    const rawExpectedChatUrl = input.expected_chat_url;
+    const rawExpectedChatId = input.expected_chat_id;
+    for (const [label, value] of [
+      ["URL", rawExpectedChatUrl],
+      ["ID", rawExpectedChatId],
+    ] as const) {
+      if (value === null || value === undefined) continue;
+      if (typeof value !== "string" || !value.trim()) {
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error: `WebChat conversation binding ${label} is malformed.`,
+        };
+      }
+    }
+    const expectedChatUrl =
+      typeof rawExpectedChatUrl === "string"
+        ? rawExpectedChatUrl.trim()
+        : undefined;
+    let expectedChatId =
+      typeof rawExpectedChatId === "string"
+        ? rawExpectedChatId.trim()
+        : undefined;
     if (!expectedChatUrl && !expectedChatId) {
       return { expectedChatUrl: null, expectedChatId: null };
     }

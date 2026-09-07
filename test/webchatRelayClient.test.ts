@@ -933,6 +933,47 @@ describe("webchat relay/client", function () {
     assert.isNull(after.query.prompt);
   });
 
+  it("rejects a whitespace-only explicit URL before direct dispatch", function () {
+    const before = relayServer.relayGetStateSnapshot();
+
+    const result = relayServer.relaySubmitQuery({
+      prompt: "must not ignore malformed URL",
+      target: "chatgpt",
+      expected_chat_url: " \t ",
+      expected_chat_id: null,
+      delivery_contract_version:
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    });
+
+    assert.isFalse(result.ok);
+    assert.match(result.error || "", /conversation binding/i);
+    const after = relayServer.relayGetStateSnapshot();
+    assert.equal(after.query.seq, before.query.seq);
+    assert.isNull(after.query.prompt);
+  });
+
+  it("rejects a whitespace-only explicit ID before HTTP dispatch", async function () {
+    const before = relayServer.relayGetStateSnapshot();
+
+    const response = await invokeEndpoint(
+      "/llm-for-zotero/webchat/submit_query",
+      "POST",
+      {
+        prompt: "must not ignore malformed ID",
+        target: "chatgpt",
+        expected_chat_url: null,
+        expected_chat_id: " \n ",
+        delivery_contract_version:
+          relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+      },
+    );
+
+    assert.match(String(response.error), /conversation binding/i);
+    const after = relayServer.relayGetStateSnapshot();
+    assert.equal(after.query.seq, before.query.seq);
+    assert.isNull(after.query.prompt);
+  });
+
   it("clears conversation binding for a forced new chat", async function () {
     relayServer.relayResetForTests();
     await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
