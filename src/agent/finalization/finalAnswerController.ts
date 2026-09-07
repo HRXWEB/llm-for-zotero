@@ -62,7 +62,6 @@ export class AgentFinalAnswerController {
   private webAttributionCorrectionUsed = false;
   private documentCorrectionUsed = false;
   private readonly literatureReviewCorrections = new Set<string>();
-  private paperSourceCheckUsed = false;
 
   constructor(
     private readonly request: AgentRuntimeRequest,
@@ -176,33 +175,6 @@ export class AgentFinalAnswerController {
         };
       }
       return { kind: "fail", userMessage: failure };
-    }
-
-    if (
-      !this.paperSourceCheckUsed &&
-      this.request.conversationKind === "paper" &&
-      !this.request.planContext &&
-      !this.request.documentOutcomePolicy?.required &&
-      !this.request.actionContract?.obligations.some(
-        (obligation) => obligation.operation !== "read_full",
-      )
-    ) {
-      // retrievalIntent describes collection/library retrieval. The router
-      // deliberately sets it to none for ordinary single-paper questions.
-      // Review those answers against their paper evidence too.
-      if (!params.canCorrect) {
-        return {
-          kind: "fail",
-          userMessage:
-            "The paper answer did not finish its source-check before the execution limit. It is not a completed, reviewed answer.",
-        };
-      }
-      this.paperSourceCheckUsed = true;
-      return {
-        kind: "correct",
-        correction:
-          "Perform the final paper-answer source-check on your draft above before publishing. Compare each factual or quantitative claim and interpretive label with the retrieved source evidence, not with earlier assistant prose. Remove unsupported claims; a plausible or explicitly labeled guess is not source evidence. Keep reported values separate from your own calculations, and verify denominators, units and conversions. Do not infer missing task design, baselines, ceilings, significance, or causality. Preserve the distinction between user proposals and paper results. If a claim cannot be checked with preserved evidence, use a targeted read or state the limitation. Return the complete corrected answer (unchanged if already supported), not a review report. This is an internal read-only review: do not create or edit notes or files, and do not ask the user to approve it.",
-      };
     }
 
     const webAttribution = assessWebAttribution(

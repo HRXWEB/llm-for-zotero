@@ -647,70 +647,164 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("source-checks a single-paper draft even when no library-wide retrieval is requested", async function () {
-    const restoreDb = installMockDb();
-    const draft = "Shuffled accuracy of 0.52 is near chance for a binary task.";
-    const corrected =
-      "The paper reports 0.80 intact and 0.52 shuffled accuracy. It supplies neither a class count nor a chance baseline.";
-    let steps = 0;
-    const events: AgentEvent[] = [];
-    try {
-      const runtime = new AgentRuntime({
-        semanticInterpreter: declaredSemanticInterpreter,
-        registry: new AgentToolRegistry(),
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-          supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            steps++;
-            if (steps === 2) {
-              assert.include(JSON.stringify(params.messages), "source-check");
-              assert.include(JSON.stringify(params.messages), draft);
-            }
-            const text = steps === 1 ? draft : corrected;
+  for (const scenario of [
+    {
+      name: "concise paper summary",
+      userText: "List the key points as concise bullet points.",
+      modes: ["overview"],
+      answer:
+        "- Synaptic intelligence protects important parameters.\n- Importance is estimated during training.",
+    },
+    {
+      name: "targeted paper question",
+      userText: "How is parameter importance estimated?",
+      modes: ["overview", "targeted"],
+      answer: "Importance is estimated along the training trajectory.",
+    },
+    {
+      name: "explicit paper claim audit",
+      userText:
+        "Verify whether the paper establishes that 0.52 is chance-level accuracy.",
+      modes: ["targeted"],
+      answer:
+        "The paper reports 0.52 but supplies neither a class count nor a chance baseline. The chance-level claim is unsupported.",
+    },
+  ]) {
+    it(`completes ${scenario.name} without an automatic review or final rollback`, async function () {
+      const restoreDb = installMockDb();
+      const events: AgentEvent[] = [];
+      let steps = 0;
+      const reads: string[] = [];
+      try {
+        const registry = new AgentToolRegistry();
+        registry.register({
+          spec: {
+            name: "paper_read",
+            description: "Read paper evidence",
+            inputSchema: { type: "object" },
+            executionClass: "read",
+            requiresConfirmation: false,
+          },
+          validate: (args) => ({ ok: true, value: args }),
+          execute: async (args) => {
+            const mode = (args as { mode: string }).mode;
+            reads.push(mode);
             return {
-              kind: "final",
-              text,
-              assistantMessage: { role: "assistant", content: text },
+              mode,
+              results: [
+                {
+                  paperContext: { itemId: 3928, contextItemId: 3931 },
+                  chunkIndex: mode === "overview" ? 0 : 1,
+                  text:
+                    mode === "overview"
+                      ? "Synaptic intelligence protects important parameters. Importance is estimated during training."
+                      : "Importance is estimated along the training trajectory. Accuracy is 0.52; no class count or chance baseline is supplied.",
+                },
+              ],
             };
           },
-        }),
-      });
-      const outcome = await runtime.runTurn({
-        request: {
-          conversationKey: 939301,
-          mode: "agent",
-          conversationKind: "paper",
-          libraryID: 1,
-          userText: "Explain the reported decoding comparison.",
-          model: "test-model",
-          apiKey: "test",
-          apiBase: "",
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "none",
-            wantedSections: ["results"],
-            actionIntents: [],
+        });
+        const runtime = new AgentRuntime({
+          semanticInterpreter: declaredSemanticInterpreter,
+          registry,
+          adapterFactory: () => ({
+            getCapabilities: () => ({
+              streaming: true,
+              toolCalls: true,
+              multimodal: false,
+            }),
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              assert.notInclude(
+                JSON.stringify(params.messages),
+                "Perform the final paper-answer source-check",
+              );
+              const mode = scenario.modes[steps++];
+              if (mode) {
+                const call = {
+                  id: `paper-read-${steps}`,
+                  name: "paper_read",
+                  arguments: {
+                    mode,
+                    ...(mode === "targeted"
+                      ? { query: scenario.userText }
+                      : {}),
+                  },
+                };
+                return {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: "",
+                    tool_calls: [call],
+                  },
+                };
+              }
+              assert.equal(
+                steps,
+                scenario.modes.length + 1,
+                "the completed answer must not be retried",
+              );
+              await params.onTextDelta?.(scenario.answer);
+              return {
+                kind: "final",
+                text: scenario.answer,
+                assistantMessage: {
+                  role: "assistant",
+                  content: scenario.answer,
+                },
+              };
+            },
+          }),
+        });
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 939301,
+            mode: "agent",
+            conversationKind: "paper",
+            activeItemId: 3928,
+            libraryID: 1,
+            userText: scenario.userText,
+            model: "test-model",
+            apiKey: "test",
+            apiBase: "",
+            classifiedIntent: {
+              ...classifiedFixture(),
+              semantic: semanticFixture(),
+              retrievalIntent: "none",
+              wantedSections: [],
+              actionIntents: [],
+            },
           },
-        },
-        onEvent: (event) => events.push(event),
-      });
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, corrected);
-      assert.equal(steps, 2);
-      assert.isFalse(
-        events.some((event) => event.type === "confirmation_required"),
-      );
-    } finally {
-      restoreDb();
-    }
-  });
+          onEvent: (event) => events.push(event),
+        });
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(outcome.text, scenario.answer);
+        assert.equal(steps, scenario.modes.length + 1);
+        assert.deepEqual(reads, scenario.modes);
+        assert.equal(
+          events
+            .filter((event) => event.type === "message_delta")
+            .map((event) => event.text)
+            .join(""),
+          scenario.answer,
+        );
+        assert.isFalse(
+          events.some(
+            (event) =>
+              event.type === "message_rollback" ||
+              event.type === "confirmation_required",
+          ),
+        );
+        const trace = await getAgentRunTrace(outcome.runId);
+        assert.equal(trace.run?.finalText, scenario.answer);
+      } finally {
+        restoreDb();
+      }
+    });
+  }
 
   it("falls back when the adapter does not support tools", async function () {
     const restoreDb = installMockDb();
@@ -3295,6 +3389,8 @@ describe("AgentRuntime", function () {
       await initAgentChangeJournal();
       const registry = new AgentToolRegistry(createTestActionContractService());
       let paperReads = 0;
+      let effectExecutions = 0;
+      const events: AgentEvent[] = [];
       registry.register({
         spec: {
           name: "paper_read",
@@ -3362,10 +3458,13 @@ describe("AgentRuntime", function () {
             cancelLabel: "Cancel",
             fields: [],
           }),
-          execute: async () => ({
-            content: { status: "unexpected_execution" },
-            effect: "applied" as const,
-          }),
+          execute: async () => {
+            effectExecutions += 1;
+            return {
+              content: { status: "unexpected_execution" },
+              effect: "applied" as const,
+            };
+          },
         });
       };
       registerBlockedExploration("zotero_script");
@@ -3438,6 +3537,7 @@ describe("AgentRuntime", function () {
       const outcome = await runtime.runTurn({
         request: {
           conversationKey: 2448,
+          conversationKind: "paper",
           mode: "agent",
           userText:
             "How does Overcoming catastrophic forgetting in neural networks prevent forgetting?",
@@ -3455,6 +3555,7 @@ describe("AgentRuntime", function () {
           },
         },
         onEvent: (event) => {
+          events.push(event);
           if (event.type !== "confirmation_required") return;
           confirmations += 1;
           runtime.resolveConfirmation(event.requestId, false);
@@ -3471,6 +3572,8 @@ describe("AgentRuntime", function () {
         1,
         "the identical second read must reuse the turn-local evidence handle",
       );
+      assert.equal(effectExecutions, 0);
+      assert.isFalse(events.some((event) => event.type === "message_rollback"));
       assert.equal(modelSteps, 5, "the substantive final must not be retried");
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
@@ -3907,7 +4010,7 @@ describe("AgentRuntime", function () {
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
       assert.include(outcome.text, "Grounded answer after the full read.");
-      assert.lengthOf(continuationDeltas, 5);
+      assert.lengthOf(continuationDeltas, 4);
       assert.deepEqual(
         continuationDeltas[1].map((message) => message.role),
         ["tool"],
@@ -3930,15 +4033,6 @@ describe("AgentRuntime", function () {
       );
       assert.include(
         JSON.stringify(continuationDeltas[3]),
-        "call-full-read-after-correction",
-      );
-      assert.deepEqual(
-        continuationDeltas[4].map((message) => message.role),
-        ["user"],
-      );
-      assert.include(JSON.stringify(continuationDeltas[4]), "source-check");
-      assert.notInclude(
-        JSON.stringify(continuationDeltas[4]),
         "call-full-read-after-correction",
       );
     } finally {

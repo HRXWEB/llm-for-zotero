@@ -31,58 +31,32 @@ function acceptingActionSession(): AgentFinalActionSession {
 }
 
 describe("AgentFinalAnswerController", function () {
-  it("requires one source check before publishing an evidence-based paper answer", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest({
-        conversationKind: "paper",
-        userText: "Explain the reported decoding comparison.",
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          // Single-paper reads deliberately use none: this field controls
-          // collection/library retrieval, not whether an answer needs evidence.
-          retrievalIntent: "none",
-          wantedSections: ["results"],
-          actionIntents: [],
-        },
-      }),
-      acceptingActionSession(),
-      [],
-    );
-    const records = [
-      {
-        name: "paper_read",
-        ok: true,
-        content: {
-          results: [
-            { text: "Intact accuracy is 0.80; shuffled accuracy is 0.52." },
-          ],
-        },
-      },
-    ];
-    const first = await controller.evaluate({
-      candidateText: "Shuffled accuracy is near chance for a binary task.",
-      canCorrect: true,
-      toolExecutionRecords: records,
+  for (const canCorrect of [true, false]) {
+    it(`accepts the first grounded paper answer with canCorrect=${canCorrect}`, async function () {
+      const controller = new AgentFinalAnswerController(
+        makeRequest({
+          conversationKind: "paper",
+          classifiedIntent: {
+            semantic: semanticFixture(),
+            retrievalIntent: "none",
+            wantedSections: ["results"],
+            actionIntents: [],
+          },
+        }),
+        acceptingActionSession(),
+        [],
+      );
+      const decision = await controller.evaluate({
+        candidateText:
+          "The paper reports 0.80 intact and 0.52 shuffled accuracy. It supplies neither a class count nor a chance baseline.",
+        canCorrect,
+        toolExecutionRecords: [{ name: "paper_read", ok: true }],
+      });
+      assert.equal(decision.kind, "accept");
     });
-    assert.equal(first.kind, "correct");
-    if (first.kind !== "correct") return;
-    assert.include(first.correction, "source-check");
-    assert.include(first.correction, "unsupported");
-    assert.include(first.correction, "do not create");
-    const second = await controller.evaluate({
-      candidateText:
-        "The source gives no class count or chance baseline. Intact accuracy is 0.80 and shuffled accuracy is 0.52.",
-      canCorrect: true,
-      toolExecutionRecords: records,
-    });
-    assert.equal(
-      second.kind,
-      "accept",
-      "one review, not an endless self-review loop",
-    );
-  });
+  }
 
-  it("does not require a paper source-check for a write receipt or a finalized document", async function () {
+  it("accepts completed paper actions and finalized documents", async function () {
     for (const overrides of [
       { actionContract: { obligations: [{ operation: "note_create" }] } },
       { documentOutcomePolicy: { required: true } },
