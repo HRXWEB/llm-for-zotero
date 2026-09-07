@@ -481,7 +481,14 @@ export function persistChatScrollSnapshotForConversationKey(
   ) {
     return;
   }
-  const snapshot = buildChatScrollSnapshot(chatBox);
+  // Content can grow between an automatic scroll and its scroll event.
+  // Persisting geometry must not cancel this panel's established follow intent;
+  // user scrolling and explicit navigation cancel it through their owners.
+  const previous = panelScrollSnapshots.get(chatBox);
+  const snapshot =
+    previous?.key === normalized && previous.snapshot.mode === "followBottom"
+      ? buildFollowBottomScrollSnapshot(chatBox)
+      : buildChatScrollSnapshot(chatBox);
   panelScrollSnapshots.set(chatBox, { key: normalized, snapshot });
   chatScrollSnapshots.set(normalized, snapshot);
 }

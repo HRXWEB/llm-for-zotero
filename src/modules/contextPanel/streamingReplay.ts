@@ -4,6 +4,7 @@ import {
   buildAgentEngineDepsForTests,
   getConversationKey,
   refreshConversationPanels,
+  requestChatScrollFollowBottom,
 } from "./chat";
 import {
   chatHistory,
@@ -28,6 +29,7 @@ export type StreamingReplayResult = {
   progressMutations: number;
   focusPreserved: boolean;
   manualScrollDelta: number;
+  followBottomGap: number;
   exactReasoning: boolean;
   statusVisible: boolean;
   progressUpdatePreserved: boolean;
@@ -204,6 +206,7 @@ export async function exerciseStreamingReplay(
     progressMutations: 0,
     focusPreserved: true,
     manualScrollDelta: 0,
+    followBottomGap: 0,
     exactReasoning: false,
     statusVisible: false,
     progressUpdatePreserved: false,
@@ -326,6 +329,27 @@ export async function exerciseStreamingReplay(
     observer.disconnect();
     Zotero.DB.queryAsync = query;
     for (const restore of restoreGeometry) restore();
+    requestChatScrollFollowBottom(body, item, box);
+    const nextFrame = () =>
+      new Promise<void>((resolve) =>
+        win.requestAnimationFrame(() => resolve()),
+      );
+    await nextFrame();
+    for (let n = 0; n < 12; n++) {
+      await handle({
+        type: "reasoning",
+        round: 1,
+        summary: `Follow expanded thinking ${n}.\n`.repeat(4),
+      });
+      // Deliver the previous automatic scroll's event after new text has
+      // grown, but before the queued animation frame catches up.
+      box.dispatchEvent(new win.Event("scroll"));
+      await nextFrame();
+      result.followBottomGap = Math.max(
+        result.followBottomGap,
+        box.scrollHeight - box.clientHeight - box.scrollTop,
+      );
+    }
     const task = progress.querySelector(
       ".llm-plan-task-list",
     )?.firstElementChild;

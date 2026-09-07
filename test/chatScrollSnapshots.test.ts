@@ -206,6 +206,34 @@ function appendElement(
 }
 
 describe("chat scroll snapshots", function () {
+  it("preserves follow intent when text grows before a pending scroll event", function () {
+    clearChatScrollSnapshotsForTests();
+    const element = makeChatBox({
+      scrollTop: 400,
+      scrollHeight: 1000,
+      clientHeight: 600,
+    });
+    const box = element as unknown as HTMLDivElement;
+    setFollowBottomChatScrollSnapshot(1, box);
+    // One frame follows the text; its scroll event arrives after the next chunk.
+    element.scrollHeight += 20;
+    box.scrollTop = 420;
+    element.scrollHeight += 20;
+    persistChatScrollSnapshotForConversationKey(1, box);
+    assert.equal(getChatScrollSnapshot(1, box)?.mode, "followBottom");
+    restoreChatScrollSnapshotForConversationKey(1, box);
+    assert.equal(box.scrollTop, box.scrollHeight);
+
+    // Explicit user cancellation must still survive subsequent text growth.
+    cancelFollowBottomCatchup(1, box);
+    box.scrollTop = 400;
+    element.scrollHeight += 100;
+    persistChatScrollSnapshotForConversationKey(1, box);
+    assert.equal(getChatScrollSnapshot(1, box)?.mode, "manual");
+    restoreChatScrollSnapshotForConversationKey(1, box);
+    assert.equal(box.scrollTop, 400);
+  });
+
   it("keeps scrolling intent and programmatic-scroll suppression local to each panel", async function () {
     clearChatScrollSnapshotsForTests();
     const a = new FakeElement();

@@ -40,6 +40,11 @@ describe("workflow: streaming responsiveness", function () {
         );
         assert.isTrue(result.focusPreserved);
         assert.closeTo(result.manualScrollDelta, 0, 2);
+        assert.isAtMost(
+          result.followBottomGap,
+          1,
+          "expanded thinking keeps following through delayed scroll events",
+        );
         assert.isTrue(result.exactReasoning);
         assert.isTrue(result.statusVisible);
         assert.equal(result.ledgerReadsDuringText, 0);
