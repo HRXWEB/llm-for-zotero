@@ -1,16 +1,16 @@
+import { decodeActionContract } from "../plans/contracts";
+import { decodeResearchPolicySnapshot } from "./policy";
 import type {
   PaperFinding,
   ResearchCorpusItem,
   ResearchEvidenceRecord,
   ResearchJob,
+  ResearchMutationApprovalGrant,
+  ResearchRecallProbe,
   ResearchScopeSnapshotItem,
   ResearchWorkItem,
   ThemeFinding,
-  ResearchMutationApprovalGrant,
-  ResearchRecallProbe,
 } from "./types";
-import { decodeResearchPolicySnapshot } from "./policy";
-import { decodeActionContract } from "../plans/contracts";
 
 type Row = Record<string, unknown>;
 
@@ -553,14 +553,22 @@ export function decodeResearchMutationApprovalGrant(
   value: unknown,
 ): ResearchMutationApprovalGrant {
   const input = object(value, "research mutation approval grant");
-  if (input.version !== 1 && input.version !== 2) {
+  if (input.version !== 1 && input.version !== 2 && input.version !== 3) {
     throw new Error("Unsupported research mutation approval grant version");
   }
   if (input.status !== "approved" && input.status !== "invalidated") {
     throw new Error("Invalid research mutation approval grant status");
   }
+  if (
+    input.version === 3 &&
+    !["user", "auto_policy", "yolo"].includes(String(input.authority))
+  )
+    throw new Error("Research mutation authority is invalid");
   return {
     version: input.version,
+    ...(input.version === 3
+      ? { authority: input.authority as "user" | "auto_policy" | "yolo" }
+      : {}),
     grantId: string(input.grantId, "grantId"),
     planId: string(input.planId, "planId"),
     planRevision: number(input.planRevision, "planRevision"),
@@ -572,7 +580,7 @@ export function decodeResearchMutationApprovalGrant(
       "researchResultDigest",
     ),
     scopeLineageDigest:
-      input.version === 2
+      input.version >= 2
         ? string(input.scopeLineageDigest, "scopeLineageDigest")
         : undefined,
     targetSetDigest: string(input.targetSetDigest, "targetSetDigest"),

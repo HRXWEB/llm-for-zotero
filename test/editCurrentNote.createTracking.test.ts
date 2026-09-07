@@ -1,9 +1,22 @@
-import { classifiedFixture } from "./helpers/semanticIntent";
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
+import { revertActions } from "../src/agent/services/changeReverter";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import {
+  initAgentChangeJournal,
+  listJournalActions,
+} from "../src/agent/store/changeJournal";
+import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
+import { createRenamedTool } from "../src/agent/tools/facade";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import type { AgentToolContext } from "../src/agent/types";
+import {
+  containsVisualFigureFences,
+  resolveSvgFigureRasterSize,
+} from "../src/modules/contextPanel/figureExport";
 import {
   createAssistantResponseNote,
   createNoteFromChatHistory,
@@ -14,24 +27,13 @@ import {
   getTrackedAssistantNoteForParent,
   rememberAssistantNoteForParent,
 } from "../src/modules/contextPanel/prefHelpers";
-import {
-  containsVisualFigureFences,
-  resolveSvgFigureRasterSize,
-} from "../src/modules/contextPanel/figureExport";
-import type { AgentToolContext } from "../src/agent/types";
-import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { revertActions } from "../src/agent/services/changeReverter";
-import {
-  initAgentChangeJournal,
-  listJournalActions,
-} from "../src/agent/store/changeJournal";
-import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { createRenamedTool } from "../src/agent/tools/facade";
-import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
-import { actionFixture } from "./helpers/semanticIntent";
+import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import {
+  actionFixture,
+  classifiedFixture,
+  semanticFixture,
+} from "./helpers/semanticIntent";
 
 describe("editCurrentNote create tracking", function () {
   it("only defers notes that contain supported visual figure fences", function () {
@@ -516,7 +518,7 @@ describe("editCurrentNote create tracking", function () {
         },
         { ...baseContext, request },
       );
-      assert.equal(execution.kind, "confirmation");
+      assert.equal(execution.kind, mode === "safe" ? "confirmation" : "result");
       if (execution.kind === "confirmation") {
         assert.equal(existing.getNote(), before);
         const field = execution.action.fields.find(
@@ -604,7 +606,7 @@ describe("editCurrentNote create tracking", function () {
         },
         { ...baseContext, request },
       );
-      assert.equal(result.kind, "confirmation");
+      assert.equal(result.kind, mode === "safe" ? "confirmation" : "result");
       if (result.kind === "confirmation") {
         assert.equal(existing.getNote(), before, "review must not write");
         const diff = result.action.fields.find(

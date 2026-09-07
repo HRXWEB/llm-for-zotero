@@ -84,7 +84,7 @@ async function validateResearchMutationGrantInternal(params: {
     );
   }
   if (
-    grant.version === 2 &&
+    grant.version >= 2 &&
     grant.scopeLineageDigest !== job.scopeLineageDigest
   ) {
     throw new Error(
@@ -96,7 +96,7 @@ async function validateResearchMutationGrantInternal(params: {
     (await computeResearchResultDigest({
       job,
       findings,
-      includeScopeLineage: grant.version === 2,
+      includeScopeLineage: grant.version >= 2,
     })) !== grant.researchResultDigest
   ) {
     throw new Error("Research findings changed after mutation approval");

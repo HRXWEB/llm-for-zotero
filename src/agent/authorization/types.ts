@@ -82,7 +82,14 @@ export type AuthorizationDecision =
   | { kind: "confirm"; reason: string }
   | { kind: "block"; reason: string };
 
+export type ActionInteraction = Readonly<{
+  entryPoint: "action_ui" | "conversation";
+  reviewPreference: "default" | "review" | "direct";
+}>;
+
 export type OriginalAuthorizationContext = {
+  /** Resolved by the host from entry point and frozen action intent. */
+  interaction?: ActionInteraction;
   mode: OriginalAgentPermissionMode;
   semantic?: import("../model/semanticDecisions").SemanticIntent;
   constraints?: readonly ActionConstraint[];

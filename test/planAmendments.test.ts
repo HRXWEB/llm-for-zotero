@@ -1444,6 +1444,7 @@ describe("autonomous Plan scope amendments", function () {
       obligations: [
         {
           id: "tag-review",
+          reviewPreference: "default",
           capability: "zotero.tags",
           operation: "apply_tags",
           proofDomain: "zotero_state",

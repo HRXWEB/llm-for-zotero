@@ -1,10 +1,10 @@
+import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
+import { OPERATION_CATALOG } from "../contracts/operationCatalog";
 import { workflowCheckpointEvidence } from "../contracts/workflowCheckpoint";
+import { resolveSkillRequestContext } from "../skills/contextEligibility";
 import type { AgentSkill } from "../skills/skillLoader";
 import type { AgentRuntimeRequest } from "../types";
-import { resolveSkillRequestContext } from "../skills/contextEligibility";
-import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
 import { ACTION_INTENT_RESPONSE_SCHEMA } from "./actionIntent";
-import { OPERATION_CATALOG } from "../contracts/operationCatalog";
 import { SEMANTIC_DECISION_INSTRUCTIONS } from "./semanticDecisions";
 
 function buildRoutingContext(
@@ -88,6 +88,7 @@ export function buildSemanticPrompt(
 
     "Also classify the exact requested action obligations in this Zotero request.",
     "Questions, advice, negation, hypotheticals, and reads have no mutation actions.",
+    "Capture reviewPreference separately for each action: default for ordinary delegated work, review when the user wants to inspect it before application, and direct when they explicitly request no optional confirmation. Model-selected tags, metadata values or collection assignments do not inherently require review. Never change the selected permission mode. A later explicit revision can change this preference; a resume preserves it.",
     "Tag effects are literal: add while preserving old tags is apply_tags, remove specified tags is remove_tags, and replace the old tags with an exact set is set_item_tags. Interpret the complete instruction, including a later clause clarifying replacement.",
     `Available operations: ${Object.keys(OPERATION_CATALOG).join(", ")}.`,
     'A collection move is one atomic move_to_collection obligation with constraints:{"collectionMode":"move"}; it both adds the destination and removes the named source. Do not add a separate remove_from_collection obligation for the same move. Add-only collection filing is move_to_collection without that constraint.',
@@ -106,7 +107,7 @@ export function buildSemanticPrompt(
     "For create_collection, put the new name in parameters.collectionName and an explicitly supplied parent ID in parameters.parentCollectionId; if only the parent name is given, scope.path identifies that existing parent, never the new collection. For a later filing into that new collection, encode destinationFrom as the earlier create_collection action index. Keep any source folder in source scope. The host binds the action reference to the verified creation receipt. Never put an action index or a placeholder zero in destinationCollectionId.",
     'Use parameters only for requested values: tags:string[], metadataFields:string[], metadataValues:object, targetNoteId:number, targetItemId:number, noteMode:"create|edit|append", destinationCollectionId:number, sourceCollectionId:number, collectionId:number, collectionName:string, parentCollectionId:number|null, deleteItems:boolean, filePath:string. For explicitly supplied metadata values, preserve every exact field and value in metadataValues; field names alone do not bind their requested values. Represent native text fields as strings and creators as their structured array. Do not invent values for an evidence-enrichment request. Tags are only the desired tag values, never quoted paper titles or collection names. Omit unspecified values.',
 
-    "When a note is open and the user requests rewriting, polishing, shortening, translating, or otherwise editing its selected text, require note_edit targeting that note. The host presents a diff for review before applying it in every permission mode. Explaining a selection is a read; rewriting it is an edit proposal.",
+    "When a note is open and the user requests rewriting, polishing, shortening, translating, or otherwise editing its selected text, require note_edit targeting that note. Auto applies clear edits and then shows the verified diff. Set reviewPreference:review on this action only if the user wants to inspect changes before applying; direct for explicit just-do-it instructions; otherwise default. Safe retains its mode policy. Explaining a selection is a read; rewriting it is an edit proposal.",
     `Active note context: ${JSON.stringify(request.activeNoteContext ? { noteId: request.activeNoteContext.noteId, title: request.activeNoteContext.title, noteKind: request.activeNoteContext.noteKind } : null)}`,
     `Selected text: ${JSON.stringify((request.selectedTexts || []).map((text, index) => ({ source: request.selectedTextSources?.[index], text })))}`,
 

@@ -1,11 +1,11 @@
-import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { actionFixture, actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
+import { actionContractFixture, actionFixture } from "./helpers/semanticIntent";
 
 /**
  * The mode is enforced at `prepareExecution` — the one point the in-plugin
@@ -120,8 +120,8 @@ describe("Original Agent permission gate", function () {
     const prepared = await registry.prepareExecution(call, context, {
       callerKind: "action",
     });
-    assert.equal(prepared.kind, "result");
-    assert.isTrue(didRun());
+    assert.equal(prepared.kind, "confirmation");
+    assert.isFalse(didRun(), "slash review must precede any write");
   });
 
   it("defaults an undeclared caller to the stricter treatment", async function () {

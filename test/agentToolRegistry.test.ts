@@ -1,11 +1,4 @@
-import { actionFixture } from "./helpers/semanticIntent";
-import { semanticContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
-import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
-import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import {
   prohibitedInvocationPlan,
   readOnlyInvocationPlan,
@@ -13,6 +6,15 @@ import {
 } from "../src/agent/authorization/invocationPlan";
 import { buildActionCallDigest } from "../src/agent/authorization/proposal";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
+import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
+import {
+  actionFixture,
+  semanticContractFixture,
+} from "./helpers/semanticIntent";
 
 const describeTestMutation = () => [
   {
@@ -56,6 +58,75 @@ describe("AgentToolRegistry", function () {
     currentAnswerText: "",
     modelName: "gpt-4o-mini",
   };
+
+  for (const mode of ["safe", "auto", "yolo"] as const) {
+    for (const entryPoint of ["action_ui", "conversation"] as const) {
+      for (const preference of ["default", "review", "direct"] as const) {
+        it(`${mode}/${entryPoint}/${preference}: counts required confirmations before a native effect`, async function () {
+          globalThis.Zotero = {
+            DB: new ChangeJournalTestDb(),
+            Prefs: { get: () => mode },
+            debug: () => undefined,
+          } as never;
+          await initAgentChangeJournal();
+          const registry = new AgentToolRegistry(
+            new ActionContractService({} as never),
+          );
+          let writes = 0,
+            confirmations = 0;
+          registry.register({
+            spec: {
+              name: "interaction_write",
+              description: "fixture",
+              inputSchema: { type: "object" },
+              executionClass: "external_effect",
+              requiresConfirmation: true,
+            },
+            validate: (args) => ({ ok: true, value: args }),
+            describeAction: describeTestMutation,
+            planInvocation: () =>
+              stateChangeInvocationPlan({
+                domains: ["zotero_library"],
+                effects: ["modify"],
+                reason: "Apply exact requested setting",
+              }),
+            execute: async () => {
+              writes++;
+              return { content: { changed: true }, effect: "applied" };
+            },
+          });
+          const request = JSON.parse(JSON.stringify(baseContext.request));
+          request.actionEntryPoint = entryPoint;
+          request.actionContract.obligations[0].reviewPreference = preference;
+          let prepared = await registry.prepareExecution(
+            {
+              id: "matrix",
+              name: "interaction_write",
+              arguments: {
+                actionEntryPoint: "action_ui",
+                reviewPreference: "direct",
+              },
+            },
+            { ...baseContext, request },
+          );
+          const expected =
+            entryPoint === "action_ui" ||
+            preference === "review" ||
+            mode === "safe"
+              ? 1
+              : 0;
+          if (prepared.kind === "confirmation") {
+            confirmations++;
+            assert.equal(writes, 0);
+            prepared = await prepared.execute({ approved: true });
+          }
+          assert.equal(confirmations, expected);
+          assert.equal(prepared.kind, "result");
+          assert.equal(writes, 1);
+        });
+      }
+    }
+  }
 
   it("persists MCP proposal authority before allowing a native effect", async function () {
     globalThis.Zotero = {
@@ -115,6 +186,67 @@ describe("AgentToolRegistry", function () {
     assert.equal(prepared.kind, "result");
     if (prepared.kind === "result")
       assert.isFalse(prepared.execution.result.ok);
+  });
+
+  it("does not execute a changed Auto payload using the earlier persisted grant", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "auto" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
+    let targets = ["setting:original"],
+      writes = 0;
+    registry.register({
+      spec: {
+        name: "changing_settings",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      describeAction: describeTestMutation,
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["settings"],
+          targets,
+          reason: "Change requested settings",
+        }),
+      execute: async () => {
+        writes++;
+        return { content: {}, effect: "applied" };
+      },
+    });
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const result = await registry.prepareExecution(
+      { id: "changing", name: "changing_settings", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "exact-auto",
+        checkpointActionProgress: async () => {
+          targets = ["setting:different"];
+        },
+      },
+    );
+    assert.equal(writes, 0);
+    assert.equal(
+      result.kind,
+      "result",
+      "state drift returns a corrective result, not a permission prompt",
+    );
+    if (result.kind === "result") assert.isFalse(result.execution.result.ok);
+    assert.equal(
+      request.actionProgress.authorizationGrants[0].status,
+      "failed",
+    );
   });
 
   function createSchemaTool(params: {
@@ -312,6 +444,7 @@ describe("AgentToolRegistry", function () {
       obligations: [
         {
           id: "tags",
+          reviewPreference: "default",
           operation: "apply_tags",
           capability: "zotero.tags",
           proofDomain: "zotero_state",
@@ -935,7 +1068,11 @@ describe("AgentToolRegistry", function () {
 
     const execution = await expanded.execute({ approved: true });
     assert.equal(execution.kind, "result");
-    assert.equal(planCalls, 2);
+    assert.equal(
+      planCalls,
+      4,
+      "reassess current state at review and execution boundaries",
+    );
     assert.deepEqual(executedTargets, ["/tmp/b.md"]);
     if (execution.kind !== "result") return;
     assert.deepEqual(execution.execution.result.content, {

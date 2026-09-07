@@ -3,18 +3,18 @@
  * Keeps one master item and merges children (attachments, notes, tags,
  * collections, related links) from duplicates into it, then trashes the rest.
  */
-import type { AgentWriteToolDefinition } from "../../types";
 import {
   LibraryMutationService,
   type MergeItemsOperation,
 } from "../../services/libraryMutationService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type { AgentWriteToolDefinition } from "../../types";
 import {
-  ok,
   fail,
-  validateObject,
   normalizePositiveInt,
   normalizePositiveIntArray,
+  ok,
+  validateObject,
 } from "../shared";
 import {
   executeAndRecordUndo,
@@ -166,7 +166,7 @@ export function createMergeItemsTool(
         resolutionData,
         DUPLICATES_CHECKLIST_FIELD_ID,
       );
-      // No resolution — auto_approve / non-HITL path.
+      // No resolution — automatic / non-HITL path.
       if (selected === undefined) {
         return ok(input);
       }

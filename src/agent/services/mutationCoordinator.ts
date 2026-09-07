@@ -626,6 +626,8 @@ export async function executeExternalMutation<T>(params: {
           : undefined,
       }).catch(() => undefined);
     }
+    if (actionId && error instanceof Error)
+      Object.assign(error, { journalActionId: actionId });
     throw error;
   }
 }

@@ -2,36 +2,57 @@ import { assert } from "chai";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  OPERATION_CATALOG,
+  operationAuthorityIsConsistent,
+} from "../src/agent/contracts/operationCatalog";
+import type { AgentActionContract } from "../src/agent/contracts/types";
+import { decodePlanDocument } from "../src/agent/documents/decoders";
+import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import {
   decodeActionContract,
   decodePlanContract,
 } from "../src/agent/plans/contracts";
-import { decodePlanDocument } from "../src/agent/documents/decoders";
-import {
-  decodePaperFinding,
-  decodeResearchCorpusItem,
-  decodeResearchJob,
-} from "../src/agent/research/decoders";
-import {
-  decodePlanArtifact,
-  decodeTaskEvidence,
-} from "../src/agent/plans/decoders";
-import { extractVerifiedReadSources } from "../src/agent/plans/readEvidence";
-import {
-  resolveResearchPolicy,
-  shouldCheckpointResearchExpansion,
-} from "../src/agent/research/policy";
-import {
-  scoreResearchEvaluation,
-  type ResearchEvaluationCase,
-} from "../src/agent/research/evaluation";
 import {
   assertTaskCompletionEvidence,
   canonicalizePlanResearchEvidenceDepth,
   canonicalizePlanVerifierOwnership,
   resolvePreResearchActionContract,
 } from "../src/agent/plans/coordinator";
-import type { AgentActionContract } from "../src/agent/contracts/types";
-import { createSubmitPlanDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import {
+  decodePlanArtifact,
+  decodeTaskEvidence,
+} from "../src/agent/plans/decoders";
+import { extractVerifiedReadSources } from "../src/agent/plans/readEvidence";
+import {
+  buildPlanFinalCorrection,
+  shouldOfferPlanFinalCorrection,
+} from "../src/agent/plans/runSession";
+import { listExecutionTaskEvidence } from "../src/agent/plans/store";
+import type {
+  ExecutionTask,
+  TaskEvidence,
+  TrustedReadObservation,
+} from "../src/agent/plans/types";
+import {
+  decodePaperFinding,
+  decodeResearchCorpusItem,
+  decodeResearchJob,
+} from "../src/agent/research/decoders";
+import {
+  scoreResearchEvaluation,
+  type ResearchEvaluationCase,
+} from "../src/agent/research/evaluation";
+import {
+  resolveResearchPolicy,
+  shouldCheckpointResearchExpansion,
+} from "../src/agent/research/policy";
+import {
+  buildAdaptiveScreeningBatch,
+  buildExcludedScreeningFinding,
+  type ScreeningBatchPaper,
+} from "../src/agent/research/screeningBatch";
+import { interruptResearchExecution } from "../src/agent/research/store";
+import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import {
   createResearchUpdateTool,
   getTerminalScreeningDecisionError,
@@ -40,30 +61,9 @@ import {
   selectPreferredReadingAttachment,
   selectPreferredVerifiedReads,
 } from "../src/agent/tools/plan/researchUpdate";
-import {
-  buildExcludedScreeningFinding,
-  buildAdaptiveScreeningBatch,
-  type ScreeningBatchPaper,
-} from "../src/agent/research/screeningBatch";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
+import { createSubmitPlanDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
 import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
-import {
-  buildPlanFinalCorrection,
-  shouldOfferPlanFinalCorrection,
-} from "../src/agent/plans/runSession";
-import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import type {
-  ExecutionTask,
-  TaskEvidence,
-  TrustedReadObservation,
-} from "../src/agent/plans/types";
-import {
-  OPERATION_CATALOG,
-  operationAuthorityIsConsistent,
-} from "../src/agent/contracts/operationCatalog";
-import { interruptResearchExecution } from "../src/agent/research/store";
-import { listExecutionTaskEvidence } from "../src/agent/plans/store";
-import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const policy = resolveResearchPolicy("plan_research");
@@ -90,6 +90,38 @@ function investigation() {
 }
 
 describe("Plan Mode research architecture v3", function () {
+  it("rejects stage overrides on every record or read operation", function () {
+    const tool = createResearchUpdateTool({} as ZoteroGateway);
+    for (const operation of [
+      "inventory_scope",
+      "next_screen_batch",
+      "list_verified_reads",
+      "list_findings",
+      "list_themes",
+      "record_papers",
+      "record_probes",
+      "record_themes",
+      "finalize",
+    ]) {
+      const result = tool.validate({
+        operation,
+        stage: "recall_expansion",
+        papers: [{}],
+        probes: [],
+        themes: [],
+        outcome: "partial",
+      });
+      assert.isFalse(
+        result.ok,
+        `${operation} must not accept a stage override`,
+      );
+    }
+    assert.isFalse(tool.validate({ operation: "set_stage" }).ok);
+    assert.isTrue(
+      tool.validate({ operation: "set_stage", stage: "broad_screening" }).ok,
+    );
+  });
+
   it("explains terminal screening contradictions when papers are recorded", function () {
     const criteria = [
       {

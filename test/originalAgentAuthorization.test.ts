@@ -1,13 +1,13 @@
 import { assert } from "chai";
 import {
+  readOnlyInvocationPlan,
+  stateChangeInvocationPlan,
+} from "../src/agent/authorization/invocationPlan";
+import {
   authorizeOriginalAction,
   normalizeStoredActionConstraints,
 } from "../src/agent/authorization/policy";
 import { buildActionProposal } from "../src/agent/authorization/proposal";
-import {
-  readOnlyInvocationPlan,
-  stateChangeInvocationPlan,
-} from "../src/agent/authorization/invocationPlan";
 import type {
   ActionConstraint,
   ActionProposal,
@@ -176,13 +176,13 @@ describe("central authorization from semantic authority", function () {
         "block",
       );
     });
-    it(`${mode}: keeps existing-note review and requested creation policy`, function () {
+    it(`${mode}: uses mode policy for existing notes and preserves requested creation`, function () {
       assert.equal(
         authorizeOriginalAction(
           action("note_edit", { capability: "zotero.notes" }),
           { mode, constraints: [noNotes], hasMatchingActionIntent: true },
         ).kind,
-        "confirm",
+        mode === "safe" ? "confirm" : "execute",
       );
       assert.deepEqual(
         authorizeOriginalAction(
@@ -275,4 +275,58 @@ describe("central authorization from semantic authority", function () {
       ],
     );
   });
+});
+
+describe("action interaction contract", function () {
+  for (const mode of ["safe", "auto", "yolo"] as const) {
+    for (const operation of [
+      "apply_tags",
+      "note_edit",
+      "note_append",
+      "update_metadata",
+      "move_to_collection",
+      "import_identifiers",
+    ]) {
+      it(`${mode}: preserves intentional review for ${operation}`, function () {
+        for (const interaction of [
+          { entryPoint: "action_ui", reviewPreference: "default" },
+          { entryPoint: "conversation", reviewPreference: "review" },
+        ] as const) {
+          assert.equal(
+            authorizeOriginalAction(action(operation), {
+              mode,
+              hasMatchingActionIntent: true,
+              interaction,
+            }).kind,
+            "confirm",
+          );
+        }
+      });
+      it(`${mode}: direct preference respects mode for ${operation}`, function () {
+        assert.equal(
+          authorizeOriginalAction(action(operation), {
+            mode,
+            hasMatchingActionIntent: true,
+            interaction: {
+              entryPoint: "conversation",
+              reviewPreference: "direct",
+            },
+          }).kind,
+          mode === "safe" ? "confirm" : "execute",
+        );
+      });
+    }
+    it(`${mode}: requested review does not pause supporting reads`, function () {
+      assert.equal(
+        authorizeOriginalAction(action("read", { read: true }), {
+          mode,
+          interaction: {
+            entryPoint: "conversation",
+            reviewPreference: "review",
+          },
+        }).kind,
+        "execute",
+      );
+    });
+  }
 });

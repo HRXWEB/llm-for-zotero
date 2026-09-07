@@ -1,19 +1,33 @@
-import type { ModelProviderAuthMode } from "../utils/modelProviders";
-import type { ProviderProtocol } from "../utils/providerProtocol";
+import type { ContextCachePlan } from "../contextCache/manager";
+import type { ZoteroTurnMetadataContext } from "../services/zoteroMetadata/types";
 import type {
-  AdvancedModelParams,
+  ChatMessage,
+  ReasoningConfig as LLMReasoningConfig,
+  UsageStats,
+} from "../shared/llm";
+import type {
   ActiveNoteContext,
+  AdvancedModelParams,
   ChatAttachment,
   CollectionContextRef,
+  LocalDocumentResource,
   NoteContextRef,
   PaperContentSourceMode,
   PaperContextRef,
-  LocalDocumentResource,
   ResolvedSelectedTextAnchor,
   SelectedTextContext,
   SelectedTextSource,
   TagContextRef,
 } from "../shared/types";
+import type { ModelProviderAuthMode } from "../utils/modelProviders";
+import type { ProviderProtocol } from "../utils/providerProtocol";
+import type { WebSourceAnchor } from "../webAccess/types";
+import type {
+  ActionDomain,
+  ActionEffect,
+  ActionMechanism,
+  ActionRiskSignal,
+} from "./authorization/types";
 import type {
   ResolvedTurnSelectedTextAnchor,
   ResolvedTurnSelectedTextContext,
@@ -21,14 +35,6 @@ import type {
   TurnPaperScope,
   TurnPaperScopeWarning,
 } from "./context/turnPaperScope";
-import type { WebSourceAnchor } from "../webAccess/types";
-import type {
-  ChatMessage,
-  ReasoningConfig as LLMReasoningConfig,
-  UsageStats,
-} from "../shared/llm";
-import type { ContextCachePlan } from "../contextCache/manager";
-import type { ZoteroTurnMetadataContext } from "../services/zoteroMetadata/types";
 import type {
   AgentActionContract,
   AgentActionEvidence,
@@ -43,12 +49,6 @@ import type {
   TrustedReadObservation,
 } from "./plans/types";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
-import type {
-  ActionDomain,
-  ActionEffect,
-  ActionMechanism,
-  ActionRiskSignal,
-} from "./authorization/types";
 
 export type {
   ApprovedPlanGrant,
@@ -77,8 +77,8 @@ export type {
   AgentActionObligation,
   AgentActionOperation,
   AgentActionParameters,
-  AgentActionProofDomain,
   AgentActionProgressLedger,
+  AgentActionProofDomain,
   AgentActionProposal,
   AgentActionReceipt,
   AgentToolActionDescriptor,
@@ -670,6 +670,8 @@ export type ClassifiedTurnIntent = {
 };
 
 export type AgentRuntimeRequestInput = AgentRequest & {
+  /** Set by the host entry point, never by model tool arguments. */
+  actionEntryPoint?: "action_ui" | "conversation";
   /** Generation captured when this turn started; Clear advances it. */
   conversationGeneration?: number;
   /** Set by the runtime after per-turn classification; absent on fallback. */
@@ -926,6 +928,21 @@ export type AgentJournalActionScope = {
 };
 
 export type AgentToolContext = {
+  /** Retain native-verified child results when a prepared workflow coordinates tools. */
+  recordChildExecution?: (result: AgentToolResult) => void;
+  /** Host-only execution lifetime carried into child action invocations. */
+  nestedExecutionOptions?: Pick<
+    PreparedToolExecutionOptions,
+    "isExecutionAllowed" | "executeWithLock"
+  >;
+  /** Existing pending-action surface, for bounded host-prepared selection cards. */
+  requestActionReview?: (
+    action: AgentPendingAction,
+  ) => Promise<AgentConfirmationResolution>;
+  /** Resolve a host-prepared action through the existing pending-action channel. */
+  resolvePreparedAction?: (
+    prepared: PreparedToolExecution,
+  ) => Promise<PreparedToolExecutionResult>;
   request: AgentRuntimeRequest;
   /** Durable identity of the execution that owns any journalled writes. */
   runId?: string;
@@ -936,6 +953,14 @@ export type AgentToolContext = {
   resourceSignature?: string;
   /** Exact authoritative plan prepared by the registry for this execution. */
   invocationPlan?: AgentInvocationPlan;
+  /** Exact authority set by the execution controller after review or policy assessment. */
+  executionAuthority?:
+    | "user"
+    | "safe_read"
+    | "requested_note"
+    | "auto_policy"
+    | "yolo"
+    | "plan_approval";
   signal?: AbortSignal;
   /**
    * Internal consent witness used only when journal initialization failed.
@@ -1002,7 +1027,20 @@ export type AgentSavedNoteResultCard = {
   note: { itemId: number; libraryID: number; key: string };
 };
 
+export type AgentNoteChangeResultCard = {
+  kind: "note_change";
+  title: string;
+  description: string;
+  note: { itemId: number; libraryID: number; key: string };
+  conversationKey: number;
+  actionId: string;
+  state: "proposed" | "applied" | "failed" | "undone" | "no_op";
+  before: import("./store/journalRecoveryBlobStore").RecoveryPayload;
+  after: import("./store/journalRecoveryBlobStore").RecoveryPayload;
+};
+
 export type AgentToolResultCard =
+  | AgentNoteChangeResultCard
   | AgentSavedNoteResultCard
   | {
       kind?: "paper";

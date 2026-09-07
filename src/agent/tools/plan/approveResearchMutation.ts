@@ -1,8 +1,3 @@
-import type {
-  AgentPendingAction,
-  AgentToolDefinition,
-  AgentToolInputValidation,
-} from "../../types";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import type {
   AgentActionCapability,
@@ -11,20 +6,27 @@ import type {
   AgentActionParameters,
   AgentActionProgressLedger,
 } from "../../contracts/types";
+import { decodeActionContract } from "../../plans/contracts";
+import { planExecutionCoordinator } from "../../plans/coordinator";
 import { loadPlanArtifact } from "../../plans/store";
+import {
+  computeResearchResultDigest,
+  computeResearchTargetSetDigest,
+  researchMutationDigest,
+} from "../../research/mutationApproval";
+import { researchMutationAuthorization } from "../../research/mutationAuthorization";
+import { commitResearchRecords } from "../../research/stages";
 import {
   listPaperFindings,
   loadResearchJobForExecution,
   saveResearchMutationApprovalGrant,
 } from "../../research/store";
 import type { ResearchMutationApprovalGrant } from "../../research/types";
-import { planExecutionCoordinator } from "../../plans/coordinator";
-import { decodeActionContract } from "../../plans/contracts";
-import {
-  computeResearchResultDigest,
-  computeResearchTargetSetDigest,
-  researchMutationDigest,
-} from "../../research/mutationApproval";
+import type {
+  AgentPendingAction,
+  AgentToolDefinition,
+  AgentToolInputValidation,
+} from "../../types";
 import { fail, ok, validateObject } from "../shared";
 
 type StableItemTarget = { libraryID: number; itemKey: string };
@@ -280,7 +282,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
     guidance: {
       matches: (request) => request.planContext?.phase === "executing",
       instruction:
-        "If the approved contract declares effects.libraryMutation.approval='after_research', do not call any Zotero write tool until research is terminal and approve_research_mutation has shown the exact operation/target preview. Targets use stable libraryID/itemKey pairs from paper findings. After approval, use only write calls covered by the returned frozen action contract. If the user skips the changes, mark only the mutation task skipped and preserve the research document.",
+        "If the approved contract declares effects.libraryMutation.approval='after_research', do not call any Zotero write tool until research is terminal and approve_research_mutation has frozen and authorized the exact operations and targets under central mode policy. Targets use stable libraryID/itemKey pairs from paper findings. After authorization, use only write calls covered by the returned frozen action contract. If the user skips the changes, mark only the mutation task skipped and preserve the research document.",
     },
     validate: validateInput,
     planInvocation: () =>
@@ -288,7 +290,28 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
         reason:
           "This confirmation records a plan decision without mutating Zotero.",
       }),
-    shouldRequireConfirmation: () => true,
+    shouldRequireConfirmation: async (input, context) => {
+      const plan = context.request.planContext;
+      if (plan?.phase !== "executing")
+        throw new Error("Research mutation approval requires plan execution");
+      const artifact = await loadPlanArtifact(plan.planId, plan.revision);
+      const mutation = artifact?.contract?.effects?.libraryMutation;
+      if (
+        !artifact ||
+        artifact.digest !== plan.approvedDigest ||
+        mutation?.approval !== "after_research"
+      )
+        throw new Error(
+          "The approved research mutation intent is unavailable.",
+        );
+      const decision = researchMutationAuthorization({
+        context,
+        intents: mutation.intent.intents,
+        operations: input.operations,
+      });
+      if (decision.kind === "block") throw new Error(decision.reason);
+      return decision.kind === "confirm";
+    },
     createPendingAction: (input) => pendingAction(input),
     execute: async (input, context) => {
       const plan = context.request.planContext;
@@ -319,6 +342,16 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
         );
       }
       const allowedIntents = mutation.intent.intents;
+      const decision = researchMutationAuthorization({
+        context,
+        intents: allowedIntents,
+        operations: input.operations,
+      });
+      if (decision.kind === "block") throw new Error(decision.reason);
+      if (decision.kind === "confirm" && context.executionAuthority !== "user")
+        throw new Error(
+          "These exact research-selected changes require review before granting authority.",
+        );
       const findings = await listPaperFindings(job.researchJobId);
       const findingKeys = new Set(
         findings.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
@@ -381,6 +414,9 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
           proofDomain: "zotero_state",
           coverage: "all",
           targetKind: "papers",
+          reviewPreference: allowedIntents.find(
+            (intent) => intent.operation === operation.operation,
+          )?.reviewPreference,
           parameters: operation.parameters,
           targetBoundary: {
             kind: "selection",
@@ -400,7 +436,10 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
       });
       const contractId = `research-action:${plan.executionId}:${targetSetDigest.slice(-16)}`;
       const actionContract: AgentActionContract = {
-        version: 3,
+        version: context.request.classifiedIntent?.semantic ? 4 : 3,
+        intent: context.request.classifiedIntent?.semantic
+          ? { ...context.request.classifiedIntent, actionIntents: obligations }
+          : undefined,
         id: contractId,
         writeDisposition: "required",
         interpretationSource: "deterministic_fallback",
@@ -408,7 +447,13 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
       };
       const approvedAt = Date.now();
       const grant: ResearchMutationApprovalGrant = {
-        version: 2,
+        version: 3,
+        authority:
+          context.executionAuthority === "user"
+            ? "user"
+            : decision.kind === "execute" && decision.authority === "yolo"
+              ? "yolo"
+              : "auto_policy",
         grantId: `${contractId}:grant`,
         planId: artifact.planId,
         planRevision: artifact.revision,
@@ -422,7 +467,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
         status: "approved",
         approvedAt,
       };
-      await Zotero.DB.executeTransaction(async () => {
+      await commitResearchRecords(job, async () => {
         await saveResearchMutationApprovalGrant(grant);
         await planExecutionCoordinator.bindResearchDerivedActionContract({
           executionId: plan.executionId,

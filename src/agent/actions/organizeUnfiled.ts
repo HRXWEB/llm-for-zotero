@@ -1,13 +1,18 @@
+import { innermostToolResult } from "../contracts/toolResultEnvelope";
 import type {
-  AgentAction,
-  ActionExecutionContext,
-  ActionResult,
-} from "./types";
+  CollectionSummary,
+  LibraryItemTarget,
+} from "../services/zoteroGateway";
 import { callTool } from "./executor";
 import {
+  callActionLlm,
+  collectActionLlmBatchResults,
+  extractJsonArray,
+} from "./llmBatchHelpers";
+import {
   formatActionPageLabel,
-  getPagedActionOptionsForStartOffset,
   getPagedActionOptions,
+  getPagedActionOptionsForStartOffset,
   getPagedActionPageCursorForOffset,
   getPagedActionPages,
   getPagedOperationId,
@@ -18,15 +23,11 @@ import {
   readToolResultError,
   type PagedActionInput,
 } from "./pagedWorkflow";
-import {
-  callActionLlm,
-  collectActionLlmBatchResults,
-  extractJsonArray,
-} from "./llmBatchHelpers";
 import type {
-  CollectionSummary,
-  LibraryItemTarget,
-} from "../services/zoteroGateway";
+  ActionExecutionContext,
+  ActionResult,
+  AgentAction,
+} from "./types";
 
 type OrganizeUnfiledInput = PagedActionInput & {
   userQuery?: string;
@@ -241,10 +242,10 @@ export const organizeUnfiledAction: AgentAction<
       });
 
       // Under native_ui an item with no confident suggestion becomes a blank
-      // row the user can fill in. Under auto_approve there is nobody to fill
+      // row the user can fill in. Under automatic there is nobody to fill
       // it in, so it is dropped — but it must be *reported*, not silently
       // vanish from a run the user is not watching.
-      const includeManualRows = ctx.confirmationMode !== "auto_approve";
+      const includeManualRows = ctx.confirmationMode !== "automatic";
       const unmatched: number[] = [];
       const assignments = page.items.flatMap((item) => {
         const suggestedId = suggestionsByItemId.get(item.itemId);
@@ -352,10 +353,7 @@ export const organizeUnfiledAction: AgentAction<
         break;
       }
 
-      const mutateContent = mutateResult.content as Record<string, unknown>;
-      const resultObj = mutateContent.result as
-        | Record<string, unknown>
-        | undefined;
+      const resultObj = innermostToolResult(mutateResult.content);
       const movedCount =
         mutateResult.ok && resultObj
           ? Number(resultObj.addedCount || 0) +

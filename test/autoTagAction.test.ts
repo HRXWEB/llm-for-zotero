@@ -1,14 +1,14 @@
 import { assert } from "chai";
-import { autoTagAction } from "../src/agent/actions/autoTag";
 import type { ActionExecutionContext } from "../src/agent/actions";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { autoTagAction } from "../src/agent/actions/autoTag";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type {
   AgentToolDefinition,
   AgentToolInputValidation,
 } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 function createStubTool<TInput extends Record<string, unknown>, TResult>(
   spec: AgentToolDefinition<TInput, TResult>["spec"],
@@ -246,7 +246,7 @@ describe("autoTag action", function () {
       ),
     );
     const { ctx } = createActionContext(registry, {
-      confirmationMode: "auto_approve",
+      confirmationMode: "automatic",
       checkpoint: async (checkpoint) => {
         checkpoints.push(checkpoint);
       },

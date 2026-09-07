@@ -170,12 +170,12 @@ describe("workflow: native source-note copy", function () {
       );
       assert.equal(
         edit.kind,
-        "confirmation",
-        "Auto edits require note diff review",
+        "result",
+        "Auto must emit zero routine note confirmation events",
       );
-      if (edit.kind !== "confirmation") return;
-      assert.equal(copied.getNote(), copiedBefore);
-      const applied = await edit.execute({ approved: true });
+      if (edit.kind !== "result")
+        throw new Error("Unexpected Auto confirmation");
+      const applied = edit;
       assert.equal(applied.kind, "result");
       if (applied.kind !== "result") return;
       await copied.reload(undefined, true);

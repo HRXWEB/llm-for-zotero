@@ -1,8 +1,8 @@
+import type { ActionConstraint } from "../authorization/types";
 import type {
   LibraryMutationOperation,
   LibraryMutationState,
 } from "../services/libraryMutation/contracts";
-import type { ActionConstraint } from "../authorization/types";
 
 export type AgentActionCapability =
   | "zotero.read"
@@ -84,6 +84,8 @@ export type AgentActionParameters = {
 };
 
 export type AgentActionIntent = {
+  /** Semantic preference for this action, frozen with its intent revision. */
+  reviewPreference?: "default" | "review" | "direct";
   /** Zero-based indexes into the frozen action list. */
   dependsOn?: number[];
   /** Index of the create_collection action that supplies a future destination. */
@@ -184,6 +186,8 @@ export type AgentActionProgressLedger = {
   appliedReceiptKeys: string[];
   materialOutputs?: import("./workflowDependencies").MaterialOutputReceipt[];
   authorizationGrants?: Array<{
+    version?: 2;
+    interaction?: import("../authorization/types").ActionInteraction;
     proposalDigest: string;
     toolName: string;
     authority: "safe_confirmation" | "auto_policy" | "yolo" | "plan_approval";

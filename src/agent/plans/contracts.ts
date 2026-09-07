@@ -1,7 +1,12 @@
-import { isActionIndexList } from "../contracts/workflowDependencies";
-import { parseActionIntents } from "../model/actionIntent";
-import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
-import { decodeStoredSemanticIntent } from "../model/semanticIntentSchema";
+import type {
+  ActionConstraint,
+  ActionDomain,
+  ActionEffect,
+} from "../authorization/types";
+import {
+  ACTION_CAPABILITIES,
+  operationCatalogEntry,
+} from "../contracts/operationCatalog";
 import type {
   AgentActionCapability,
   AgentActionContract,
@@ -11,16 +16,10 @@ import type {
   AgentActionProofDomain,
   AgentActionReceipt,
 } from "../contracts/types";
-import {
-  ACTION_CAPABILITIES,
-  operationCatalogEntry,
-} from "../contracts/operationCatalog";
-import type {
-  ActionConstraint,
-  ActionDomain,
-  ActionEffect,
-} from "../authorization/types";
+import { isActionIndexList } from "../contracts/workflowDependencies";
 import type { DocumentSpec } from "../documents/types";
+import { parseActionIntents } from "../model/actionIntent";
+import { decodeStoredSemanticIntent } from "../model/semanticIntentSchema";
 import {
   decodeResearchPolicySnapshot,
   resolveResearchPolicy,
@@ -31,6 +30,7 @@ import type {
   ResearchScopeSpec,
   ResearchSubquestion,
 } from "../research/types";
+import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import type {
   PlanContract,
   PlanStep,
@@ -393,10 +393,21 @@ function decodeActionIntent(
     );
   if (input.dependsOn !== undefined && !isActionIndexList(input.dependsOn))
     throw new Error(`${label}.dependsOn must be unique action indexes`);
+  if (
+    input.reviewPreference !== undefined &&
+    !["default", "review", "direct"].includes(String(input.reviewPreference))
+  )
+    throw new Error(`${label}.reviewPreference is invalid`);
   const result: AgentActionIntent & {
     id?: string;
     sourceActionIndex?: number;
   } = {
+    ...(input.reviewPreference !== undefined
+      ? {
+          reviewPreference:
+            input.reviewPreference as AgentActionIntent["reviewPreference"],
+        }
+      : {}),
     dependsOn: input.dependsOn as number[] | undefined,
     destinationFrom: input.destinationFrom as number | undefined,
     contentFrom: optionalText(input.contentFrom, `${label}.contentFrom`),

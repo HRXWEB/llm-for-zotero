@@ -1,85 +1,35 @@
-import type { PreparedActionCall } from "./tools/workflowSteps";
-import { loadWorkflowMaterial } from "./documents/workflowMaterial";
-import { loadWorkflowCheckpoint } from "./contracts/workflowCheckpoint";
-import { hasCurrentSemanticIntent } from "./model/semanticTransport";
-import { SemanticIntentService } from "./model/semanticIntentService";
-import { AgentToolRegistry } from "./tools/registry";
+import { resolvePreparedActionReview } from "./tools/execution/review";
+import { ensureModelCapabilities } from "../modelCapabilities";
 import { readAttachmentBytes } from "../modules/contextPanel/attachmentStorage";
-import { encodeBytesBase64 } from "./model/shared";
-import { recordAgentTurn } from "./store/conversationMemory";
 import {
-  appendAgentTranscriptMessages,
-  buildAgentTranscriptCompatibilityKey,
-  loadLatestAgentTranscriptSegment,
-  loadAgentTranscriptSegment,
-  replaceAgentTranscriptSegment,
-  type AgentTranscriptWriteResult,
-} from "./store/transcriptStore";
-import type {
-  AgentInheritedApproval,
-  AgentContentInputCapabilities,
-  AgentModelCapabilities,
-  AgentModelContentPart,
-  AgentConfirmationResolution,
-  AgentEvent,
-  AgentAssistantMessage,
-  AgentModelMessage,
-  AgentModelStep,
-  AgentPendingAction,
-  AgentRuntimeOutcome,
-  AgentRuntimeRequest,
-  AgentRuntimeRequestInput,
-  ResolvedAgentRuntimeRequest,
-  AgentToolCall,
-  AgentToolArtifact,
-  AgentToolContext,
-  AgentToolResult,
-  AgentToolEffect,
-  AgentToolMessage,
-  AgentUserMessage,
-  AgentRunRecord,
-} from "./types";
+  areConversationWritesFrozen,
+  isConversationWriteGenerationCurrent,
+  withConversationWriteLock,
+} from "../shared/conversationWriteFence";
+import { getNotesDirectoryConfig } from "../utils/notesDirectoryConfig";
+import type { WebAttributionAssessment } from "../webAccess/attribution";
+import { clearWebSourcesForRun } from "../webAccess/runSources";
+import { buildActionCallDigest } from "./authorization/proposal";
+import {
+  buildAgentContextBudgetState,
+  resolveAgentContextBudgetPolicy,
+} from "./context/budgetPolicy";
+import {
+  commitAgentCoverageActivities,
+  hydrateAgentCoverageLedger,
+} from "./context/coverageLedger";
+import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
+import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
+import {
+  AgentPromptBudgetError,
+  enforceAgentPromptBudget,
+  resolveAgentPromptBudgetLimits,
+} from "./context/promptBudget";
+import { getTurnPapersWithRoles } from "./context/requestTurnPaperScope";
 import {
   resolveAgentRuntimeRequest,
   type AgentRequestPaperContextResolver,
 } from "./context/resolvedAgentRequest";
-import {
-  getTurnPapersWithRoles,
-  getTurnPaperScopeFromRequest,
-} from "./context/requestTurnPaperScope";
-import type { AgentModelAdapter } from "./model/adapter";
-import type {
-  AgentAdapterToolCallResult,
-  AgentAdapterToolContentItem,
-} from "./model/adapter";
-import {
-  normalizeAgentContentInputs,
-  resolveCapabilitiesContentInputs,
-} from "./model/contentCapabilities";
-import { resolveAgentLimits } from "./model/limits";
-import { classifyRequest } from "./model/requestClassifier";
-import {
-  buildAgentPromptInstructionInventory,
-  composeAgentModelInput,
-  normalizeHistoryMessages,
-  renderAgentPromptEnvelope,
-} from "./model/messageBuilder";
-import {
-  detectTurnIntent,
-  resolvePlanSkillRoutingReceipt,
-} from "./model/semanticIntentService";
-import { createUnverifiedReceipt } from "./contracts/actionEvaluation";
-import {
-  ActionContractRunSession,
-  readLatestActionContractCheckpoint,
-  type ActionContractCheckpoint,
-} from "./contracts/actionContractRunSession";
-import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
-import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
-import { getAllSkills, getMatchedSkillIds } from "./skills";
-import { loadPlanArtifact } from "./plans/store";
-import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
-import { createTrustedReadObservations } from "./plans/readObservation";
 import {
   buildAgentResourceContextPlan,
   commitAgentReadActivities,
@@ -87,31 +37,68 @@ import {
   type AgentPendingReadActivity,
 } from "./context/resourceContextPlan";
 import {
-  commitAgentCoverageActivities,
-  hydrateAgentCoverageLedger,
-} from "./context/coverageLedger";
-import { getNotesDirectoryConfig } from "../utils/notesDirectoryConfig";
-import {
-  buildAgentContextBudgetState,
-  resolveAgentContextBudgetPolicy,
-} from "./context/budgetPolicy";
-import {
   buildAgentSemanticCheckpoint,
   compactAgentTranscript,
   readAgentSemanticCheckpointRootGoal,
 } from "./context/transcriptCompactor";
+import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
 import {
-  AgentEventLocalDocumentStreamRedactor,
+  ActionContractRunSession,
+  readLatestActionContractCheckpoint,
+  type ActionContractCheckpoint,
+} from "./contracts/actionContractRunSession";
+import { createUnverifiedReceipt } from "./contracts/actionEvaluation";
+import { loadWorkflowCheckpoint } from "./contracts/workflowCheckpoint";
+import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
+import { loadWorkflowMaterial } from "./documents/workflowMaterial";
+import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
+import type {
+  AgentAdapterToolCallResult,
+  AgentAdapterToolContentItem,
+  AgentModelAdapter,
+} from "./model/adapter";
+import {
+  normalizeAgentContentInputs,
+  resolveCapabilitiesContentInputs,
+} from "./model/contentCapabilities";
+import { resolveAgentLimits } from "./model/limits";
+import {
+  buildAgentPromptInstructionInventory,
+  composeAgentModelInput,
+  normalizeHistoryMessages,
+  renderAgentPromptEnvelope,
+} from "./model/messageBuilder";
+import { classifyRequest } from "./model/requestClassifier";
+import {
+  detectTurnIntent,
+  resolvePlanSkillRoutingReceipt,
+  SemanticIntentService,
+} from "./model/semanticIntentService";
+import { hasCurrentSemanticIntent } from "./model/semanticTransport";
+import { encodeBytesBase64 } from "./model/shared";
+import { createTrustedReadObservations } from "./plans/readObservation";
+import { PlanExecutionRunSession } from "./plans/runSession";
+import { loadPlanArtifact } from "./plans/store";
+import {
   acquireLocalDocumentPathLease,
+  AgentEventLocalDocumentStreamRedactor,
   LocalDocumentPathStreamRedactor,
 } from "./privacy/localDocumentPathRedaction";
-import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
-import { ensureModelCapabilities } from "../modelCapabilities";
+import { canonicalJson } from "./services/libraryMutation/canonicalJson";
+import { getAllSkills, getMatchedSkillIds } from "./skills";
 import {
-  AgentPromptBudgetError,
-  enforceAgentPromptBudget,
-  resolveAgentPromptBudgetLimits,
-} from "./context/promptBudget";
+  listJournalActions,
+  type JournalActionWithSteps,
+} from "./store/changeJournal";
+import { recordAgentTurn } from "./store/conversationMemory";
+import { sha256Text } from "./store/journalRecoveryBlobStore";
+import {
+  createAgentToolResultHandleRecord,
+  hasAgentToolResultHandles,
+  hydrateAgentToolResultHandles,
+  upsertAgentToolResultHandles,
+  type AgentToolResultHandleRecord,
+} from "./store/toolResultHandles";
 import {
   appendAgentRunEvent,
   createAgentRun,
@@ -121,28 +108,39 @@ import {
   INTERRUPTED_AGENT_RUN_MARKER,
 } from "./store/traceStore";
 import {
-  listJournalActions,
-  type JournalActionWithSteps,
-} from "./store/changeJournal";
-import {
-  createAgentToolResultHandleRecord,
-  hasAgentToolResultHandles,
-  hydrateAgentToolResultHandles,
-  type AgentToolResultHandleRecord,
-  upsertAgentToolResultHandles,
-} from "./store/toolResultHandles";
-import {
-  areConversationWritesFrozen,
-  isConversationWriteGenerationCurrent,
-  withConversationWriteLock,
-} from "../shared/conversationWriteFence";
-import type { WebAttributionAssessment } from "../webAccess/attribution";
-import { clearWebSourcesForRun } from "../webAccess/runSources";
-import { PlanExecutionRunSession } from "./plans/runSession";
-import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
-import { canonicalJson } from "./services/libraryMutation/canonicalJson";
-import { sha256Text } from "./store/journalRecoveryBlobStore";
-import { buildActionCallDigest } from "./authorization/proposal";
+  appendAgentTranscriptMessages,
+  buildAgentTranscriptCompatibilityKey,
+  loadAgentTranscriptSegment,
+  loadLatestAgentTranscriptSegment,
+  replaceAgentTranscriptSegment,
+  type AgentTranscriptWriteResult,
+} from "./store/transcriptStore";
+import { AgentToolRegistry } from "./tools/registry";
+import type { PreparedActionCall } from "./tools/workflowSteps";
+import type {
+  AgentAssistantMessage,
+  AgentConfirmationResolution,
+  AgentContentInputCapabilities,
+  AgentEvent,
+  AgentInheritedApproval,
+  AgentModelCapabilities,
+  AgentModelContentPart,
+  AgentModelMessage,
+  AgentModelStep,
+  AgentPendingAction,
+  AgentRunRecord,
+  AgentRuntimeOutcome,
+  AgentRuntimeRequest,
+  AgentRuntimeRequestInput,
+  AgentToolArtifact,
+  AgentToolCall,
+  AgentToolContext,
+  AgentToolEffect,
+  AgentToolMessage,
+  AgentToolResult,
+  AgentUserMessage,
+  ResolvedAgentRuntimeRequest,
+} from "./types";
 
 const TOOL_RESULT_READ_TOOL_NAME = "tool_result_read";
 
@@ -2166,6 +2164,15 @@ export class AgentRuntime {
             {
               ...context,
               currentAnswerText,
+              requestActionReview: async (action) =>
+                (await requestActionResolution(action)).resolution,
+              resolvePreparedAction: (prepared) =>
+                resolvePreparedActionReview(
+                  prepared,
+                  async (action) =>
+                    (await requestActionResolution(action)).resolution,
+                  executionAllowed,
+                ),
             },
             {
               callerKind: options.inheritedApproval ? "action" : "model",

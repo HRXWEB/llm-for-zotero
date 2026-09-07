@@ -1,103 +1,102 @@
-import { getDiscoveryCardProjection } from "./discoveryCardProjection";
-import {
-  renderStreamingMarkdownInto,
-  disposeStreamingMarkdown,
-} from "../streamingMarkdown";
 import { getAgentRuntime } from "../../../agent";
+import {
+  exportPlanDocumentMarkdown,
+  savePlanDocumentAsNote,
+} from "../../../agent/documents/actions";
+import {
+  loadPlanDocument,
+  loadPlanDocumentOutbox,
+} from "../../../agent/documents/store";
+import type { PlanDocument } from "../../../agent/documents/types";
+import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
+import {
+  loadPlanArtifact,
+  loadPlanExecutionLedger,
+} from "../../../agent/plans/store";
+import {
+  isContentLikeToolArgumentKey,
+  isMalformedToolArgumentsDiagnostic,
+} from "../../../agent/toolArgumentDiagnostics";
+import { summarizeFileIOCall } from "../../../agent/tools/write/fileIO";
 import type {
+  AgentActionContract,
   AgentConfirmationResolution,
-  AgentPendingChoiceValue,
   AgentPendingAction,
+  AgentPendingChoiceValue,
   AgentPendingField,
   AgentRunEventRecord,
-  AgentTraceDetail,
   AgentToolArtifact,
   AgentToolEffect,
+  AgentToolPresentationSummary,
   AgentToolResultCard,
   AgentTraceChip,
+  AgentTraceDetail,
   AgentTraceRequestSummary,
-  AgentToolPresentationSummary,
+  PlanArtifact,
+  PlanExecutionLedger,
 } from "../../../agent/types";
-import { applyStableAnimationPhase } from "../stableAnimationPhase";
-import type { Message, PaperContextRef } from "../types";
-import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
-import { sanitizeText } from "../textUtils";
-import { renderRenderedMarkdownInto } from "../renderedMarkdown";
-import { buildQuoteDisplayMarkdown } from "../quoteRenderPlan";
-import { toFileUrl } from "../../../utils/pathFileUrl";
-import {
-  normalizePaperContextRefs,
-  normalizeSelectedTextSources,
-} from "../normalizers";
+import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import type { GeneratedChatImage } from "../../../shared/types";
-import { renderAssistantGeneratedImagesInto } from "../generatedImageRender";
+import { toFileUrl } from "../../../utils/pathFileUrl";
+import { stripWebSourceMarkersForDisplay } from "../../../webAccess/attribution";
+import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
 import { agentReasoningExpandedCache } from "../agentState";
-import { buildTextDiffPreview } from "./diffPreview";
+import { copyTextToClipboard } from "../clipboard";
 import {
   createContextIcon,
   getSelectedTextSourceIconName,
   isContextIconName,
   NOTE_EDIT_PENCIL_ICON,
 } from "../contextIcons";
-import { summarizeFileIOCall } from "../../../agent/tools/write/fileIO";
+import { createDocumentCardLayout } from "../documentCard";
+import { renderAssistantGeneratedImagesInto } from "../generatedImageRender";
 import {
-  isContentLikeToolArgumentKey,
-  isMalformedToolArgumentsDiagnostic,
-} from "../../../agent/toolArgumentDiagnostics";
+  normalizePaperContextRefs,
+  normalizeSelectedTextSources,
+} from "../normalizers";
 import {
-  appendAgentTraceText,
-  compactAgentTraceEvents,
-  getReasoningTraceKey,
-  normalizeInlineTextForDedupe,
-} from "./traceReducer";
-import {
-  buildToolResultTraceInfo,
-  type ToolResultTraceInfo,
-} from "./toolResultTraceInfo";
-import { stripWebSourceMarkersForDisplay } from "../../../webAccess/attribution";
-import { createWebFaviconImage } from "../webFavicon";
-import type {
-  AgentActionContract,
-  PlanArtifact,
-  PlanExecutionLedger,
-} from "../../../agent/types";
-import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../../agent/plans/store";
-import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
+  planDocumentCitationSourceHref as citationSourceHref,
+  getPlanDocumentItemTitle as itemTitle,
+  navigatePlanDocumentCitationSource,
+  renderPlanDocumentContent,
+  renderPlanDocumentFigures,
+} from "../planDocumentPresentation";
 import {
   PLAN_APPROVED_EVENT,
   PLAN_CANCEL_EVENT,
   PLAN_REVISE_EVENT,
   stageApprovedPlanExecution,
 } from "../planModeState";
+import { buildQuoteDisplayMarkdown } from "../quoteRenderPlan";
+import { renderRenderedMarkdownInto } from "../renderedMarkdown";
+import { applyStableAnimationPhase } from "../stableAnimationPhase";
 import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
-import {
-  loadPlanDocument,
-  loadPlanDocumentOutbox,
-} from "../../../agent/documents/store";
-import {
-  exportPlanDocumentMarkdown,
-  savePlanDocumentAsNote,
-} from "../../../agent/documents/actions";
-import { copyTextToClipboard } from "../clipboard";
-import type { PlanDocument } from "../../../agent/documents/types";
-import {
-  renderPlanDocumentContent,
-  getPlanDocumentItemTitle as itemTitle,
-  navigatePlanDocumentCitationSource,
-  planDocumentCitationSourceHref as citationSourceHref,
-  renderPlanDocumentFigures,
-} from "../planDocumentPresentation";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
-import { createDocumentCardLayout } from "../documentCard";
+import {
+  disposeStreamingMarkdown,
+  renderStreamingMarkdownInto,
+} from "../streamingMarkdown";
+import { sanitizeText } from "../textUtils";
+import type { Message, PaperContextRef } from "../types";
+import { createWebFaviconImage } from "../webFavicon";
+import { renderDiffPreviewField } from "./diffPreviewField";
+import { getDiscoveryCardProjection } from "./discoveryCardProjection";
+import { renderNoteChangeCard } from "./noteChangeCard";
 import { getNoteReviewContent, renderNoteReviewCard } from "./noteReviewCard";
 import {
   renderSavedNoteCard,
   savedNoteIsPrimaryOutcome,
 } from "./savedNoteCard";
+import {
+  buildToolResultTraceInfo,
+  type ToolResultTraceInfo,
+} from "./toolResultTraceInfo";
+import {
+  appendAgentTraceText,
+  compactAgentTraceEvents,
+  getReasoningTraceKey,
+  normalizeInlineTextForDedupe,
+} from "./traceReducer";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -564,90 +563,6 @@ function renderReviewTableField(
   }
 
   return root;
-}
-
-function renderDiffPreviewField(
-  doc: Document,
-  field: Extract<AgentPendingField, { type: "diff_preview" }>,
-): {
-  element: HTMLDivElement;
-  update: (nextAfter: string) => void;
-} {
-  const wrap = doc.createElement("div");
-  wrap.className = "llm-agent-hitl-diff";
-
-  const body = doc.createElement("div");
-  body.className = "llm-agent-hitl-diff-body";
-  wrap.appendChild(body);
-
-  const update = (nextAfter: string) => {
-    body.replaceChildren();
-    const lines = buildTextDiffPreview(field.before || "", nextAfter, {
-      contextLines: field.contextLines,
-    });
-    if (!lines.length) {
-      const empty = doc.createElement("div");
-      empty.className = "llm-agent-hitl-diff-empty";
-      empty.textContent = field.emptyMessage || "No changes.";
-      body.appendChild(empty);
-      return;
-    }
-
-    for (const line of lines) {
-      if (line.kind === "gap") {
-        const gap = doc.createElement("div");
-        gap.className = "llm-agent-hitl-diff-gap";
-        gap.textContent = `... ${line.omittedCount} unchanged line${
-          line.omittedCount === 1 ? "" : "s"
-        } ...`;
-        body.appendChild(gap);
-        continue;
-      }
-
-      const row = doc.createElement("div");
-      row.className = `llm-agent-hitl-diff-line llm-agent-hitl-diff-line-${line.kind}`;
-
-      const gutter = doc.createElement("div");
-      gutter.className = "llm-agent-hitl-diff-gutter";
-
-      const lineNumber = doc.createElement("span");
-      lineNumber.className = "llm-agent-hitl-diff-line-number";
-      lineNumber.textContent =
-        typeof line.oldLineNumber === "number"
-          ? String(line.oldLineNumber)
-          : typeof line.newLineNumber === "number"
-            ? String(line.newLineNumber)
-            : "";
-
-      const marker = doc.createElement("span");
-      marker.className = "llm-agent-hitl-diff-marker";
-      marker.textContent =
-        line.kind === "add" ? "+" : line.kind === "remove" ? "\u2212" : " ";
-
-      gutter.append(lineNumber, marker);
-
-      const content = doc.createElement("pre");
-      content.className = "llm-agent-hitl-diff-content";
-      for (const segment of line.segments) {
-        const segmentEl = doc.createElement("span");
-        segmentEl.className =
-          segment.kind === "context"
-            ? "llm-agent-hitl-diff-segment"
-            : `llm-agent-hitl-diff-segment llm-agent-hitl-diff-segment-${segment.kind}`;
-        segmentEl.textContent = segment.text;
-        content.appendChild(segmentEl);
-      }
-      if (!content.textContent) {
-        content.textContent = " ";
-      }
-
-      row.append(gutter, content);
-      body.appendChild(row);
-    }
-  };
-
-  update(field.after || "");
-  return { element: wrap, update };
 }
 
 function renderImageGalleryField(
@@ -1139,7 +1054,7 @@ function renderTagAssignmentTableField(
  */
 function renderResultCardList(
   doc: Document,
-  cards: Exclude<AgentToolResultCard, { kind: "saved_note" }>[],
+  cards: Exclude<AgentToolResultCard, { kind: "saved_note" | "note_change" }>[],
 ): HTMLDivElement {
   const container = doc.createElement("div");
   container.className =
@@ -4199,7 +4114,7 @@ function appendLegacyAgentTraceEvent(
           type: "action",
           row,
         });
-        if (entry.payload.ok) {
+        if (entry.payload.ok || entry.payload.name === "note_write") {
           try {
             const cards =
               getToolDefinition(
@@ -4207,7 +4122,15 @@ function appendLegacyAgentTraceEvent(
               )?.presentation?.buildResultCards?.(entry.payload.content) ??
               null;
             if (cards && cards.length > 0) {
-              ctx.items.push({ type: "card_list", cards });
+              ctx.items.push({
+                type: "card_list",
+                cards: entry.payload.ok
+                  ? cards
+                  : cards.filter(
+                      (card) =>
+                        card.kind === "note_change" && card.state === "failed",
+                    ),
+              });
             }
           } catch {
             // card generation errors must not crash the trace
@@ -5720,7 +5643,7 @@ export function renderAgentTrace({
 
     if (itemEntry.type === "card_list") {
       const papers = itemEntry.cards.filter(
-        (card) => card.kind !== "saved_note",
+        (card) => card.kind !== "saved_note" && card.kind !== "note_change",
       );
       if (papers.length) place(renderResultCardList(doc, papers));
       continue;
@@ -5900,9 +5823,14 @@ export function renderAgentTrace({
   });
 
   let hasSavedNote = false;
+  const shownNoteActions = new Set<string>();
   for (const item of processItems) {
     if (item.type !== "card_list") continue;
     for (const card of item.cards) {
+      if (card.kind === "note_change" && !shownNoteActions.has(card.actionId)) {
+        shownNoteActions.add(card.actionId);
+        wrap.appendChild(renderNoteChangeCard(doc, card));
+      }
       if (card.kind === "saved_note") {
         hasSavedNote = true;
         wrap.appendChild(renderSavedNoteCard(doc, card));

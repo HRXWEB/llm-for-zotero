@@ -1,5 +1,5 @@
 /**
- * Writes a note onto each of many items behind one confirmation.
+ * Writes a note onto each of many items under the central interaction policy.
  *
  * `note_write` takes a single `targetItemId` and every `mode:'create'` call
  * returns its own review card, so "write a summary note on each of my 50 most

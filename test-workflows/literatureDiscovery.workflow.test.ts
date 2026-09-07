@@ -28,11 +28,12 @@ describe("workflow: expandable ranked discovery", function () {
           activeItemId: fixture.parentItemId,
           libraryID: Zotero.Items.get(fixture.parentItemId).libraryID,
           mode: "agent",
-          userText: "Find three relevant papers for me",
+          userText:
+            "Find three relevant papers and let me review before importing",
           classifiedIntent: classifiedFixture({
             externalSearchIntent: "literature",
             semantic: semanticFixture({
-              literature: "discover",
+              literature: "select_then_import",
               requestedCount: 3,
             }),
           }),

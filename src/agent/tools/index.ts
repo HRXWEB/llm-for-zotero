@@ -1,83 +1,83 @@
-import { createWorkflowScriptTool } from "./control/workflowScript";
-import { registerPreparedLibraryActions } from "./preparedLibraryActions";
 import { ModelSemanticReferenceResolver } from "../model/semanticReferenceResolver";
-import { AgentToolRegistry } from "./registry";
+import { LibraryRetrieveService } from "../services/libraryRetrieveService";
 import { PdfService } from "../services/pdfService";
 import { RetrievalService } from "../services/retrievalService";
-import { LibraryRetrieveService } from "../services/libraryRetrieveService";
 import { ZoteroGateway } from "../services/zoteroGateway";
-import { createQueryLibraryTool } from "./read/queryLibrary";
-import { createReadLibraryTool } from "./read/readLibrary";
+import { createWorkflowScriptTool } from "./control/workflowScript";
+import { createDelegatingTool, createRenamedTool } from "./facade";
+import { registerPreparedLibraryActions } from "./preparedLibraryActions";
+import { createCiteExportTool } from "./read/citeExport";
 import { createLibraryRetrieveTool } from "./read/libraryRetrieve";
 import { createPaperReadTool } from "./read/paperRead";
-import { createReadPaperTool } from "./read/readPaper";
-import { createSearchPaperTool } from "./read/searchPaper";
-import { createViewPdfPagesTool } from "./read/viewPdfPages";
-import { createReadAttachmentTool } from "./read/readAttachment";
 import { clearPdfToolCaches } from "./read/pdfToolUtils";
+import { createQueryLibraryTool } from "./read/queryLibrary";
+import { createReadAttachmentTool } from "./read/readAttachment";
+import { createReadLibraryTool } from "./read/readLibrary";
+import { createReadPaperTool } from "./read/readPaper";
+import { createLiteratureReviewTool } from "./read/reviewLiterature";
 import {
   createSearchLiteratureOnlineTool,
-  matchesLiteratureSearchGuidance,
   LITERATURE_WORKFLOW_GUIDANCE,
+  matchesLiteratureSearchGuidance,
 } from "./read/searchLiteratureOnline";
-import { createLiteratureReviewTool } from "./read/reviewLiterature";
+import { createSearchPaperTool } from "./read/searchPaper";
 import { createToolResultReadTool } from "./read/toolResultRead";
-import { createWebSearchTool } from "./read/webSearch";
+import { createViewPdfPagesTool } from "./read/viewPdfPages";
 import { createWebReadTool } from "./read/webRead";
-import { createCiteExportTool } from "./read/citeExport";
-import { createDelegatingTool, createRenamedTool } from "./facade";
+import { createWebSearchTool } from "./read/webSearch";
+import { AgentToolRegistry } from "./registry";
 
+import { ActionContractService } from "../contracts/actionContract";
+import { PlanAmendmentService } from "../plans/amendments";
+import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
+import { PdfPageService } from "../services/pdfPageService";
+import { requestsNoteAction, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
+import type { AgentToolDefinition } from "../types";
+import { createAmendPlanTool } from "./plan/amendPlan";
+import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
+import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
+import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
+import { createRequestUserInputTool } from "./plan/requestUserInput";
+import { createResearchUpdateTool } from "./plan/researchUpdate";
+import {
+  createSubmitDocumentTool,
+  createSubmitPlanDocumentTool,
+} from "./plan/submitPlanDocument";
+import { createTaskUpdateTool } from "./plan/taskUpdate";
+import { createUpdatePlanTool } from "./plan/updatePlan";
+import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
+import { createAnnotatePdfTool } from "./write/annotatePdf";
+import { createApplyTagsTool } from "./write/applyTags";
 import {
   createEditCurrentNoteTool,
   SOURCE_NOTE_COPY_GUIDANCE,
 } from "./write/editCurrentNote";
-import { createRevertChangesTool } from "./write/revertChanges";
-import { createAnnotatePdfTool } from "./write/annotatePdf";
-import { createUndoLastActionTool } from "./write/undoLastAction";
-import { createApplyTagsTool } from "./write/applyTags";
-import { createMoveToCollectionTool } from "./write/moveToCollection";
-import { createUpdateMetadataTool } from "./write/updateMetadata";
-import { createManageCollectionsTool } from "./write/manageCollections";
+import { createFileIOTool } from "./write/fileIO";
 import { createImportIdentifiersTool } from "./write/importIdentifiers";
-import { createTrashItemsTool } from "./write/trashItems";
-import { createRestoreFromTrashTool } from "./write/restoreFromTrash";
-import { createWriteNotesBatchTool } from "./write/writeNotesBatch";
-import { createSavedSearchTool } from "./write/savedSearches";
-import { createLibrarySettingsTool } from "./write/librarySettings";
-import {
-  createSetItemTagsTool,
-  createUpdateLibraryTagTool,
-} from "./write/tagObjects";
+import { createImportLocalFilesTool } from "./write/importLocalFiles";
 import {
   createCreateItemsTool,
   createRelateItemsTool,
   createReparentItemsTool,
 } from "./write/itemStructure";
-import { createMergeItemsTool } from "./write/mergeItems";
+import { createLibrarySettingsTool } from "./write/librarySettings";
 import { createManageAttachmentsTool } from "./write/manageAttachments";
+import { createManageCollectionsTool } from "./write/manageCollections";
+import { createMergeItemsTool } from "./write/mergeItems";
+import { createMoveToCollectionTool } from "./write/moveToCollection";
+import { createRestoreFromTrashTool } from "./write/restoreFromTrash";
+import { createRevertChangesTool } from "./write/revertChanges";
 import { createRunCommandTool } from "./write/runCommand";
-import { createImportLocalFilesTool } from "./write/importLocalFiles";
-import { createFileIOTool } from "./write/fileIO";
-import { createZoteroScriptTool } from "./write/zoteroScript";
-import { PdfPageService } from "../services/pdfPageService";
-import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
-import type { AgentToolDefinition } from "../types";
-import { requestsNoteAction, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
-import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
-import { ActionContractService } from "../contracts/actionContract";
-import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
-import { createUpdatePlanTool } from "./plan/updatePlan";
-import { createTaskUpdateTool } from "./plan/taskUpdate";
-import { createRequestUserInputTool } from "./plan/requestUserInput";
+import { createSavedSearchTool } from "./write/savedSearches";
 import {
-  createSubmitDocumentTool,
-  createSubmitPlanDocumentTool,
-} from "./plan/submitPlanDocument";
-import { createResearchUpdateTool } from "./plan/researchUpdate";
-import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
-import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
-import { PlanAmendmentService } from "../plans/amendments";
-import { createAmendPlanTool } from "./plan/amendPlan";
+  createSetItemTagsTool,
+  createUpdateLibraryTagTool,
+} from "./write/tagObjects";
+import { createTrashItemsTool } from "./write/trashItems";
+import { createUndoLastActionTool } from "./write/undoLastAction";
+import { createUpdateMetadataTool } from "./write/updateMetadata";
+import { createWriteNotesBatchTool } from "./write/writeNotesBatch";
+import { createZoteroScriptTool } from "./write/zoteroScript";
 
 type BuiltInAgentToolDeps = {
   zoteroGateway: ZoteroGateway;
@@ -155,7 +155,7 @@ const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
       ),
     ),
   instruction:
-    "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; A computation requiring zotero_script also requires separate host authority for that mechanism. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review.",
+    "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; A computation using zotero_script uses the same exact-effect authority; the mechanism alone adds no confirmation. Explicit script prohibitions remain binding. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review.",
 };
 
 const NOTE_WRITE_GUIDANCE: ToolGuidance = {
@@ -169,7 +169,7 @@ const NOTE_WRITE_GUIDANCE: ToolGuidance = {
       ),
     ),
   instruction:
-    "Execute a resolved note_edit obligation with note_write mode:'edit' and patches against its exact note target. Do not substitute prose alternatives for the edit proposal. Copy selected visible text verbatim as find with findFormat:'text'; when copying Markdown noteText from library_read, use findFormat:'markdown'. Supply replacement as plain visible text. Existing-note changes always open a diff confirmation card for review, in every permission mode. Map the resolved note_append obligation to mode:'append' and note_create to mode:'create'. Use only the contract's resolved parent or collection destination; unresolved names return to semantic preparation. Pass the finalized asset in its declared format. The requested note must be written with note_write rather than returned as note-ready prose in chat. Requested new notes are created without draft confirmation in every mode; after verification the UI displays the saved content and a direct link to the native note. Do not repeat the full saved content in the completion message. After an edit or append tool returns success, the user has already approved and the change is saved; do not claim a diff is still awaiting review. " +
+    "Execute a resolved note_edit obligation with note_write mode:'edit' and patches against its exact note target. Do not substitute prose alternatives for the edit proposal. Copy selected visible text verbatim as find with findFormat:'text'; when copying Markdown noteText from library_read, use findFormat:'markdown'. Supply replacement as plain visible text. Auto applies clear edits directly and displays the actual verified diff afterward. Requested review and Safe use the existing diff card before applying. Map the resolved note_append obligation to mode:'append' and note_create to mode:'create'. Use only the contract's resolved parent or collection destination; unresolved names return to semantic preparation. Pass the finalized asset in its declared format. The requested note must be written with note_write rather than returned as note-ready prose in chat. Requested new notes ordinarily need no draft confirmation, except for action UI or an explicit review preference; after verification the UI displays the saved content and a direct link to the native note. Do not repeat the full saved content in the completion message. After an edit or append tool returns verified success, the change is saved; do not claim a diff is still awaiting review. " +
     SOURCE_NOTE_COPY_GUIDANCE,
 };
 

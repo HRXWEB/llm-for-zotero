@@ -1,19 +1,19 @@
 import { assert } from "chai";
-import { createLibraryBatchTool } from "../src/agent/tools/write/libraryBatch";
-import type { LibraryBatchJobStore } from "../src/agent/tools/write/libraryBatch";
-import { ActionRegistry } from "../src/agent/actions/registry";
 import { callTool } from "../src/agent/actions/executor";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { ActionRegistry } from "../src/agent/actions/registry";
+import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 import { executeLibraryMutationAction } from "../src/agent/services/mutationCoordinator";
+import type { BatchJobRecord } from "../src/agent/store/batchJobStore";
 import {
   initAgentChangeJournal,
   listJournalActions,
 } from "../src/agent/store/changeJournal";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import type { LibraryBatchJobStore } from "../src/agent/tools/write/libraryBatch";
+import { createLibraryBatchTool } from "../src/agent/tools/write/libraryBatch";
 import type { AgentToolContext } from "../src/agent/types";
-import type { BatchJobRecord } from "../src/agent/store/batchJobStore";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 
 /**
  * The batch engine was a complete propose/paginate/apply system that the
@@ -164,7 +164,7 @@ describe("library_batch", function () {
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
     await tool.execute(validated.value, context);
-    assert.equal(seenMode, "auto_approve");
+    assert.equal(seenMode, "automatic");
   });
 
   it("records one user-visible action with ordered steps across batch pages", async function () {
@@ -312,6 +312,16 @@ describe("library_batch", function () {
     const execution = await tool.execute(validated.value, {
       ...context,
       runId: "agent-run-9",
+      request: { ...context.request, actionEntryPoint: "action_ui" },
+      resolvePreparedAction: async (prepared) => {
+        assert.equal(prepared.kind, "confirmation");
+        if (prepared.kind !== "confirmation") return prepared.execution;
+        const result = await prepared.execute({ approved: true });
+        assert.equal(result.kind, "result");
+        if (result.kind !== "result")
+          throw new Error("Unexpected second review");
+        return result.execution;
+      },
     });
 
     assert.equal(execution.effect, "applied");
@@ -395,25 +405,13 @@ describe("library_batch", function () {
     assert.equal(action.affected_count, 0);
   });
 
-  it("surfaces the script arguments on the confirmation card", function () {
-    installMode("yolo");
+  it("leaves review to the actual prepared action page", function () {
     const tool = makeTool();
-    const validated = tool.validate({
-      job: "auto_tag",
-      jobArgs: { scope: "collection", collectionId: 12 },
-    });
-    assert.isTrue(validated.ok);
-    if (!validated.ok) return;
-    const pending = tool.createPendingAction?.(validated.value, context);
-    const preview = pending?.fields.find((f) => f.type === "code_preview");
-    assert.include(
-      (preview as never as { value: string })?.value,
-      "collectionId",
-    );
-    assert.include(
-      pending?.description || "",
-      "reverted",
-      "the user must know the run is recoverable before approving",
+    assert.equal(tool.spec.executionClass, "control");
+    assert.isFalse(tool.spec.requiresConfirmation);
+    assert.isUndefined(
+      tool.createPendingAction,
+      "no generic batch approval card",
     );
   });
 
@@ -486,7 +484,8 @@ describe("library_batch", function () {
       appliedCount: 17,
       totalCount: 42,
     });
-    assert.deepEqual(advances[0].plan, { remainingItemIds: [101, 102] });
+    assert.deepEqual(advances[0].plan?.remainingItemIds, [101, 102]);
+    assert.equal((advances[0].plan?.interaction as any).version, 2);
   });
 
   it("executes a scoped batch from the contract's frozen targets without duplicating them in the initial job input", async function () {
@@ -1013,7 +1012,7 @@ describe("library_batch", function () {
    * Advertising a job that cannot work is the kind of lie this whole effort
    * exists to remove.
    */
-  it("refuses an interactive-only job up front, with somewhere to go", function () {
+  it("makes the shared discovery action callable from conversation", function () {
     const actionRegistry = new ActionRegistry();
     actionRegistry.register({
       name: "discover_related",
@@ -1028,13 +1027,10 @@ describe("library_batch", function () {
     });
 
     const result = tool.validate({ job: "discover_related" });
-    assert.isFalse(result.ok);
-    if (result.ok) return;
-    assert.include(result.error, "interactive");
-    assert.include(result.error, "/discover_related");
+    assert.isTrue(result.ok);
   });
 
-  it("does not list an interactive-only job as available", function () {
+  it("lists shared discovery preparation alongside durable jobs", function () {
     const actionRegistry = new ActionRegistry();
     actionRegistry.register({
       name: "discover_related",
@@ -1058,7 +1054,7 @@ describe("library_batch", function () {
     assert.isFalse(result.ok);
     if (result.ok) return;
     assert.include(result.error, "auto_tag");
-    assert.notInclude(result.error, "discover_related");
+    assert.include(result.error, "discover_related");
   });
 
   it("refuses audit-note creation outside the durable batch boundary", function () {

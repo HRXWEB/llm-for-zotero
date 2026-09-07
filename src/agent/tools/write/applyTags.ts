@@ -2,7 +2,6 @@
  * Focused facade tool for adding and removing tags on Zotero papers.
  * Provides a self-describing schema for managing Zotero tags.
  */
-import type { AgentWriteToolDefinition } from "../../types";
 import {
   buildPagedReviewActionConfig,
   buildPageSizeSelectField,
@@ -16,18 +15,19 @@ import {
   type RemoveTagsOperation,
 } from "../../services/libraryMutationService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type { AgentWriteToolDefinition } from "../../types";
 import {
-  ok,
   fail,
-  validateObject,
   normalizePositiveIntArray,
   normalizeStringArray,
+  ok,
+  validateObject,
 } from "../shared";
 import {
   buildTagAssignmentField,
-  normalizeTagAssignmentsFromResolution,
-  getTagAssignmentFieldId,
   executeAndRecordUndo,
+  getTagAssignmentFieldId,
+  normalizeTagAssignmentsFromResolution,
   planLibraryMutations,
 } from "./mutateLibraryShared";
 
@@ -294,7 +294,7 @@ export function createApplyTagsTool(
           );
         }
 
-        // No resolution data (auto_approve / non-HITL path). Validate the
+        // No resolution data (automatic / non-HITL path). Validate the
         // original operation has something to apply so we don't silently
         // pass through an empty request.
         const hasNonEmptyAssignments = operation.assignments?.some(

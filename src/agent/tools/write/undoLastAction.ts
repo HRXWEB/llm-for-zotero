@@ -1,18 +1,18 @@
-import type { AgentWriteToolDefinition } from "../../types";
 import {
   readOnlyInvocationPlan,
   stateChangeInvocationPlan,
 } from "../../authorization/invocationPlan";
-import { fail, ok, validateObject } from "../shared";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { revertActions } from "../../services/changeReverter";
+import type { ZoteroGateway } from "../../services/zoteroGateway";
 import {
   listJournalActions,
   selectUndoJournalAction,
 } from "../../store/changeJournal";
+import type { AgentWriteToolDefinition } from "../../types";
+import { fail, ok, validateObject } from "../shared";
 
 type UndoLastActionInput = {
-  /** Internal confirmation witness; this is not part of the tool schema. */
+  /** Exact durable action, optionally supplied by a completed result card. */
   actionId?: string;
 };
 
@@ -40,7 +40,13 @@ export function createUndoLastActionTool(
       inputSchema: {
         type: "object",
         additionalProperties: false,
-        properties: {},
+        properties: {
+          actionId: {
+            type: "string",
+            description:
+              "Exact journal action to undo; omit to select the latest reversible action.",
+          },
+        },
       },
       executionClass: "external_effect",
       requiresConfirmation: true,
@@ -74,14 +80,39 @@ export function createUndoLastActionTool(
         },
       },
     },
-    validate: (_args) => {
-      return ok<UndoLastActionInput>({});
+    validate: (args) => {
+      if (!validateObject<Record<string, unknown>>(args))
+        return fail("Undo expects an object");
+      if (
+        args.actionId !== undefined &&
+        (typeof args.actionId !== "string" || !args.actionId.trim())
+      )
+        return fail("actionId must be a non-empty journal identity");
+      return ok<UndoLastActionInput>(
+        typeof args.actionId === "string" ? { actionId: args.actionId } : {},
+      );
     },
-    planInvocation: async (_input, context) => {
-      const selection = await selectUndoJournalAction({
-        conversationKey: context.request.conversationKey,
-      });
-      return selection.action
+    acceptInheritedApproval: (input, approval) =>
+      approval.sourceToolName === "note_change" &&
+      approval.sourceMode === "approval" &&
+      approval.sourceActionId === input.actionId,
+
+    planInvocation: async (input, context) => {
+      const action = input.actionId
+        ? (
+            await listJournalActions({
+              actionId: input.actionId,
+              conversationKey: context.request.conversationKey,
+              limit: 1,
+              pendingOnly: true,
+            })
+          )[0]
+        : (
+            await selectUndoJournalAction({
+              conversationKey: context.request.conversationKey,
+            })
+          ).action;
+      return action
         ? stateChangeInvocationPlan({
             reversibility: "none",
             reason:
@@ -95,7 +126,17 @@ export function createUndoLastActionTool(
       const selection = await selectUndoJournalAction({
         conversationKey: context.request.conversationKey,
       });
-      const { action, newerIrreversible } = selection;
+      const { newerIrreversible } = selection;
+      const action = _input.actionId
+        ? (
+            await listJournalActions({
+              actionId: _input.actionId,
+              conversationKey: context.request.conversationKey,
+              limit: 1,
+              pendingOnly: true,
+            })
+          )[0]
+        : selection.action;
       _input.actionId = action?.actionId;
       return {
         toolName: "undo_last_action",

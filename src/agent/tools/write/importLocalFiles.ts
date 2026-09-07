@@ -4,18 +4,18 @@
  * .bib, .enw, .nbib, RDF) are read through Zotero's translators rather than
  * attached, which is what "import my references" means.
  */
-import type { AgentWriteToolDefinition } from "../../types";
 import {
   LibraryMutationService,
   type ImportLocalFilesOperation,
 } from "../../services/libraryMutationService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type { AgentWriteToolDefinition } from "../../types";
 import {
-  ok,
   fail,
-  validateObject,
   normalizePositiveInt,
   normalizeStringArray,
+  ok,
+  validateObject,
 } from "../shared";
 import {
   executeAndRecordUndo,
@@ -180,7 +180,7 @@ export function createImportLocalFilesTool(
         resolutionData,
         FILES_CHECKLIST_FIELD_ID,
       );
-      // No resolution — auto_approve / non-HITL path.
+      // No resolution — automatic / non-HITL path.
       if (selected === undefined) {
         return ok(input);
       }

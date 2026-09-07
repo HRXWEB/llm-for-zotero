@@ -33,7 +33,7 @@ export type ResearchStage =
 
 export const RESEARCH_POLICY_VERSION = 1 as const;
 
-const STAGES: readonly ResearchStage[] = [
+export const RESEARCH_STAGES: readonly ResearchStage[] = [
   "inventory",
   "broad_screening",
   "recall_expansion",
@@ -62,7 +62,7 @@ const CHAT_POLICY: ResearchPolicySnapshot = Object.freeze({
   materialExpansionMultiplier: 2,
   materialExpansionMinimumDelta: 20,
   largeDeepReadThreshold: 100,
-  stages: STAGES,
+  stages: RESEARCH_STAGES,
 });
 
 const PLAN_RESEARCH_POLICY: ResearchPolicySnapshot = Object.freeze({
@@ -96,11 +96,14 @@ export function decodeResearchPolicySnapshot(
     }
     return Number(entry);
   };
-  if (!Array.isArray(input.stages) || input.stages.length !== STAGES.length) {
+  if (
+    !Array.isArray(input.stages) ||
+    input.stages.length !== RESEARCH_STAGES.length
+  ) {
     throw new Error("Research policy stages are invalid");
   }
   const stages = input.stages.map(String) as ResearchStage[];
-  if (stages.some((stage, index) => stage !== STAGES[index])) {
+  if (stages.some((stage, index) => stage !== RESEARCH_STAGES[index])) {
     throw new Error("Research policy stage order is invalid");
   }
   return {

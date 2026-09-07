@@ -156,13 +156,12 @@ export function authorizeOriginalAction(
     };
   }
   if (
-    proposal.operation === "note_edit" ||
-    proposal.operation === "note_append"
+    context.interaction?.entryPoint === "action_ui" ||
+    context.interaction?.reviewPreference === "review"
   ) {
     return {
       kind: "confirm",
-      reason:
-        "Review the proposed changes to the existing note before applying them.",
+      reason: "Review the prepared changes before applying them, as requested.",
     };
   }
   if (context.hasApprovedPlanAuthority) {

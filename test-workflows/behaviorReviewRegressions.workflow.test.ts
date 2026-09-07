@@ -1,19 +1,15 @@
-import {
-  semanticContractFixture,
-  classifiedFixture,
-  semanticResponseFixture,
-} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
-import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
+import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentActionContract, AgentToolContext } from "../src/agent/types";
+import { semanticContractFixture } from "../test/helpers/semanticIntent";
 
 describe("workflow: behavior audit shared-owner regressions", function () {
   this.timeout(60000);
@@ -261,10 +257,14 @@ describe("workflow: behavior audit shared-owner regressions", function () {
           context,
           { callerKind: "model" },
         );
-        assert.equal(execution.kind, "confirmation");
-        if (execution.kind !== "confirmation") return;
-        assert.equal(note.getNote(), example.html);
-        const applied = await execution.execute({ approved: true });
+        assert.equal(
+          execution.kind,
+          "result",
+          "Auto must emit zero routine note confirmations",
+        );
+        if (execution.kind !== "result")
+          throw new Error("Unexpected Auto confirmation");
+        const applied = execution;
         assert.equal(applied.kind, "result");
         if (applied.kind !== "result") return;
         assert.isTrue(

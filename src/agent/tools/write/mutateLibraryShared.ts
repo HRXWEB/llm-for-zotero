@@ -2,12 +2,6 @@
  * Shared helpers used by the focused facade tools for building
  * confirmation cards, normalizing inputs, and executing operations.
  */
-import type {
-  AgentInvocationPlan,
-  AgentPendingField,
-  AgentToolContext,
-  AgentWriteToolOutput,
-} from "../../types";
 import {
   readOnlyInvocationPlan,
   stateChangeInvocationPlan,
@@ -15,10 +9,10 @@ import {
 import type { ActionEffect } from "../../authorization/types";
 import type {
   ApplyTagsOperation,
-  MoveToCollectionOperation,
-  UpdateMetadataOperation,
   LibraryMutationOperation,
   LibraryMutationService,
+  MoveToCollectionOperation,
+  UpdateMetadataOperation,
 } from "../../services/libraryMutationService";
 import { executeLibraryMutationAction } from "../../services/mutationCoordinator";
 import type {
@@ -30,6 +24,12 @@ import type {
   ZoteroGateway,
 } from "../../services/zoteroGateway";
 import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../../services/zoteroGateway";
+import type {
+  AgentInvocationPlan,
+  AgentPendingField,
+  AgentToolContext,
+  AgentWriteToolOutput,
+} from "../../types";
 import {
   normalizePositiveInt,
   normalizeStringArray,
@@ -124,7 +124,7 @@ export function normalizeTagAssignmentsFromResolution(
  * The renderer's checklist accessor returns the *checked* row ids as strings
  * (`agentTrace/render.ts` `getSelectedIds`), so the three states a caller must
  * tell apart are:
- *   - `undefined` — no resolution at all (the `auto_approve` / non-HITL path).
+ *   - `undefined` — no resolution at all (the `automatic` / non-HITL path).
  *     The caller keeps its original operation.
  *   - `[]` — the user was asked and unchecked everything. This is a decision,
  *     not an absence, and destructive callers must surface it as an error

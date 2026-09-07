@@ -1,15 +1,18 @@
-import { declaredSemanticInterpreter } from "./helpers/semanticIntent";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
-import { AgentRuntime } from "../src/agent/runtime";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
-import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
-import { createRenamedTool } from "../src/agent/tools/facade";
+import type {
+  AgentModelAdapter,
+  AgentStepParams,
+} from "../src/agent/model/adapter";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
 } from "../src/agent/reviewCards";
+import { AgentRuntime } from "../src/agent/runtime";
+import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import { createRenamedTool } from "../src/agent/tools/facade";
+import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
+import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type {
   AgentEvent,
   AgentModelCapabilities,
@@ -17,11 +20,10 @@ import type {
   AgentRuntimeRequest,
   AgentToolDefinition,
 } from "../src/agent/types";
-import type {
-  AgentModelAdapter,
-  AgentStepParams,
-} from "../src/agent/model/adapter";
-import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import {
+  classifiedFixture,
+  declaredSemanticInterpreter,
+} from "./helpers/semanticIntent";
 
 type MockDbRow = Record<string, unknown>;
 
@@ -518,8 +520,15 @@ describe("AgentRuntime HITL review workflow", function () {
             const cards: string[] = [];
             const outcome = await runtime.runTurn({
               request: makeRequest({
-                classifiedIntent: classifiedFixture(),
-                userText: "Find five papers relevant to this paper.",
+                classifiedIntent: {
+                  ...classifiedFixture(),
+                  semantic: {
+                    ...classifiedFixture().semantic!,
+                    literature: "select_then_import",
+                  },
+                },
+                userText:
+                  "Find five papers relevant to this paper. Let me review them before importing.",
                 metadata: { permissionMode: mode },
               }),
               onEvent: async (event) => {

@@ -1,3 +1,7 @@
+import {
+  OPERATION_CATALOG,
+  operationCatalogEntry,
+} from "../contracts/operationCatalog";
 import { isActionIndexList } from "../contracts/workflowDependencies";
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import type {
@@ -7,17 +11,19 @@ import type {
   AgentActionParameters,
   AgentActionProofDomain,
 } from "../types";
-import {
-  OPERATION_CATALOG,
-  operationCatalogEntry,
-} from "../contracts/operationCatalog";
 
 /** Model-facing structure for the same action fields decoded below. Names and
  * destinations are semantic references; numeric identities are optional. */
 export const ACTION_INTENT_RESPONSE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["operation", "coverage", "targetKind", "scopeRole"],
+  required: [
+    "operation",
+    "coverage",
+    "targetKind",
+    "scopeRole",
+    "reviewPreference",
+  ],
   properties: {
     dependsOn: {
       type: "array",
@@ -30,6 +36,12 @@ export const ACTION_INTENT_RESPONSE_SCHEMA = {
       minimum: 0,
       description:
         "Index of an earlier create_collection action supplying this destination; an action reference, never a native collection ID.",
+    },
+    reviewPreference: {
+      type: "string",
+      enum: ["default", "review", "direct"],
+      description:
+        "For this action only: review means the user wants to inspect changes before applying; direct means the user explicitly requests execution without optional review; otherwise default. Never infer review merely because the model chooses tags, metadata, papers, or destinations.",
     },
     operation: { type: "string", enum: Object.keys(OPERATION_CATALOG) },
     coverage: { type: "string", enum: ["one", "some", "all"] },
@@ -303,6 +315,11 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
       ))
   )
     return null;
+  if (
+    record.reviewPreference !== undefined &&
+    !["default", "review", "direct"].includes(String(record.reviewPreference))
+  )
+    return null;
   const parameters = parseParameters(record.parameters);
   if (
     record.parameters !== undefined &&
@@ -400,6 +417,12 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
     return null;
   return {
     ...details,
+    ...(record.reviewPreference !== undefined
+      ? {
+          reviewPreference:
+            record.reviewPreference as AgentActionIntent["reviewPreference"],
+        }
+      : {}),
     ...(record.dependsOn !== undefined
       ? { dependsOn: record.dependsOn as number[] }
       : {}),

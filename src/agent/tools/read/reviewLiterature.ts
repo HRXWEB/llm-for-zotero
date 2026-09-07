@@ -1,6 +1,10 @@
-import type { AgentToolDefinition } from "../../types";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { isExplicitLiteratureImport } from "../../model/literatureIntent";
+import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
+import {
+  createSearchLiteratureReviewAction,
+  resolveSearchLiteratureReview,
+} from "../../reviewCards";
 import {
   type LiteratureReviewInput,
   discoveryContent,
@@ -8,12 +12,9 @@ import {
   prepareLiteratureDiscoveryReview,
   resolveLiteratureDiscoveryReview,
 } from "../../services/literatureDiscovery";
-import {
-  createSearchLiteratureReviewAction,
-  resolveSearchLiteratureReview,
-} from "../../reviewCards";
-import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import { fail, ok, validateObject, normalizePositiveInt } from "../shared";
+import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type { AgentToolDefinition } from "../../types";
+import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 
 export function createLiteratureReviewTool(
   gateway: ZoteroGateway,
@@ -22,7 +23,7 @@ export function createLiteratureReviewTool(
     spec: {
       name: "literature_review",
       description:
-        "Show a ranked paper-only import-selection card after literature_search. Select the requested number using saved candidate references and evidence-based relevance reasons. Discovery requires this card in every permission mode. Explicit import requests use library_import directly instead.",
+        "Show a ranked paper-only import-selection card after literature_search. Select the requested number using saved candidate references and evidence-based relevance reasons. Use this card when the user requests selection or review. Ordinary discovery returns ranked results without importing. Explicit import requests use library_import directly instead.",
       executionClass: "read",
       requiresConfirmation: false,
       inputSchema: {
@@ -212,7 +213,12 @@ export function createLiteratureReviewTool(
       return discoveryContent(discovery.record);
     },
     createResultReviewAction: (_input, result, context) =>
-      createSearchLiteratureReviewAction(result, context, result.content),
+      context.request.actionEntryPoint === "action_ui" ||
+      getOriginalAgentPermissionMode() === "safe" ||
+      context.request.classifiedIntent?.semantic?.literature ===
+        "select_then_import"
+        ? createSearchLiteratureReviewAction(result, context, result.content)
+        : null,
     resolveResultReview: async (_input, result, resolution, context) => {
       const content = result.content as {
         sessionId?: string;

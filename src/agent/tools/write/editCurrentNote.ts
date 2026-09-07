@@ -1,42 +1,47 @@
-import { resolveWorkflowNoteDocument } from "../../documents/workflowMaterial";
-import { savePlanDocumentAsNote } from "../../documents/actions";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { LibraryMutationService } from "../../services/libraryMutationService";
-import { executeExternalMutation } from "../../services/mutationCoordinator";
-import {
-  sha256Text,
-  storeRecoveryText,
-} from "../../store/journalRecoveryBlobStore";
-import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
-import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
-import {
-  appendNoteHtml,
-  isLikelyHtmlNoteContent,
-  normalizeNoteSourceText,
-  stripNoteHtml,
-  renderRawNoteHtml,
-  readNoteSnapshot,
-  resolveParentItemForNoteTarget,
-  type NoteSnapshot,
-} from "../../../modules/contextPanel/notes";
 import { importLocalImagesIntoNote } from "../../../modules/contextPanel/noteImages";
 import {
   createFinalizedZoteroNote,
   persistVerifiedNoteHtml,
 } from "../../../modules/contextPanel/notePersistence";
+import {
+  appendNoteHtml,
+  isLikelyHtmlNoteContent,
+  normalizeNoteSourceText,
+  readNoteSnapshot,
+  renderRawNoteHtml,
+  resolveParentItemForNoteTarget,
+  stripNoteHtml,
+  type NoteSnapshot,
+} from "../../../modules/contextPanel/notes";
 import { escapeNoteHtml } from "../../../modules/contextPanel/textUtils";
 import {
   decodeNoteHtmlEntities,
   NOTE_TEXT_BREAK_PATTERN,
 } from "../../../utils/noteText";
+import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
+import { savePlanDocumentAsNote } from "../../documents/actions";
+import { resolveWorkflowNoteDocument } from "../../documents/workflowMaterial";
+import { LibraryMutationService } from "../../services/libraryMutationService";
+import { executeExternalMutation } from "../../services/mutationCoordinator";
+import type { ZoteroGateway } from "../../services/zoteroGateway";
 import {
-  ok,
+  sha256Text,
+  storeRecoveryText,
+} from "../../store/journalRecoveryBlobStore";
+import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
+import {
   fail,
-  validateObject,
   normalizePositiveInt,
   normalizePositiveIntArray,
+  ok,
+  validateObject,
 } from "../shared";
 import { executeAndRecordUndo } from "./mutateLibraryShared";
+import {
+  buildNoteChangeResultCards,
+  captureNoteChange,
+  presentNoteChangeFailure,
+} from "./noteChangePresentation";
 import { buildSavedNoteResultCards } from "./noteResultPresentation";
 
 type NotePatch = {
@@ -567,7 +572,7 @@ export function createEditCurrentNoteTool(
         "For generated workflow material, call `note_write` with mode:create, the exact targetItemId, and documentId returned by submit_document; omit content. For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
         SOURCE_NOTE_COPY_GUIDANCE +
         " " +
-        "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Existing-note edits and appends always require the note review card, in every permission mode. " +
+        "Requested new notes are created directly; the UI shows the saved content and a link to the native note after verification. Do not ask the user to approve a new-note draft or repeat the full saved note in your completion message. Auto applies edits and appends directly, then displays the verified diff; explicit review and Safe wait on the note card first. " +
         "Pass Markdown by default. When the user explicitly requests HTML output (e.g. for styled note templates), pass well-formed HTML with inline styles directly. " +
         "When the note discusses a specific figure, first use `paper_read({ mode:'figures' })` and embed the extracted PDF crop path: `![Figure N](file:///{path})` — auto-imported as a Zotero attachment. " +
         "Treat paper_read mode:'figures' as the authority for figure crop cache reuse/regeneration; use returned crop paths as-is and do not inspect or validate `figure_crops` metadata before writing. " +
@@ -580,6 +585,7 @@ export function createEditCurrentNoteTool(
     presentation: {
       label: "Edit / Create / Append Note",
       buildResultCards: (content) =>
+        buildNoteChangeResultCards(content) ||
         buildSavedNoteResultCards(zoteroGateway, content),
       summaries: {
         onCall: "Preparing note changes",
@@ -591,6 +597,11 @@ export function createEditCurrentNoteTool(
             content && typeof content === "object"
               ? String((content as { title?: unknown }).title || "")
               : "";
+          const change = buildNoteChangeResultCards(content)?.[0];
+          if (change)
+            return change.state === "no_op"
+              ? `No changes needed: ${change.title}`
+              : `Changed note: ${change.title}`;
           return title ? `Note saved: ${title}` : "Note saved";
         },
       },
@@ -1286,6 +1297,11 @@ export function createEditCurrentNoteTool(
             const appendedText = normalizeNoteSourceText(contentToAppend);
             return {
               result: {
+                noteChange: await captureNoteChange(
+                  targetNote,
+                  snapshot.html,
+                  context.request.conversationKey,
+                ),
                 status: "appended",
                 noteId: snapshot.noteId,
                 title: snapshot.title,
@@ -1307,7 +1323,14 @@ export function createEditCurrentNoteTool(
               effect: "applied",
             };
           },
-        });
+        }).catch((error) =>
+          presentNoteChangeFailure(
+            error,
+            preparedAppend?.targetNote || null,
+            preparedAppend?.snapshot.html,
+            context.request.conversationKey,
+          ),
+        );
       }
 
       let editSnapshot: NonNullable<
@@ -1386,6 +1409,15 @@ export function createEditCurrentNoteTool(
             : input._patchedHtml || renderRawNoteHtml(contentToSave);
           return {
             result: {
+              ...(current?.key
+                ? {
+                    noteChange: await captureNoteChange(
+                      current,
+                      editSnapshot.html,
+                      context.request.conversationKey,
+                    ),
+                  }
+                : {}),
               status: "updated",
               noteId: result.noteId,
               title: result.title,
@@ -1405,7 +1437,14 @@ export function createEditCurrentNoteTool(
             effect: "applied",
           };
         },
-      });
+      }).catch((error) =>
+        presentNoteChangeFailure(
+          error,
+          editSnapshot ? zoteroGateway.getItem(editSnapshot.noteId) : null,
+          editSnapshot?.html,
+          context.request.conversationKey,
+        ),
+      );
     },
   };
 }

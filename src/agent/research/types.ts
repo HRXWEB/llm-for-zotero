@@ -1,5 +1,5 @@
-import type { ResearchPolicySnapshot, ResearchStage } from "./policy";
 import type { AgentActionContract } from "../contracts/types";
+import type { ResearchPolicySnapshot, ResearchStage } from "./policy";
 
 export type ResearchCoverageStatus =
   | "complete"
@@ -303,7 +303,8 @@ export type ResearchProgress = Readonly<{
 }>;
 
 export type ResearchMutationApprovalGrant = Readonly<{
-  version: 1 | 2;
+  version: 1 | 2 | 3;
+  authority?: "user" | "auto_policy" | "yolo";
   grantId: string;
   planId: string;
   planRevision: number;
