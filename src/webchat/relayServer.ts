@@ -22,6 +22,13 @@
  *   POST /llm-for-zotero/webchat/load_chat
  */
 
+import {
+  getWebChatConversationId,
+  getWebChatTarget,
+  getWebChatTargetByUrl,
+  isWebChatUrlForTarget,
+} from "./types";
+
 const PREFIX = "/llm-for-zotero/webchat";
 const PRE_SUBMIT_RECLAIM_MS = 120_000;
 const PIPELINE_TIMEOUT_MS = 180_000;
@@ -146,8 +153,11 @@ export interface RelayState {
     pdf_filename: string | null;
     images: string[] | null;
     chatgpt_mode: string | null;
-    /** Which webchat site to target: "chatgpt" | "deepseek". */
+    /** Which registered webchat site to target. */
     target: string | null;
+    /** Existing provider conversation that a follow-up must remain bound to. */
+    expected_chat_url: string | null;
+    expected_chat_id: string | null;
     force_new_chat: boolean;
     delivery_contract_version: number;
     seq: number;
@@ -195,7 +205,7 @@ export interface RelayState {
   stopRequested: boolean;
   stopRequestedSeq: number;
   stopRequestedAttempt: number;
-  /** [webchat] Active target site: "chatgpt" | "deepseek". Set by the plugin when submitting queries. */
+  /** [webchat] Active registered target site, set when submitting queries. */
   active_target: string | null;
 }
 
@@ -213,6 +223,8 @@ interface ExtensionStatus {
   uploadControlFound: boolean;
   networkHookActive: boolean;
   supportedDeliveryContracts: number[];
+  supportedTargets: string[];
+  answerCapture: "dom" | "network" | null;
   lastRequestAt: number | null;
   lastStreamAt: number | null;
   lastDiagnostic: RelayTurnDiagnostic | null;
@@ -264,6 +276,8 @@ if (!Z._webchatRelay) {
         images: null,
         chatgpt_mode: null,
         target: null,
+        expected_chat_url: null,
+        expected_chat_id: null,
         force_new_chat: false,
         delivery_contract_version: 0,
         seq: 0,
@@ -442,8 +456,7 @@ function normalizeHistorySiteHostname(
 ): string {
   return String(hostname || "")
     .trim()
-    .toLowerCase()
-    .replace(/^www\./, "");
+    .toLowerCase();
 }
 
 function normalizeHistorySyncStatus(
@@ -568,6 +581,8 @@ function resetState() {
     images: null,
     chatgpt_mode: null,
     target: null,
+    expected_chat_url: null,
+    expected_chat_id: null,
     force_new_chat: false,
     delivery_contract_version: 0,
     seq: prevSeq,
@@ -636,10 +651,77 @@ function normalizeSupportedDeliveryContracts(value: unknown): number[] {
   ).sort((a, b) => a - b);
 }
 
+function normalizeSupportedTargets(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort();
+}
+
+function normalizeAnswerCapture(value: unknown): "dom" | "network" | null {
+  return value === "dom" || value === "network" ? value : null;
+}
+
+function extensionStatusMatchesTarget(
+  status: ExtensionStatus,
+  targetId: string,
+): boolean {
+  if (status.siteId && status.siteId !== targetId) return false;
+  const reportedUrls = [status.url, status.chatUrl].filter(
+    (value): value is string => Boolean(value),
+  );
+  return reportedUrls.every((url) => isWebChatUrlForTarget(url, targetId));
+}
+
+function validateTargetCapabilityForDispatch(
+  status: ExtensionStatus,
+  targetId: string | null | undefined,
+): string | null {
+  if (!targetId) return null;
+  const target = getWebChatTarget(targetId);
+  if (!target) return `Unknown WebChat target "${targetId}".`;
+
+  if (!extensionStatusMatchesTarget(status, targetId)) {
+    return `The active extension tab is not ${target.label}. Open ${target.hostname} and try again.`;
+  }
+
+  if (targetId === "gemini") {
+    if (!status.supportedTargets.includes("gemini")) {
+      return "The installed Sync for Zotero browser extension does not advertise Gemini support. Update the extension, reload Gemini, and try again.";
+    }
+    if (status.answerCapture !== "dom") {
+      return "The installed Sync for Zotero browser extension has not advertised Gemini DOM answer capture. Update the extension, reload Gemini, and try again.";
+    }
+    if (!status.contentScriptAlive || !status.composerFound) {
+      return "Sync for Zotero cannot verify the Gemini content script and composer. Reload Gemini and try again.";
+    }
+    return null;
+  }
+
+  // Legacy ChatGPT and DeepSeek extensions did not advertise these additive
+  // capability fields. Their existing network bridge remains authoritative.
+  if (!status.mainWorldInjected || !status.networkHookActive) {
+    return `The ${target.label} page network bridge is inactive. Reload the chat tab and try again.`;
+  }
+  return null;
+}
+
 function validateDeliveryContractForDispatch(
   requestedVersion: number,
+  targetId?: string | null,
 ): string | null {
-  if (requestedVersion === 0) return null;
+  if (targetId && !getWebChatTarget(targetId)) {
+    return `Unknown WebChat target "${targetId}".`;
+  }
+  // Legacy clients may omit the delivery contract for existing sites. Gemini
+  // is never inferred from that legacy shape and still requires an explicit
+  // target/capture advertisement.
+  if (requestedVersion === 0 && targetId !== "gemini") return null;
   if (requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION) {
     return `Unsupported WebChat delivery contract version ${requestedVersion}.`;
   }
@@ -656,7 +738,56 @@ function validateDeliveryContractForDispatch(
   if (!extensionStatus.supportedDeliveryContracts.includes(requestedVersion)) {
     return `The installed Sync for Zotero browser extension is too old: it does not support WebChat delivery contract ${requestedVersion}. Update the Sync for Zotero extension in your browser, then reload the chat tab and try again.`;
   }
-  return null;
+  return validateTargetCapabilityForDispatch(extensionStatus, targetId);
+}
+
+function resolveExpectedChatBinding(
+  input: Record<string, unknown>,
+  targetId: string | null,
+  forceNewChat: boolean,
+): { expectedChatUrl: string | null; expectedChatId: string | null } {
+  if (forceNewChat) {
+    return { expectedChatUrl: null, expectedChatId: null };
+  }
+
+  const hasExplicitUrl = Object.prototype.hasOwnProperty.call(
+    input,
+    "expected_chat_url",
+  );
+  const hasExplicitId = Object.prototype.hasOwnProperty.call(
+    input,
+    "expected_chat_id",
+  );
+  if (hasExplicitUrl || hasExplicitId) {
+    const expectedChatUrl = readNullableString(input.expected_chat_url);
+    let expectedChatId = readNullableString(input.expected_chat_id);
+    if (expectedChatUrl) {
+      const derivedChatId = getWebChatConversationId(expectedChatUrl, targetId);
+      if (!targetId || !derivedChatId) {
+        return { expectedChatUrl: null, expectedChatId: null };
+      }
+      if (expectedChatId && expectedChatId !== derivedChatId) {
+        return { expectedChatUrl: null, expectedChatId: null };
+      }
+      expectedChatId = derivedChatId;
+    }
+    if (!expectedChatUrl && expectedChatId && S().active_target !== targetId) {
+      return { expectedChatUrl: null, expectedChatId: null };
+    }
+    return { expectedChatUrl, expectedChatId };
+  }
+
+  const derivedChatId = getWebChatConversationId(S().remote_chat_url, targetId);
+  if (!targetId || !S().remote_chat_url || !derivedChatId) {
+    return { expectedChatUrl: null, expectedChatId: null };
+  }
+  if (S().remote_chat_id && S().remote_chat_id !== derivedChatId) {
+    return { expectedChatUrl: null, expectedChatId: null };
+  }
+  return {
+    expectedChatUrl: S().remote_chat_url,
+    expectedChatId: derivedChatId,
+  };
 }
 
 function isPreSubmitPhase(phase: RelayQueryPhase): boolean {
@@ -917,21 +1048,7 @@ function validateTerminalDeliveryContract(
 }
 
 function deriveRemoteChatIdFromUrl(url: string | null): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname === "chatgpt.com") {
-      const match = parsed.pathname.match(/^\/c\/([^/?#]+)/);
-      return match ? match[1] : null;
-    }
-    if (parsed.hostname === "chat.deepseek.com") {
-      const match = parsed.pathname.match(/^\/a\/chat\/s\/([^/?#]+)/);
-      return match ? match[1] : null;
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  return getWebChatConversationId(url);
 }
 
 function applyRemoteTurnMetadata(body: Record<string, unknown>): void {
@@ -1113,8 +1230,11 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
     0,
     Math.floor(Number(body.delivery_contract_version) || 0),
   );
+  const requestedTarget =
+    typeof body.target === "string" ? body.target : S().active_target || null;
   const compatibilityError = validateDeliveryContractForDispatch(
     requestedDeliveryContractVersion,
+    requestedTarget,
   );
   if (compatibilityError) {
     return jsonReply(
@@ -1122,6 +1242,20 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
       409,
     );
   }
+
+  const forceNewChat = body.force_new_chat === true;
+  const clearRemoteBinding =
+    forceNewChat ||
+    Boolean(
+      requestedTarget &&
+      S().remote_chat_url &&
+      !isWebChatUrlForTarget(S().remote_chat_url, requestedTarget),
+    );
+  const expectedBinding = resolveExpectedChatBinding(
+    body,
+    requestedTarget,
+    forceNewChat,
+  );
 
   // Clear stale state
   S().responses = [];
@@ -1136,11 +1270,13 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
   S().query.pdf_filename = (body.pdf_filename as string) || null;
   S().query.images = (body.images as string[]) || null;
   S().query.chatgpt_mode = (body.chatgpt_mode as string) || null;
-  S().query.target = (body.target as string) || S().active_target || null;
+  S().query.target = requestedTarget;
+  S().query.expected_chat_url = expectedBinding.expectedChatUrl;
+  S().query.expected_chat_id = expectedBinding.expectedChatId;
   if (body.target) {
     S().active_target = body.target as string;
   }
-  S().query.force_new_chat = body.force_new_chat === true;
+  S().query.force_new_chat = forceNewChat;
   S().query.delivery_contract_version = requestedDeliveryContractVersion;
   S().query.attempt = 0;
   S().query.phase = "pending";
@@ -1151,6 +1287,11 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
   // flag will handle navigation in runPipeline).
   if (body.force_new_chat && S().pendingCommand?.type === "NEW_CHAT") {
     S().pendingCommand = null;
+  }
+  if (clearRemoteBinding) {
+    S().remote_chat_url = null;
+    S().remote_chat_id = null;
+    S().turn_status = forceNewChat ? "navigating" : null;
   }
 
   return jsonReply({ ok: true, seq: S().query.seq });
@@ -1667,6 +1808,24 @@ const UpdateChatUrlEndpoint = createEndpoint(["POST"], (opts) => {
         ? body.chatUrl
         : null;
   if (chatUrl) {
+    const reportedTarget = getWebChatTargetByUrl(chatUrl);
+    if (!reportedTarget) {
+      return jsonReply(
+        {
+          error: "The reported chat URL is not a recognized WebChat provider.",
+        },
+        400,
+      );
+    }
+    if (S().active_target && reportedTarget.id !== S().active_target) {
+      return jsonReply(
+        {
+          error:
+            "The reported chat URL does not match the active WebChat target.",
+        },
+        409,
+      );
+    }
     S().remote_chat_url = chatUrl;
     S().remote_chat_id = deriveRemoteChatIdFromUrl(chatUrl);
     if (!S().turn_status) {
@@ -1739,6 +1898,8 @@ const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
     supportedDeliveryContracts: normalizeSupportedDeliveryContracts(
       body.supportedDeliveryContracts,
     ),
+    supportedTargets: normalizeSupportedTargets(body.supportedTargets),
+    answerCapture: normalizeAnswerCapture(body.answerCapture),
     lastRequestAt: readNullableNumber(body.lastRequestAt),
     lastStreamAt: readNullableNumber(body.lastStreamAt),
     lastDiagnostic:
@@ -1797,6 +1958,8 @@ export function relaySubmitQuery(opts: {
   images?: string[] | null;
   chatgpt_mode?: string | null;
   target?: string | null;
+  expected_chat_url?: string | null;
+  expected_chat_id?: string | null;
   force_new_chat?: boolean;
   delivery_contract_version?: number;
 }): { ok: boolean; seq: number; error?: string } {
@@ -1815,10 +1978,25 @@ export function relaySubmitQuery(opts: {
   );
   const compatibilityError = validateDeliveryContractForDispatch(
     requestedDeliveryContractVersion,
+    opts.target,
   );
   if (compatibilityError) {
     return { ok: false, seq: 0, error: compatibilityError };
   }
+
+  const forceNewChat = opts.force_new_chat === true;
+  const clearRemoteBinding =
+    forceNewChat ||
+    Boolean(
+      opts.target &&
+      S().remote_chat_url &&
+      !isWebChatUrlForTarget(S().remote_chat_url, opts.target),
+    );
+  const expectedBinding = resolveExpectedChatBinding(
+    opts as Record<string, unknown>,
+    opts.target || null,
+    forceNewChat,
+  );
 
   S().responses = [];
   S().active_seq = 0;
@@ -1832,8 +2010,10 @@ export function relaySubmitQuery(opts: {
   S().query.images = opts.images || null;
   S().query.chatgpt_mode = opts.chatgpt_mode || null;
   S().query.target = opts.target || null;
+  S().query.expected_chat_url = expectedBinding.expectedChatUrl;
+  S().query.expected_chat_id = expectedBinding.expectedChatId;
   S().active_target = opts.target || null;
-  S().query.force_new_chat = opts.force_new_chat === true;
+  S().query.force_new_chat = forceNewChat;
   S().query.delivery_contract_version = requestedDeliveryContractVersion;
   S().query.attempt = 0;
   S().query.phase = "pending";
@@ -1844,6 +2024,11 @@ export function relaySubmitQuery(opts: {
   // flag will handle navigation in runPipeline).
   if (opts.force_new_chat && S().pendingCommand?.type === "NEW_CHAT") {
     S().pendingCommand = null;
+  }
+  if (clearRemoteBinding) {
+    S().remote_chat_url = null;
+    S().remote_chat_id = null;
+    S().turn_status = forceNewChat ? "navigating" : null;
   }
 
   return { ok: true, seq: S().query.seq };
@@ -2057,7 +2242,7 @@ export function relayRequestStop(): void {
   S().turn_status = "incomplete";
 }
 
-/** Refresh the current ChatGPT conversation by re-navigating and re-scraping. */
+/** Refresh the current provider conversation by re-navigating and re-scraping. */
 export function relayRefreshChat(): { ok: boolean; chatUrl: string | null } {
   const chatUrl = S().remote_chat_url;
   const chatId = S().remote_chat_id;
@@ -2186,6 +2371,14 @@ export function relayGetExtensionStatus(): ExtensionStatus | null {
   return s;
 }
 
+/** Explain why the latest extension heartbeat cannot serve a target. */
+export function relayGetExtensionReadinessError(
+  targetId: string | null | undefined,
+  deliveryContractVersion = ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+): string | null {
+  return validateDeliveryContractForDispatch(deliveryContractVersion, targetId);
+}
+
 /** Test helper for exercising strict submissions without a browser runtime. */
 export function relaySetExtensionCapabilitiesForTests(
   supportedDeliveryContracts: number[],
@@ -2204,6 +2397,8 @@ export function relaySetExtensionCapabilitiesForTests(
     supportedDeliveryContracts: normalizeSupportedDeliveryContracts(
       supportedDeliveryContracts,
     ),
+    supportedTargets: ["chatgpt", "deepseek"],
+    answerCapture: "network",
     lastRequestAt: null,
     lastStreamAt: null,
     lastDiagnostic: null,
@@ -2215,6 +2410,7 @@ export function relaySetExtensionCapabilitiesForTests(
 /** Test helper to reset relay state without issuing commands. */
 export function relayResetForTests(): void {
   resetState();
+  S().active_target = null;
   setMirroredHistory([]);
   _store().historySiteSync = {};
   setScrapedTranscript(null);

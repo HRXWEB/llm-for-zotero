@@ -673,11 +673,13 @@ local cache when needed.
 
 <a id="webchat-setup-chatgpt-web-sync"></a>
 
-## WebChat Setup (ChatGPT & Deepseek Web Sync)
+## WebChat Setup (ChatGPT, DeepSeek & Gemini Web Sync)
 
-WebChat mode sends questions to [chatgpt.com](https://chatgpt.com) and [deepseek.com](https://chat.deepseek.com) through a
-browser extension, then streams responses back into Zotero. It is useful when
-you want ChatGPT/deepseek web access without a provider API key.
+WebChat mode sends questions to [chatgpt.com](https://chatgpt.com),
+[chat.deepseek.com](https://chat.deepseek.com), and
+[gemini.google.com](https://gemini.google.com) through a browser extension,
+then streams responses back into Zotero. It is useful when you want browser
+chat access without a provider API key.
 
 <p align="center">
   <img src="./assets/webchat.gif" alt="Screenshot of WebChat mode connected to chatgpt.com" width="1024" />
@@ -685,7 +687,9 @@ you want ChatGPT/deepseek web access without a provider API key.
 
 Prerequisites:
 
-- A ChatGPT account for `chatgpt.com` WebChat or a Deepseek account for `deepseek.com` WebChat.
+- Access to the selected provider site. Provider account requirements depend on
+  the site and feature; Gemini permits some anonymous text conversations, while
+  PDF upload and history may require sign-in.
 - A Chromium-based browser such as Chrome.
 
 Setup:
@@ -697,7 +701,17 @@ Setup:
    **Load unpacked**, and select the unzipped extension folder.
 4. In Zotero, open `Preferences` -> `llm-for-zotero` and set
    **Auth Mode** -> `WebChat`.
-5. ⚠️: Keep a ChatGPT tab open in your browser. A green dot in Zotero means the extension and ChatGPT tab are connected. Make sure the tab and Zotero stay in the same monitor. No minimization or backgrounding, or the connection may drop.
+5. ⚠️: Keep the selected provider tab open in your browser. A green dot in
+   Zotero means the extension and that exact site are connected. Make sure the
+   tab and Zotero stay in the same monitor. No minimization or backgrounding,
+   or the connection may drop.
+
+Gemini requires a companion extension version that explicitly advertises the
+`gemini` target and DOM answer capture; Zotero rejects older extension builds
+before dispatch. The canonical `gemini.google.com/app/:id` conversation path,
+anonymous text flow, and signed-in PDF composer DOM have been observed in
+Chrome. A complete automated Gemini PDF, follow-up, history, and restore run
+remains required before a release is declared verified.
 
 For release validation, keep Chrome signed in with the development extension loaded and run:
 
@@ -740,7 +754,7 @@ and cloud MinerU involve their respective services or companion runtimes.
 - [x] Agent mode (beta)
 - [x] MinerU PDF parsing
 - [x] GitHub Copilot auth
-- [x] WebChat mode (ChatGPT web sync)
+- [x] WebChat mode (ChatGPT, DeepSeek, and Gemini web sync)
 - [x] Standalone window mode
 - [x] File-based notes (Obsidian, Logseq, any Markdown directory)
 - [x] Claude Code integration
@@ -763,7 +777,7 @@ and cloud MinerU involve their respective services or companion runtimes.
 | Use ChatGPT in the browser                                  | [WebChat](#webchat-setup-chatgpt-web-sync) with the Sync for Zotero extension | No                              |
 | Use Codex models with ChatGPT Plus                          | [Codex App Server](#codex-setup-chatgpt-plus-subscribers)                     | No separate API key             |
 | Use Claude Code inside Zotero                               | [Claude Code bridge](#claude-code-setup-experimental)                         | Claude Code auth                |
-| Search and read the current public web                      | [General Web Search](#general-web-search) with Tavily                          | Tavily API key                  |
+| Search and read the current public web                      | [General Web Search](#general-web-search) with Tavily                         | Tavily API key                  |
 | Improve PDF extraction for tables, equations, and figures   | [MinerU PDF parsing](#mineru-pdf-parsing)                                     | Personal MinerU key recommended |
 
 > **Q: Is it free to use?**

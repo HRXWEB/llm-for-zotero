@@ -10881,6 +10881,15 @@ export async function sendQuestion(
       );
       const webchatTarget = webchatTargetEntry?.id || "chatgpt";
       const webchatLabel = webchatTargetEntry?.label || "ChatGPT";
+      const previousWebChatAssistant = historyForLLM
+        .slice()
+        .reverse()
+        .find(
+          (message) =>
+            message.role === "assistant" &&
+            message.modelName === effectiveRequestConfig.model &&
+            Boolean(message.webchatChatUrl || message.webchatChatId),
+        );
       setStatusSafely(`Sending to ${webchatLabel}…`, "sending");
       const { sendWebChatQuestion } = await import("../../webchat/pipeline");
       if (await stopInactiveRequest()) {
@@ -10911,6 +10920,14 @@ export async function sendQuestion(
             : undefined,
         chatgptMode,
         target: webchatTarget,
+        expectedChatUrl:
+          opts.webchatExpectedChatUrl ||
+          previousWebChatAssistant?.webchatChatUrl ||
+          undefined,
+        expectedChatId:
+          opts.webchatExpectedChatId ||
+          previousWebChatAssistant?.webchatChatId ||
+          undefined,
         signal: getAbortController(conversationKey)?.signal,
         onAnswerSnapshot: (text, snapshot) => {
           applyWebChatAnswerSnapshot(assistantMessage, text, snapshot);
