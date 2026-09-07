@@ -249,6 +249,27 @@ describe("ActionContractRunSession initialization", function () {
       "fulfilled",
     );
   });
+  it("does not restore superseded actions from a bare resume classification", async function () {
+    const prior = createContract("superseded");
+    const current = createContract("revised");
+    const harness = createHarness({
+      userText: "Continue, but save a file instead of running the command",
+      contract: current,
+      classifiedIntent: classifiedFixture({
+        semantic: semanticFixture({
+          continuation: "resume",
+          noteDestination: "file",
+        }),
+        actionIntents: [],
+      }),
+    });
+    await harness.session.initialize({
+      checkpoint: { contract: prior, progress: createProgress(prior) },
+    });
+    assert.strictEqual(harness.request.actionContract, current);
+    assert.notEqual(harness.request.actionContract?.id, prior.id);
+  });
+
   const resumeTexts = [
     "continue",
     "resume the task",
@@ -259,7 +280,7 @@ describe("ActionContractRunSession initialization", function () {
   ];
 
   for (const userText of resumeTexts) {
-    it(`restores a checkpoint for ${JSON.stringify(userText)}`, async function () {
+    it(`requires explicit reuse bindings for ${JSON.stringify(userText)}`, async function () {
       const restoredContract = createContract("restored");
       const restoredProgress = createProgress(restoredContract);
       const harness = createHarness({
@@ -275,10 +296,10 @@ describe("ActionContractRunSession initialization", function () {
         },
       });
       assert.deepEqual(result, { kind: "ready" });
-      assert.strictEqual(harness.request.actionContract, restoredContract);
-      assert.strictEqual(harness.request.actionProgress, restoredProgress);
-      assert.equal(harness.createContractCalls, 0);
-      assert.equal(harness.createProgressCalls, 0);
+      assert.notEqual(harness.request.actionContract?.id, restoredContract.id);
+      assert.notStrictEqual(harness.request.actionProgress, restoredProgress);
+      assert.equal(harness.createContractCalls, 1);
+      assert.equal(harness.createProgressCalls, 1);
     });
   }
 
@@ -481,9 +502,10 @@ describe("ActionContractRunSession state machine", function () {
         classifiedIntent: classifiedFixture({
           semantic: semanticFixture({ continuation: "resume" }),
         }),
-        contract: createContract("unused"),
+        contract,
       });
-      await harness.session.initialize({ checkpoint: { contract, progress } });
+      harness.request.actionProgress = progress;
+      await harness.session.initialize({ checkpoint: null });
       const decision = await harness.session.evaluateFinal({
         canCorrect: true,
       });

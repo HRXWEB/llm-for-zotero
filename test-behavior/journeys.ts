@@ -1,4 +1,9 @@
-import { semanticWorkflow } from "./semanticWorkflow";
+import {
+  semanticWorkflow,
+  ordinaryMoveWorkflow,
+  createdDestinationWorkflow,
+  preparedActionCases,
+} from "./semanticWorkflow";
 import { SemanticIntentService } from "../src/agent/model/semanticIntentService";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { getAllSkills } from "../src/agent/skills";
@@ -97,7 +102,20 @@ export async function executeJourneyStep(
   ) => driver.turn(id, prompt, spec.mode, request, expected);
   let outcome: StepOutcome | void = undefined;
   try {
-    if (id === "semantic.compound" || id === "semantic.compound-plan") {
+    if (id === "semantic.create-file") {
+      await createdDestinationWorkflow(ctx);
+    } else if (id === "semantic.action-cases") {
+      await preparedActionCases(ctx);
+    } else if (id === "semantic.move") {
+      await ordinaryMoveWorkflow(ctx);
+    } else if (
+      id === "semantic.compound" ||
+      id === "semantic.compound-plan" ||
+      id === "semantic.compound-resume" ||
+      id === "semantic.compound-revise" ||
+      id === "semantic.compound-implicit" ||
+      id === "semantic.compound-clarified"
+    ) {
       await semanticWorkflow(id, ctx);
     } else if (id === "paper.conversation") {
       await harness.openStandaloneForItem(f.items.primary.id);

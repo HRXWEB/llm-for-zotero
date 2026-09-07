@@ -134,3 +134,99 @@ describe("semantic integration", function () {
       });
   });
 });
+
+describe("prepared action clarification", function () {
+  it("accepts a free-text native reference without inventing alternatives", async function () {
+    const tool = createRequestUserInputTool();
+    const input = tool.validate({
+      questions: [
+        {
+          id: "source",
+          question: "Which source collection should the paper leave?",
+          options: [],
+        },
+      ],
+    });
+    assert.isTrue(input.ok);
+    if (!input.ok) return;
+    const pending = await tool.createPendingAction!(input.value, context);
+    assert.equal(pending.fields[0].type, "text");
+    const answer = tool.applyConfirmation!(
+      input.value,
+      { source: "Geometry" },
+      context,
+    );
+    assert.isTrue(answer.ok);
+    if (answer.ok)
+      assert.deepEqual(await tool.execute(answer.value, context), {
+        answers: [{ id: "source", answer: "Geometry" }],
+      });
+  });
+  it("passes the selected description to semantic interpretation and rebinds the complete action", async function () {
+    const { resolvedAgentRequest } =
+      await import("./helpers/resolvedAgentRequest");
+    const { actionFixture, actionContractFixture } =
+      await import("./helpers/semanticIntent");
+    let interpretedAnswer = "";
+    const tool = createRequestUserInputTool(
+      async () =>
+        actionContractFixture("move_to_collection", {
+          sourceCollectionId: 1,
+          destinationCollectionId: 7,
+        }),
+      async (request) => {
+        interpretedAnswer = request.clarificationHistory![0].answer;
+        return {
+          classifiedIntent: actionFixture("move_to_collection", {
+            sourceCollectionId: 1,
+            destinationCollectionId: 7,
+          }),
+          skillIds: [],
+          degraded: false,
+        };
+      },
+    );
+    const ctx = {
+      ...context,
+      request: resolvedAgentRequest({
+        conversationKey: 2317,
+        mode: "agent",
+        userText: "move this paper to learning folder",
+        actionPreparation: { state: "needs_input", issues: ["Which source?"] },
+      }),
+    };
+    const input = tool.validate({
+      questions: [
+        {
+          id: "source",
+          question: "Which source?",
+          options: [
+            {
+              id: "move",
+              label: "Move to Learning",
+              description:
+                "Remove Geometry and preserve all other memberships.",
+            },
+            { id: "add", label: "Keep all existing memberships" },
+          ],
+        },
+      ],
+    });
+    assert.isTrue(input.ok);
+    if (!input.ok) return;
+    const answer = tool.applyConfirmation!(
+      input.value,
+      { source: { kind: "option", optionId: "move" } },
+      ctx,
+    );
+    assert.isTrue(answer.ok);
+    if (!answer.ok) return;
+    await tool.execute(answer.value, ctx);
+    assert.include(interpretedAnswer, "Remove Geometry");
+    assert.equal(ctx.request.actionPreparation?.state, "ready");
+    assert.equal(
+      ctx.request.actionContract?.obligations[0].parameters?.sourceCollectionId,
+      1,
+    );
+  });
+});

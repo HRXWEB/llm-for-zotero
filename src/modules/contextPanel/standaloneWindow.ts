@@ -930,7 +930,7 @@ export function openStandaloneChat(options?: {
       ) as HTMLButtonElement;
       paperTab.className = "llm-standalone-tab";
       paperTab.type = "button";
-      paperTab.textContent = resolveStandalonePaperTabLabel();
+      paperTab.textContent = t(resolveStandalonePaperTabLabel());
       paperTab.dataset.tab = "paper";
 
       const openTab = doc.createElementNS(
@@ -1220,9 +1220,11 @@ export function openStandaloneChat(options?: {
       };
 
       const syncPaperTabLabel = () => {
-        paperTab.textContent = resolveStandalonePaperTabLabel({
-          isWebChat: isInWebChatMode,
-        });
+        paperTab.textContent = t(
+          resolveStandalonePaperTabLabel({
+            isWebChat: isInWebChatMode,
+          }),
+        );
       };
 
       const getCurrentLibraryScopeID = (): number => {

@@ -119,7 +119,10 @@ describe("agent prompt envelope", function () {
     const messages = await buildAgentInitialMessages(request, [], []);
     const prompt = messages.map(messageText).join("\n");
     assert.include(prompt, "Do not call task_update for these tasks");
-    assert.include(prompt, "research_update and submit_document");
+    assert.include(
+      prompt,
+      "verified reads, mutation receipts, and finalized material",
+    );
     assert.notInclude(
       prompt,
       "After evidence exists, call task_update with only the task",

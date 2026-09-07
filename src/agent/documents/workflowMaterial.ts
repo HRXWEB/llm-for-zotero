@@ -126,15 +126,26 @@ export function recordMaterialOutput(
 }
 export async function loadWorkflowMaterial(
   request: AgentRuntimeRequest,
+  outputId?: string,
 ): Promise<PlanDocument | null> {
   const outputs =
     request.actionContract?.intent?.semantic?.materialOutputs ||
     request.classifiedIntent?.semantic?.materialOutputs ||
     [];
   for (const output of [...outputs].reverse()) {
-    const document = await loadPlanDocument(
-      materialDocumentId(request, output.id),
+    if (outputId && output.id !== outputId) continue;
+    const receipt = request.actionProgress?.materialOutputs?.find(
+      (entry) => entry.outputId === output.id,
     );
+    const document = await loadPlanDocument(
+      receipt?.documentId || materialDocumentId(request, output.id),
+    );
+    if (
+      receipt &&
+      (document?.contentHash !== receipt.contentHash ||
+        document.documentVersion !== receipt.documentVersion)
+    )
+      continue;
     if (document?.conversationKey === request.conversationKey) return document;
   }
   return null;

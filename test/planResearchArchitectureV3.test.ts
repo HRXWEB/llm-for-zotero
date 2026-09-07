@@ -762,6 +762,15 @@ describe("Plan Mode research architecture v3", function () {
       taskUpdate.isAvailable?.(hostOwnedRequest),
       "host-verifiable workflows must not advertise task_update",
     );
+    const mutationLedger = hostOwnedRequest.metadata!
+      .planExecutionLedger as any;
+    mutationLedger.tasks[0].expectedEffect = "mutation";
+    mutationLedger.tasks[0].completionRequirements[0].kind =
+      "mutation_receipts";
+    assert.isFalse(
+      taskUpdate.isAvailable?.(hostOwnedRequest),
+      "Receipt-verified mutations must also have one host task owner",
+    );
     assert.match(
       (taskUpdate.spec.inputSchema as any).properties.task.properties
         .reasoningAssertion.description,

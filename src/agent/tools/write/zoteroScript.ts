@@ -41,7 +41,7 @@ type ZoteroScriptInput = {
   timeoutMs: number;
 };
 
-type ZoteroScriptRuntimeOptions = {
+export type ZoteroScriptRuntimeOptions = {
   /** Explicit unit-test seam. Production execution must fail closed. */
   allowUnsandboxedTestExecution?: boolean;
 };
@@ -144,9 +144,9 @@ const SNAPSHOT_FIELDS = [
  * when that boundary is unavailable; unit tests use an explicit seam instead
  * of silently weakening shipped behavior.
  */
-function compileScript(
+export function compileScript(
   source: string,
-  access: ZoteroScriptInput["access"],
+  access: ZoteroScriptInput["access"] | "operations",
   effect: ZoteroScriptInput["effect"],
   options: ZoteroScriptRuntimeOptions,
 ): (zotero: unknown, env: unknown) => Promise<unknown> {
@@ -214,7 +214,7 @@ function getComponentsUtils(): any {
  * journalled safely through arbitrary code.
  */
 function createScriptSandbox(
-  access: ZoteroScriptInput["access"],
+  access: ZoteroScriptInput["access"] | "operations",
   effect: ZoteroScriptInput["effect"],
 ): unknown | null {
   const cu = getComponentsUtils();
@@ -239,8 +239,9 @@ function createScriptSandbox(
       wantComponents: false,
     });
     Object.assign(sandbox, {
-      Zotero: buildScriptZotero(access, effect),
-      ...(access === "library" && effect === "read"
+      Zotero:
+        access === "operations" ? undefined : buildScriptZotero(access, effect),
+      ...((access === "operations" || access === "library") && effect === "read"
         ? {}
         : {
             setTimeout: (globalThis as any).setTimeout,
@@ -359,7 +360,7 @@ function mapMaybePromise(
     : mapper(value);
 }
 
-function safeHostFunction(
+export function safeHostFunction(
   invoke: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => unknown {
   const callable = (...args: unknown[]) => invoke(...args);

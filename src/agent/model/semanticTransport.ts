@@ -1,3 +1,4 @@
+import { workflowCheckpointEvidence } from "../contracts/workflowCheckpoint";
 import { getAllSkills } from "../skills/catalog";
 import type { AgentSkill } from "../skills/skillLoader";
 import { OPERATION_CATALOG } from "../contracts/operationCatalog";
@@ -70,6 +71,9 @@ export async function semanticInputDigest(
         )
         .sort((a, b) => a.id.localeCompare(b.id)),
       workflow: request.planContext,
+      workflowCheckpoint: workflowCheckpointEvidence(
+        request.workflowCheckpoint,
+      ),
       selectedTexts: request.selectedTexts,
       selectedTextSources: request.selectedTextSources,
       history: request.history,

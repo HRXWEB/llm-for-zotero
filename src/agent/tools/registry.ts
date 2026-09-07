@@ -1,3 +1,8 @@
+import {
+  selectWorkflowStep,
+  type PreparedActionBinding,
+  type PreparedActionBindings,
+} from "./workflowSteps";
 import { preparationEffectBlock } from "../contracts/actionPreparation";
 import type {
   AgentToolArtifact,
@@ -307,6 +312,42 @@ export class AgentToolRegistry {
       );
     }
     return null;
+  }
+
+  private readonly actionBindings: PreparedActionBindings = new Map();
+
+  registerActionBinding(
+    operation: import("../types").AgentActionOperation,
+    binding: PreparedActionBinding,
+  ): void {
+    if (this.actionBindings.has(operation))
+      throw new Error(`Duplicate prepared action binding: ${operation}`);
+    this.actionBindings.set(operation, binding);
+  }
+
+  async getNextWorkflowStep(
+    request: AgentRuntimeRequest,
+    allowedObligationIds?: readonly string[],
+  ) {
+    const resolved = this.actionContracts?.resolveWorkflowContract(
+      request.actionContract,
+      request.actionProgress,
+    );
+    const step = await selectWorkflowStep(
+      resolved ? { ...request, actionContract: resolved } : request,
+      this.actionBindings,
+      allowedObligationIds,
+    );
+    if (step.kind !== "action") return step;
+    const tool = this.tools.get(step.prepared.call.name);
+    const validation = tool?.validate(step.prepared.call.arguments);
+    if (!validation?.ok)
+      return {
+        kind: "blocked" as const,
+        code: "invalid_binding" as const,
+        reason: `The registered ${step.prepared.call.name} action binding is invalid. No action was executed.`,
+      };
+    return step;
   }
 
   createActionProgress(
@@ -641,6 +682,7 @@ export class AgentToolRegistry {
         preparedAction,
         {
           allowPartialCoverage: Boolean(
+            options.checkpointedWorkflow ||
             approvedPlanCoverage ||
             (options.callerKind === "action" && context.journalActionScope),
           ),
@@ -691,7 +733,7 @@ export class AgentToolRegistry {
                   error: scopeFailure.message,
                   requiresPlanRevision:
                     context.request.planContext?.phase === "executing",
-                  retryable: true,
+                  retryable: false,
                   expectedCount: scopeFailure.expectedCount,
                   proposedCount: scopeFailure.proposedCount,
                   rejectedTargets: scopeFailure.rejectedTargets,
@@ -952,6 +994,7 @@ export class AgentToolRegistry {
           executionPrepared,
           {
             allowPartialCoverage: Boolean(
+              options.checkpointedWorkflow ||
               approvedPlanCoverage ||
               (options.callerKind === "action" &&
                 executionContext.journalActionScope),
@@ -989,7 +1032,7 @@ export class AgentToolRegistry {
               content: {
                 code: executionScopeFailure.code,
                 error: executionScopeFailure.message,
-                retryable: true,
+                retryable: false,
                 expectedCount: executionScopeFailure.expectedCount,
                 proposedCount: executionScopeFailure.proposedCount,
                 rejectedTargets: executionScopeFailure.rejectedTargets,
@@ -1441,6 +1484,7 @@ export class AgentToolRegistry {
           confirmedInvocation.preparedAction,
           {
             allowPartialCoverage: Boolean(
+              options.checkpointedWorkflow ||
               approvedPlanCoverage ||
               (options.callerKind === "action" && context.journalActionScope),
             ),
@@ -1472,7 +1516,7 @@ export class AgentToolRegistry {
                   error: confirmedScopeFailure.message,
                   requiresPlanRevision:
                     context.request.planContext?.phase === "executing",
-                  retryable: true,
+                  retryable: false,
                   expectedCount: confirmedScopeFailure.expectedCount,
                   proposedCount: confirmedScopeFailure.proposedCount,
                   rejectedTargets: confirmedScopeFailure.rejectedTargets,

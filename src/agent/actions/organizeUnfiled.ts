@@ -357,7 +357,10 @@ export const organizeUnfiledAction: AgentAction<
         | Record<string, unknown>
         | undefined;
       const movedCount =
-        mutateResult.ok && resultObj ? Number(resultObj.movedCount || 0) : 0;
+        mutateResult.ok && resultObj
+          ? Number(resultObj.addedCount || 0) +
+            Number(resultObj.movedCount || 0)
+          : 0;
       const mutateError = readToolResultError(mutateResult);
 
       if (mutateResult.ok) {
@@ -366,7 +369,7 @@ export const organizeUnfiledAction: AgentAction<
         ctx.onProgress({
           type: "step_done",
           step: `${pageLabel}: Assigning items to collections`,
-          summary: `Moved ${movedCount} item${movedCount === 1 ? "" : "s"}`,
+          summary: `Filed ${movedCount} item${movedCount === 1 ? "" : "s"}`,
         });
         await ctx.checkpoint?.({
           cursor: page.offset + page.items.length,

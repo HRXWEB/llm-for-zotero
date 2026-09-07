@@ -534,6 +534,43 @@ describe("DirectDocumentFinalizer", function () {
     );
   });
 
+  it("waits for native citation styles before publishing a cited document", async function () {
+    let ready = false;
+    let initializationCalls = 0;
+    (Zotero as any).Styles = {
+      init: async () => {
+        initializationCalls++;
+        await Promise.resolve();
+        ready = true;
+      },
+    };
+    const gateway = (finalizer as any).gateway;
+    const format = gateway.formatStructuredCitations.bind(gateway);
+    gateway.formatStructuredCitations = (params: unknown) => {
+      if (!ready) throw new Error("Styles not yet loaded");
+      return format(params);
+    };
+    const result = await finalizer.finalize({
+      request: request(
+        {
+          required: true,
+          documentKind: "guide",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        },
+        [observation],
+      ),
+      runId: "run-styles-readiness",
+      input: input({
+        markdown: "# Guide\n\nContext [[cite:C1]].",
+        citations: [groundedCitation],
+      }),
+      now: 302,
+    });
+    assert.equal(initializationCalls, 1);
+    assert.include(result.document.visibleMarkdown, "## References");
+  });
+
   it("accepts authored documents with or without optional citations", async function () {
     const policy: DocumentOutcomePolicy = {
       required: true,

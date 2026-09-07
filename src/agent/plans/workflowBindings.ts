@@ -1,4 +1,7 @@
-import { isActionIndexList } from "../contracts/workflowDependencies";
+import {
+  actionDependencies,
+  isActionIndexList,
+} from "../contracts/workflowDependencies";
 import type { AgentActionContract } from "../contracts/types";
 import type { PlanContract, PlanStep } from "./types";
 
@@ -87,7 +90,7 @@ export function validatePlanWorkflowBindings(
         "Every requested workflow action needs an explicit Plan step owner",
       );
     if (owner === undefined) continue;
-    for (const dependency of action.dependsOn || []) {
+    for (const dependency of actionDependencies(action)) {
       const prerequisite = actionOwners.get(dependency);
       if (prerequisite === undefined || prerequisite > owner)
         throw new Error(
@@ -125,8 +128,10 @@ export function planStepObligationIds(
       .filter((obligation, index) =>
         step.actionIndexes
           ? step.actionIndexes.includes(obligation.sourceActionIndex ?? index)
-          : !step.expectedCapability ||
-            obligation.capability === step.expectedCapability,
+          : step.expectedEffect ===
+              (obligation.operation === "read_full" ? "read" : "mutation") &&
+            (!step.expectedCapability ||
+              obligation.capability === step.expectedCapability),
       )
       .map((entry) => entry.id) || []
   );

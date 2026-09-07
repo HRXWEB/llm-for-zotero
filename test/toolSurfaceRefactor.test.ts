@@ -283,6 +283,7 @@ describe("semantic tool surface", function () {
       "run_command",
       "saved_search_update",
       "undo_last_action",
+      "workflow_script",
       "zotero_script",
     ]);
     const literatureSearch = tools.find(

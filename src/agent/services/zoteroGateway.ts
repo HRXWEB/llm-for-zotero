@@ -167,7 +167,7 @@ export type BatchTagItemResult = {
 export type BatchMoveItemResult = {
   itemId: number;
   title: string;
-  status: "moved" | "skipped" | "missing";
+  status: "moved" | "added" | "skipped" | "missing";
   targetCollectionId?: number;
   targetCollectionName?: string;
   reason?: string;
@@ -3679,6 +3679,7 @@ export class ZoteroGateway {
   }): Promise<{
     selectedCount: number;
     movedCount: number;
+    addedCount: number;
     skippedCount: number;
     collections: CollectionSummary[];
     items: BatchMoveItemResult[];
@@ -3748,6 +3749,7 @@ export class ZoteroGateway {
       return {
         selectedCount: sets.length,
         movedCount: outcome.changedCount,
+        addedCount: 0,
         skippedCount: outcome.items.length - outcome.changedCount,
         collections: Array.from(collectionMap.values()),
         items: outcome.items,
@@ -3756,7 +3758,7 @@ export class ZoteroGateway {
     }
 
     const results: BatchMoveItemResult[] = [];
-    let movedCount = 0;
+    let addedCount = 0;
     for (const assignment of normalizedAssignments) {
       const collection = collectionMap.get(assignment.targetCollectionId);
       if (!collection) {
@@ -3816,19 +3818,20 @@ export class ZoteroGateway {
       }
       item.addToCollection(collection.collectionId);
       await item.saveTx();
-      movedCount += 1;
+      addedCount += 1;
       results.push({
         itemId: item.id,
         title,
-        status: "moved",
+        status: "added",
         targetCollectionId: collection.collectionId,
         targetCollectionName: collection.path || collection.name,
       });
     }
     return {
       selectedCount: normalizedAssignments.length,
-      movedCount,
-      skippedCount: results.length - movedCount,
+      movedCount: 0,
+      addedCount,
+      skippedCount: results.length - addedCount,
       collections: Array.from(collectionMap.values()),
       items: results,
     };
@@ -3840,6 +3843,7 @@ export class ZoteroGateway {
   }): Promise<{
     selectedCount: number;
     movedCount: number;
+    addedCount: number;
     skippedCount: number;
     collection: CollectionSummary;
     items: BatchMoveItemResult[];
@@ -3857,6 +3861,7 @@ export class ZoteroGateway {
     return {
       selectedCount: result.selectedCount,
       movedCount: result.movedCount,
+      addedCount: result.addedCount,
       skippedCount: result.skippedCount,
       collection,
       items: result.items,

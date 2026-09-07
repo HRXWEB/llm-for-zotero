@@ -10,6 +10,14 @@ import {
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("prepared semantic authority lifetime", function () {
+  let originalZotero: unknown;
+  beforeEach(function () {
+    originalZotero = globalThis.Zotero;
+    globalThis.Zotero = { DB: { queryAsync: async () => [] } } as any;
+  });
+  afterEach(function () {
+    globalThis.Zotero = originalZotero as any;
+  });
   it("reinterprets a reused request when the selected context or source turn changes", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 1,

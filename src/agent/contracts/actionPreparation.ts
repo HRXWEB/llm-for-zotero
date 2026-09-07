@@ -3,6 +3,11 @@ import type { AgentRuntimeRequest, AgentInvocationPlan } from "../types";
 export type ActionPreparation = {
   state: "interpreting" | "resolving" | "needs_input" | "ready" | "unavailable";
   issues: string[];
+  sourceSelection?: {
+    actionIndex: number;
+    question: string;
+    candidates: Array<{ id: number; name: string; path: string }>;
+  };
 };
 
 /** Preparation never grants effects. The executable contract remains the authority. */

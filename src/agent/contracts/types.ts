@@ -86,6 +86,8 @@ export type AgentActionParameters = {
 export type AgentActionIntent = {
   /** Zero-based indexes into the frozen action list. */
   dependsOn?: number[];
+  /** Index of the create_collection action that supplies a future destination. */
+  destinationFrom?: number;
   /** Identity of authored material from semantic.materialOutputs. */
   contentFrom?: string;
   capability: AgentActionCapability;

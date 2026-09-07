@@ -51,6 +51,16 @@ export function validMaterialOutputs(
     return true;
   });
 }
+export function actionDependencies(
+  action: Pick<AgentActionIntent, "dependsOn" | "destinationFrom">,
+): number[] {
+  return [
+    ...new Set([
+      ...(action.dependsOn || []),
+      ...(action.destinationFrom === undefined ? [] : [action.destinationFrom]),
+    ]),
+  ];
+}
 /** Actions are supplied in dependency order; forward/self edges are malformed. */
 export function validWorkflowDependencies(
   actions: readonly AgentActionIntent[],
@@ -65,7 +75,16 @@ export function validWorkflowDependencies(
   )
     return false;
   return actions.every((action, index) => {
-    if ((action.dependsOn || []).some((dependency) => dependency >= index))
+    if (
+      action.destinationFrom !== undefined &&
+      (action.operation !== "move_to_collection" ||
+        !Number.isSafeInteger(action.destinationFrom) ||
+        action.destinationFrom < 0 ||
+        actions[action.destinationFrom]?.operation !== "create_collection" ||
+        action.parameters?.destinationCollectionId !== undefined)
+    )
+      return false;
+    if (actionDependencies(action).some((dependency) => dependency >= index))
       return false;
     if (!action.contentFrom) return true;
     const output = outputs.find(

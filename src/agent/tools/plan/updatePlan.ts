@@ -1,3 +1,4 @@
+import type { PlanArtifact } from "../../plans/types";
 import type { AgentToolDefinition } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
@@ -363,6 +364,24 @@ export function createUpdatePlanTool(
         reason:
           "This host-owned control updates only the active plan representation.",
       }),
+    resolveTerminalResult: (input, result) => {
+      if (!input.ready || !result.ok) return null;
+      const artifact = (result.content as { artifact?: PlanArtifact })
+        ?.artifact;
+      if (artifact?.status !== "awaiting_approval") return null;
+      return {
+        finalText: [
+          "The plan is ready for review.",
+          artifact.explanation || "",
+          artifact.steps
+            .map((step, index) => `${index + 1}. ${step.content}`)
+            .join("\n"),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        providerTranscript: "tool_only",
+      };
+    },
     execute: async (input, context) => {
       const artifact = await preparePlanExecution(input, context, gateway);
       await context.publishPlanEvent?.({

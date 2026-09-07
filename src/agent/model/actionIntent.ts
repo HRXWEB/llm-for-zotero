@@ -25,6 +25,12 @@ export const ACTION_INTENT_RESPONSE_SCHEMA = {
       uniqueItems: true,
     },
     contentFrom: { type: "string", minLength: 1 },
+    destinationFrom: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "Index of an earlier create_collection action supplying this destination; an action reference, never a native collection ID.",
+    },
     operation: { type: "string", enum: Object.keys(OPERATION_CATALOG) },
     coverage: { type: "string", enum: ["one", "some", "all"] },
     targetKind: { type: "string", enum: ["papers", "items"] },
@@ -379,6 +385,12 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
     )
       return null;
   }
+  if (
+    record.destinationFrom !== undefined &&
+    (!Number.isSafeInteger(record.destinationFrom) ||
+      Number(record.destinationFrom) < 0)
+  )
+    return null;
   if (record.dependsOn !== undefined && !isActionIndexList(record.dependsOn))
     return null;
   if (
@@ -393,6 +405,9 @@ function parseActionIntent(value: unknown): AgentActionIntent | null {
       : {}),
     ...(typeof record.contentFrom === "string"
       ? { contentFrom: record.contentFrom }
+      : {}),
+    ...(typeof record.destinationFrom === "number"
+      ? { destinationFrom: record.destinationFrom }
       : {}),
     ...(discovery ? { discovery } : {}),
     coverage: record.coverage,

@@ -383,6 +383,14 @@ function decodeActionIntent(
   ) {
     throw new Error(`${label}.scopeRole is invalid`);
   }
+  if (
+    input.destinationFrom !== undefined &&
+    (!Number.isSafeInteger(input.destinationFrom) ||
+      Number(input.destinationFrom) < 0)
+  )
+    throw new Error(
+      `${label}.destinationFrom must be a nonnegative action index`,
+    );
   if (input.dependsOn !== undefined && !isActionIndexList(input.dependsOn))
     throw new Error(`${label}.dependsOn must be unique action indexes`);
   const result: AgentActionIntent & {
@@ -390,6 +398,7 @@ function decodeActionIntent(
     sourceActionIndex?: number;
   } = {
     dependsOn: input.dependsOn as number[] | undefined,
+    destinationFrom: input.destinationFrom as number | undefined,
     contentFrom: optionalText(input.contentFrom, `${label}.contentFrom`),
     capability,
     operation,

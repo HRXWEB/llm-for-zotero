@@ -24,7 +24,10 @@ import {
 } from "../context/turnPaperScope";
 
 export class ActionReferenceResolutionError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly sourceSelection?: import("./actionPreparation").ActionPreparation["sourceSelection"],
+  ) {
     super(message);
     this.name = "ActionReferenceResolutionError";
   }
@@ -429,6 +432,7 @@ export async function resolveScope(
   intent: AgentActionIntent,
   collectionCreations: readonly AgentActionObligation[] = [],
   resolver?: SemanticReferenceResolver,
+  sourceActionIndex = 0,
 ): Promise<AgentActionObligation[]> {
   if (intent.operation !== "move_to_collection")
     return resolveScopeReferences(
@@ -444,7 +448,61 @@ export async function resolveScope(
     constraints: { ...intent.constraints },
   };
   const destinationName = filing.parameters.collectionName;
-  if (destinationName && !filing.parameters.destinationCollectionId) {
+  const earlierCreations = collectionCreations.filter(
+    (creation) => (creation.sourceActionIndex ?? -1) < sourceActionIndex,
+  );
+  let future =
+    intent.destinationFrom === undefined
+      ? undefined
+      : earlierCreations.find(
+          (creation) => creation.sourceActionIndex === intent.destinationFrom,
+        );
+  if (
+    intent.destinationFrom !== undefined &&
+    (!future || filing.parameters.destinationCollectionId)
+  )
+    throw new ActionReferenceResolutionError(
+      "The destination reference must identify one earlier requested collection creation.",
+    );
+  if (
+    !future &&
+    destinationName &&
+    !filing.parameters.destinationCollectionId &&
+    filing.scopeRole === "source"
+  ) {
+    const named = earlierCreations.filter(
+      (creation) =>
+        normalizePath(creation.parameters?.collectionName) ===
+        normalizePath(destinationName),
+    );
+    const existing = listCurrentCollectionSummaries(
+      gateway,
+      Number(request.libraryID),
+    ).some(
+      (collection) =>
+        normalizePath(collection.name) === normalizePath(destinationName) ||
+        normalizePath(collection.path) === normalizePath(destinationName),
+    );
+    if (!existing && named.length === 1) future = named[0];
+  }
+  if (future) {
+    if (
+      destinationName &&
+      normalizePath(destinationName) !==
+        normalizePath(future.parameters?.collectionName)
+    )
+      throw new ActionReferenceResolutionError(
+        "The destination name conflicts with its referenced collection creation.",
+      );
+    delete filing.parameters.collectionName;
+    if (filing.scopeRole === "destination")
+      filing = { ...filing, scope: undefined, scopeRole: "source" };
+  }
+  if (
+    !future &&
+    destinationName &&
+    !filing.parameters.destinationCollectionId
+  ) {
     if (filing.scope && filing.scopeRole === "source") {
       const matches = await resolveCollectionReference(
         gateway,
@@ -478,6 +536,11 @@ export async function resolveScope(
     resolver,
   );
   for (const obligation of obligations) {
+    if (future)
+      obligation.destinationCreation = {
+        obligationId: future.id,
+        libraryID: Number(request.libraryID),
+      };
     const parameters = { ...obligation.parameters };
     const constraints = { ...obligation.constraints };
     if (obligation.scopeRole === "destination" && obligation.scope)
@@ -496,8 +559,46 @@ export async function resolveScope(
           );
         parameters.sourceCollectionId = source.collectionId;
       } else {
-        // Filing from My Library has no removal source. Preserve memberships.
-        delete constraints.collectionMode;
+        const subjects = obligation.targetBoundary?.frozenTargetIds || [];
+        const sources = subjects.map((id) => {
+          const item = gateway.getItem(id);
+          if (!item?.getCollections)
+            throw new ActionReferenceResolutionError(
+              "The paper's source collection memberships could not be read.",
+            );
+          return uniqueNumbers(item.getCollections()).filter(
+            (id) => id !== parameters.destinationCollectionId,
+          );
+        });
+        const candidates = uniqueNumbers(sources.flat());
+        if (
+          !subjects.length ||
+          sources.some((ids) => ids.length > 1) ||
+          candidates.length > 1
+        ) {
+          const choices = candidates.map((id) => {
+            const collection = gateway.getCollectionSummary(id);
+            return {
+              id,
+              name: collection?.name || String(id),
+              path: collection?.path || collection?.name || String(id),
+            };
+          });
+          const question =
+            "Which source collection should this action remove? All other memberships will be preserved.";
+          throw new ActionReferenceResolutionError(question, {
+            actionIndex: sourceActionIndex,
+            question,
+            candidates: choices,
+          });
+        }
+        if (candidates.length === 1)
+          parameters.sourceCollectionId = candidates[0];
+        else {
+          // Native read proves there is no membership to remove: the paper is
+          // unfiled or already only in the destination. No removal is granted.
+          delete constraints.collectionMode;
+        }
       }
     }
     if (!parameters.destinationCollectionId && !obligation.destinationCreation)
@@ -867,11 +968,8 @@ export function resolveCreatedDestinations(
           (creation.parameters?.parentCollectionId ?? null)
       )
         return obligation;
-      const {
-        destinationCreation: _dependency,
-        scopeRole: _role,
-        ...resolved
-      } = obligation;
+      const { destinationCreation: _dependency, ...resolved } = obligation;
+      if (resolved.scopeRole === "destination") delete resolved.scopeRole;
       return {
         ...resolved,
         parameters: {
@@ -1064,7 +1162,14 @@ async function resolveCollectionReference(
           (evidence) =>
             evidence.id === candidate.collectionId &&
             Boolean(evidence.quote) &&
-            request.userText.includes(evidence.quote) &&
+            normalizePath(
+              [
+                request.userText,
+                ...(request.clarificationHistory || []).map(
+                  (entry) => entry.answer,
+                ),
+              ].join("\n"),
+            ).includes(normalizePath(evidence.quote)) &&
             [candidate.name, candidate.path || candidate.name].some(
               (name) => normalizePath(name) === normalizePath(evidence.quote),
             ),

@@ -183,7 +183,8 @@ export const libraryMutationHandlers = {
           ? operation.assignments.map((assignment) => assignment.itemId)
           : operation.itemIds || [],
       ).size,
-    affectedCount: (_operation, result) => resultCount(result, "movedCount"),
+    affectedCount: (_operation, result) =>
+      resultCount(result, "movedCount") + resultCount(result, "addedCount"),
     atomize: (operation) =>
       operation.assignments?.length
         ? onePer(operation, operation.assignments, (assignment) => ({

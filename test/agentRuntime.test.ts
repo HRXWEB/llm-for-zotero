@@ -1,3 +1,10 @@
+import { AgentRunContinuationSession } from "../src/agent/continuation/runContinuationSession";
+import { loadWorkflowCheckpoint } from "../src/agent/contracts/workflowCheckpoint";
+import {
+  createAgentRun,
+  appendAgentRunEvent,
+} from "../src/agent/store/traceStore";
+import { createRequestUserInputTool } from "../src/agent/tools/plan/requestUserInput";
 import {
   bumpConversationWriteGeneration,
   getConversationWriteGeneration,
@@ -385,6 +392,69 @@ describe("AgentRuntime", function () {
     clearAgentCoverageLedger();
     clearAgentTranscriptStore();
     clearAgentToolResultHandleStore();
+  });
+
+  it("preserves the prior workflow when a continuation fails before interpretation", async function () {
+    const restore = installMockDb();
+    try {
+      const service = createRequiredMoveActionContractService();
+      const contract = await service.createContract({} as never);
+      const progress = service.createProgress(contract);
+      await createAgentRun({
+        runId: "prior-workflow",
+        conversationKey: 998811,
+        mode: "agent",
+        status: "failed",
+        createdAt: 1,
+      });
+      await appendAgentRunEvent("prior-workflow", 1, {
+        type: "provider_event",
+        providerType: "agent_action_contract",
+        payload: { contract, progress },
+      });
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(service),
+        semanticInterpreter: {
+          interpret: async () => ({
+            skillIds: [],
+            classifiedIntent: null,
+            degraded: true,
+            failureReason: "unparseable",
+          }),
+        },
+        adapterFactory: () =>
+          new MockAdapter([], {
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+      });
+      let failed = false;
+      try {
+        await runtime.runTurn({
+          request: {
+            conversationKey: 998811,
+            mode: "agent",
+            userText: "Continue the unfinished workflow",
+            libraryID: 1,
+            model: "test",
+            apiKey: "test",
+            apiBase: "https://example.invalid",
+          },
+        });
+      } catch {
+        failed = true;
+      }
+      assert.isTrue(failed, "The injected interpretation failure must occur");
+      const retained = await loadWorkflowCheckpoint(998811);
+      assert.equal(
+        retained?.contract.id,
+        contract.id,
+        "A failed interpretation must not hide the last durable workflow from the next turn",
+      );
+    } finally {
+      restore();
+    }
   });
 
   it("does not end a compound action when its document is finalized before the library effect", async function () {
@@ -8326,6 +8396,434 @@ describe("shallow guard round-limit safety", function () {
       assert.equal(call, 2, "exactly the two writes, no forced third round");
     } finally {
       restoreDb();
+    }
+  });
+});
+
+describe("prepared native actions through AgentRuntime", function () {
+  for (const [removeSource, compound, batched, cancelBeforeExecution] of [
+    [true, false],
+    [false, false],
+    [true, true],
+    [true, false, true],
+    [true, false, false, true],
+  ]) {
+    it(
+      cancelBeforeExecution
+        ? "stops a prepared action cancelled between selection and execution without reselecting it"
+        : batched
+          ? "rechecks host action readiness after a sibling read while preserving provider tool result IDs"
+          : compound
+            ? "executes the resolved move before asking the model to generate compound material"
+            : removeSource
+              ? "executes one bound move and persists its verified answer without an execution-model call"
+              : "rejects destination-only evidence without asking the model to guess another action",
+      async function () {
+        const installed = installMockDb();
+        clearAgentReadLedger();
+        clearAgentCoverageLedger();
+        clearAgentTranscriptStore();
+        clearAgentToolResultHandleStore();
+        await initAgentChangeJournal();
+        let memberships = [1];
+        let modelCalls = 0;
+        let writes = 0;
+        const events: AgentEvent[] = [];
+        let readComplete = false;
+        const abort = new AbortController();
+        let preparedSelections = 0;
+        const deliveredIds: string[] = [];
+        const originalCompleteStep =
+          AgentRunContinuationSession.prototype.completeToolStep;
+        if (batched)
+          AgentRunContinuationSession.prototype.completeToolStep = function (
+            params,
+          ) {
+            deliveredIds.push(
+              ...params.toolMessages.map((message) => message.tool_call_id),
+            );
+            return originalCompleteStep.call(this, params);
+          };
+        const originalReadyIds =
+          PlanExecutionRunSession.prototype.activeWorkflowObligationIds;
+        if (batched)
+          PlanExecutionRunSession.prototype.activeWorkflowObligationIds =
+            function () {
+              return readComplete ? undefined : [];
+            };
+        try {
+          const item = {
+            id: 2317,
+            libraryID: 1,
+            isRegularItem: () => true,
+            getField: () => "Representational geometry",
+            getCollections: () => [...memberships],
+          };
+          const gateway = {
+            getItem: () => item,
+            listCollectionSummaries: () => [
+              {
+                collectionId: 7,
+                libraryID: 1,
+                name: "Learning",
+                path: "Learning",
+              },
+            ],
+            getCollectionSummary: (id: number) => ({
+              collectionId: id,
+              libraryID: 1,
+              name: id === 1 ? "Geometry" : "Learning",
+            }),
+          };
+          const registry = new AgentToolRegistry(
+            new ActionContractService(gateway as never),
+          );
+          const operation = {
+            type: "move_to_collection" as const,
+            itemIds: [2317],
+            targetCollectionId: 7,
+            mode: "move" as const,
+            from: 1,
+          };
+          const nativeState = () => ({
+            version: 1 as const,
+            operation: "move_to_collection" as const,
+            items: [
+              { itemId: 2317, exists: true, collectionIds: [...memberships] },
+            ],
+          });
+          registry.register({
+            spec: {
+              name: "library_update",
+              description: "Collection mutation test boundary",
+              inputSchema: { type: "object" },
+              executionClass: "external_effect",
+              requiresConfirmation: false,
+            },
+            validate: (args) => ({ ok: true, value: args }),
+            describeAction: () => describeLibraryMutationActions(operation),
+            planInvocation: () =>
+              stateChangeInvocationPlan({
+                reversibility: "full",
+                reason: "Move the resolved paper",
+              }),
+            execute: async (input) => {
+              if (batched)
+                assert.notProperty(
+                  input,
+                  "modelOnly",
+                  "The host must supply the canonical action arguments",
+                );
+              writes++;
+              const preState = nativeState();
+              memberships = removeSource ? [7] : [1, 7];
+              return {
+                content: { result: "captured" },
+                effect: "applied",
+                actionEvidence: [
+                  {
+                    version: 1,
+                    proofDomain: "zotero_state",
+                    operationValue: operation,
+                    preState,
+                    postState: nativeState(),
+                    effect: "applied",
+                    journalStepId: "bound-move",
+                  },
+                ],
+              };
+            },
+          });
+          if (batched)
+            registry.register({
+              spec: {
+                name: "library_read",
+                description: "Read prerequisite",
+                inputSchema: { type: "object" },
+                executionClass: "read",
+              },
+              validate: (args) => ({ ok: true, value: args }),
+              execute: async () => {
+                readComplete = true;
+                return { content: { read: true } };
+              },
+            });
+          const { registerPreparedLibraryActions } =
+            await import("../src/agent/tools/preparedLibraryActions");
+          registerPreparedLibraryActions(registry, gateway as never);
+          const runtime = new AgentRuntime({
+            registry,
+            semanticInterpreter: declaredSemanticInterpreter,
+            adapterFactory: () => ({
+              getCapabilities: () => ({
+                streaming: false,
+                toolCalls: true,
+                multimodal: false,
+              }),
+              supportsTools: () => true,
+              runStep: async () => {
+                modelCalls++;
+                if (batched) {
+                  assert.equal(
+                    modelCalls,
+                    1,
+                    "The newly ready host action must finish without another model round",
+                  );
+                  const calls = [
+                    { id: "model-read", name: "library_read", arguments: {} },
+                    {
+                      id: "model-move",
+                      name: "library_update",
+                      arguments: {
+                        modelOnly: true,
+                        kind: "collections",
+                        action: "add",
+                        itemIds: [2317],
+                        mode: "move",
+                        from: 1,
+                        targetCollectionId: 7,
+                      },
+                    },
+                  ];
+                  return {
+                    kind: "tool_calls" as const,
+                    calls,
+                    assistantMessage: {
+                      role: "assistant" as const,
+                      content: "",
+                      tool_calls: calls,
+                    },
+                  };
+                }
+                if (compound) {
+                  assert.deepEqual(
+                    memberships,
+                    [7],
+                    "the model starts only after the ready move is verified",
+                  );
+                  throw new Error("Generation boundary reached");
+                }
+                throw new Error(
+                  "A resolved fixed action must not ask the execution model for arguments",
+                );
+              },
+            }),
+          });
+          const intent = actionFixture("move_to_collection", {
+            destinationCollectionId: 7,
+          });
+          intent.actionIntents[0].constraints = { collectionMode: "move" };
+          if (compound) {
+            intent.retrievalIntent = "summarize";
+            intent.semantic!.materialOutputs = [
+              {
+                id: "summary",
+                description: "Summarize the moved paper",
+                afterActions: [0],
+                sourceActionIndexes: [0],
+                requiredEvidence: "body",
+              },
+            ];
+          }
+          const outcome = await runtime
+            .runTurn({
+              signal: abort.signal,
+              request: {
+                conversationKey: removeSource ? 998831 : 998832,
+                mode: "agent",
+                libraryID: 1,
+                activeItemId: 2317,
+                userText: "move this paper to learning folder",
+                model: "gpt-4o-mini",
+                apiKey: "test",
+                apiBase: "https://example.invalid",
+                classifiedIntent: intent,
+              },
+              onEvent: async (event) => {
+                events.push(event);
+                if (
+                  cancelBeforeExecution &&
+                  event.type === "status" &&
+                  event.text === "Applying the next resolved action"
+                ) {
+                  if (++preparedSelections > 1)
+                    throw new Error("Cancelled action selected again");
+                  abort.abort();
+                }
+              },
+            })
+            .catch((error) => {
+              if (cancelBeforeExecution) {
+                assert.equal(String(error), "Error: Aborted");
+                return {
+                  kind: "completed" as const,
+                  runId: "cancelled-boundary",
+                  text: "",
+                };
+              }
+              if (!compound) throw error;
+              assert.include(String(error), "Generation boundary reached");
+              return {
+                kind: "completed" as const,
+                runId: "generation-boundary",
+                text: "",
+              };
+            });
+          if (cancelBeforeExecution) {
+            assert.equal(preparedSelections, 1);
+            assert.equal(writes, 0);
+            assert.equal(modelCalls, 0);
+            assert.deepEqual(memberships, [1]);
+            return;
+          }
+          assert.equal(modelCalls, compound || batched ? 1 : 0);
+          assert.equal(
+            writes,
+            1,
+            JSON.stringify({
+              outcome,
+              events: events.filter((event) =>
+                ["tool_result", "final", "confirmation_required"].includes(
+                  event.type,
+                ),
+              ),
+            }),
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "tool_call"),
+            batched ? 2 : 1,
+          );
+          if (batched) {
+            const move = events.find(
+              (event) =>
+                event.type === "tool_call" && event.name === "library_update",
+            );
+            assert.isTrue(
+              move?.type === "tool_call" && move.callId.startsWith("workflow:"),
+            );
+            assert.deepEqual(
+              deliveredIds,
+              ["model-read", "model-move"],
+              "Complete the provider batch with its original IDs, not host execution IDs",
+            );
+          }
+          if (compound) {
+            assert.deepEqual(memberships, [7]);
+            return;
+          }
+          assert.equal(outcome.kind, "completed");
+          if (outcome.kind !== "completed") return;
+          assert.equal(
+            (await getAgentRunTrace(outcome.runId)).run?.status,
+            removeSource ? "completed" : "failed",
+          );
+          if (removeSource) {
+            assert.include(outcome.text, "Moved");
+            assert.include(outcome.text, "Geometry");
+            assert.include(
+              JSON.stringify(readPersistedTranscript(installed, 998831)),
+              outcome.text,
+            );
+          } else
+            assert.notInclude(
+              outcome.text,
+              "Moved “Representational geometry”",
+            );
+        } finally {
+          PlanExecutionRunSession.prototype.activeWorkflowObligationIds =
+            originalReadyIds;
+          AgentRunContinuationSession.prototype.completeToolStep =
+            originalCompleteStep;
+          installed();
+        }
+      },
+    );
+  }
+});
+
+describe("model continuation after host clarification", function () {
+  it("rebuilds the model input from the resolved contract after choosing a native source", async function () {
+    const installed = installMockDb();
+    clearAgentReadLedger();
+    clearAgentCoverageLedger();
+    clearAgentTranscriptStore();
+    clearAgentToolResultHandleStore();
+    let firstModelInput = "";
+    try {
+      const item = {
+        id: 2317,
+        libraryID: 1,
+        isRegularItem: () => true,
+        getField: () => "Paper",
+        getCollections: () => [1, 8],
+      };
+      const collections = [
+        { collectionId: 1, libraryID: 1, name: "Geometry", path: "Geometry" },
+        { collectionId: 7, libraryID: 1, name: "Learning", path: "Learning" },
+        { collectionId: 8, libraryID: 1, name: "Other", path: "Other" },
+      ];
+      const service = new ActionContractService({
+        getItem: () => item,
+        listCollectionSummaries: () => collections,
+        getCollectionSummary: (id: number) =>
+          collections.find((c) => c.collectionId === id) || null,
+      } as never);
+      const registry = new AgentToolRegistry(service);
+      registry.register(
+        createRequestUserInputTool((request) =>
+          service.createContract(request),
+        ),
+      );
+      const runtime = new AgentRuntime({
+        registry,
+        semanticInterpreter: declaredSemanticInterpreter,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          runStep: async (params) => {
+            firstModelInput ||= JSON.stringify(params.messages);
+            return {
+              kind: "final",
+              text: "The test does not execute effects.",
+              assistantMessage: {
+                role: "assistant",
+                content: "The test does not execute effects.",
+              },
+            };
+          },
+        }),
+      });
+      const intent = actionFixture("move_to_collection", {
+        destinationCollectionId: 7,
+      });
+      intent.actionIntents[0].constraints = { collectionMode: "move" };
+      await runtime.runTurn({
+        request: {
+          conversationKey: 998840,
+          mode: "agent",
+          libraryID: 1,
+          activeItemId: 2317,
+          userText: "Move this paper into Learning",
+          model: "gpt-4o-mini",
+          apiKey: "test",
+          apiBase: "https://example.invalid",
+          classifiedIntent: intent,
+        },
+        onEvent: async (event) => {
+          if (event.type === "confirmation_required")
+            runtime.resolveConfirmation(event.requestId, true, {
+              reference: { kind: "option", optionId: "source:1" },
+            });
+        },
+      });
+      assert.include(firstModelInput, "sourceCollectionId");
+      assert.notInclude(firstModelInput, "Action references are unresolved");
+    } finally {
+      installed();
     }
   });
 });

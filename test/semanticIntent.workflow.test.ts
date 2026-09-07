@@ -335,6 +335,7 @@ describe("Semantic intent to native action contract", function () {
         libraryID: 1,
         isRegularItem: () => true,
         getField: () => "Current paper",
+        getCollections: () => [],
       };
       const service = new ActionContractService({
         getItem: (id: number) => (id === 41 ? item : null),
@@ -416,7 +417,7 @@ describe("Semantic intent to native action contract", function () {
     assert.include(prompt, '"decisions":{');
   });
 
-  it("resolves semantic destination names and applies My Library membership defaults", async function () {
+  it("resolves semantic destination names and proves an unfiled paper has no source to remove", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 4,
       mode: "agent",
@@ -451,6 +452,7 @@ describe("Semantic intent to native action contract", function () {
       libraryID: 1,
       isRegularItem: () => true,
       getField: () => "Current paper",
+      getCollections: () => [],
     };
     const service = new ActionContractService({
       getItem: () => item,

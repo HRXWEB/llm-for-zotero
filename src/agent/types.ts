@@ -683,6 +683,8 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   clarificationHistory?: Array<{ question: string; answer: string }>;
 
   /** One-shot Plan collaboration state owned by the durable plan store. */
+  /** Host-loaded prior workflow evidence; never inferred from conversation prose. */
+  workflowCheckpoint?: import("./contracts/workflowCheckpoint").ActionContractCheckpoint;
   planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
@@ -949,6 +951,11 @@ export type AgentToolContext = {
   journalToolName?: string;
   /** Internal parent action used by composite tools such as library_batch. */
   journalActionScope?: AgentJournalActionScope;
+  /** Host-owned registered operation bridge. Each call retains its own authorization and native receipts. */
+  invokeRegisteredOperation?: (
+    name: string,
+    args: unknown,
+  ) => Promise<AgentToolResult>;
   /** Persist the current contract ledger at a durable composite checkpoint. */
   checkpointActionProgress?: () => Promise<void>;
   /** Publish a normalized, durable plan/task projection event. */
@@ -1165,6 +1172,8 @@ export type PreparedToolExecutionResult = {
 };
 
 export type PreparedToolExecutionOptions = {
+  /** The host checkpoints each subset; the frozen contract still requires full final coverage. */
+  checkpointedWorkflow?: boolean;
   inheritedApproval?: AgentInheritedApproval;
   forceConfirmation?: boolean;
   /**

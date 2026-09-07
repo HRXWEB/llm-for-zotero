@@ -1,3 +1,4 @@
+import { semanticInputDigest } from "../../model/semanticTransport";
 import { detectTurnIntent } from "../../model/semanticIntentService";
 import { getAllSkills } from "../../skills";
 import { ActionReferenceResolutionError } from "../../contracts/actionScope";
@@ -20,7 +21,30 @@ type PlanQuestion = {
 
 type RequestUserInput = { questions: PlanQuestion[] };
 
+function pendingQuestions(
+  input: RequestUserInput,
+  context: import("../../types").AgentToolContext,
+): PlanQuestion[] {
+  const selection = context.request?.actionPreparation?.sourceSelection;
+  if (!selection) return input.questions;
+  return [
+    {
+      id: "reference",
+      question: selection.question,
+      options: selection.candidates.map((candidate) => ({
+        id: `source:${candidate.id}`,
+        label: candidate.path,
+        description:
+          "Remove this membership and preserve every other membership.",
+      })),
+      answer: input.questions.find((question) => question.id === "reference")
+        ?.answer,
+    },
+  ];
+}
+
 function readQuestionAnswer(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
   if (!validateObject<Record<string, unknown>>(value)) return undefined;
   if (value.kind === "option" && typeof value.optionId === "string") {
     return value.optionId;
@@ -71,9 +95,9 @@ function validateInput(
             : [];
         })
       : [];
-    if (!id || !question || options.length < 2 || options.length > 3) {
+    if (!id || !question || options.length === 1) {
       return fail(
-        "Each question requires an id, prompt, and two or three options",
+        "Each question requires an id, prompt, and either no options or at least two options",
       );
     }
     questions.push({ id, question, options });
@@ -85,12 +109,13 @@ export function createRequestUserInputTool(
   prepare?: (
     request: import("../../types").AgentRuntimeRequest,
   ) => Promise<import("../../types").AgentActionContract | null>,
+  interpret: typeof detectTurnIntent = detectTurnIntent,
 ): AgentToolDefinition<RequestUserInput, unknown> {
   return {
     spec: {
       name: "request_user_input",
       description:
-        "Ask one to three concise multiple-choice questions when a material reference or workflow decision cannot be discovered from context.",
+        "Ask one to three concise questions when a material reference or workflow decision cannot be discovered from context.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -108,8 +133,7 @@ export function createRequestUserInputTool(
                 question: { type: "string" },
                 options: {
                   type: "array",
-                  minItems: 2,
-                  maxItems: 3,
+                  minItems: 0,
                   items: {
                     type: "object",
                     required: ["id", "label"],
@@ -139,21 +163,31 @@ export function createRequestUserInputTool(
         reason:
           "This interaction records user input in the active workflow only.",
       }),
-    createPendingAction: (input) => ({
+    createPendingAction: (input, context) => ({
       toolName: "request_user_input",
       title: "Agent needs your input",
       mode: "review",
       confirmLabel: "Continue",
       cancelLabel: "Cancel",
-      fields: input.questions.map<AgentPendingField>((question) => ({
-        type: "choice",
-        id: question.id,
-        label: question.question,
-        requiredForActionIds: ["continue"],
-        options: question.options.map((option) => ({ ...option })),
-        allowCustom: true,
-        customPlaceholder: "Something else…",
-      })),
+      fields: pendingQuestions(input, context).map<AgentPendingField>(
+        (question) =>
+          question.options.length
+            ? {
+                type: "choice",
+                id: question.id,
+                label: question.question,
+                requiredForActionIds: ["continue"],
+                options: question.options.map((option) => ({ ...option })),
+                allowCustom: true,
+                customPlaceholder: "Something else…",
+              }
+            : {
+                type: "text",
+                id: question.id,
+                label: question.question,
+                requiredForActionIds: ["continue"],
+              },
+      ),
       actions: [
         { id: "continue", label: "Continue", approved: true },
         { id: "cancel", label: "Cancel", approved: false },
@@ -161,10 +195,10 @@ export function createRequestUserInputTool(
       defaultActionId: "continue",
       cancelActionId: "cancel",
     }),
-    applyConfirmation: (input, data) => {
+    applyConfirmation: (input, data, context) => {
       const record = validateObject<Record<string, unknown>>(data) ? data : {};
       return ok({
-        questions: input.questions.map((question) => ({
+        questions: pendingQuestions(input, context).map((question) => ({
           ...question,
           answer: readQuestionAnswer(
             record[question.id] as AgentPendingChoiceValue | undefined,
@@ -173,6 +207,7 @@ export function createRequestUserInputTool(
       });
     },
     execute: async (input, context) => {
+      input = { questions: pendingQuestions(input, context) };
       const publicAnswers = input.questions.map((question) => ({
         id: question.id,
         answer: question.answer,
@@ -184,11 +219,14 @@ export function createRequestUserInputTool(
         return { answers: publicAnswers };
       const answers = input.questions.map((question) => ({
         question: question.question,
-        answer:
-          question.options.find((option) => option.id === question.answer)
-            ?.label ||
-          question.answer ||
-          "",
+        answer: (() => {
+          const selected = question.options.find(
+            (option) => option.id === question.answer,
+          );
+          return selected
+            ? [selected.label, selected.description].filter(Boolean).join(" — ")
+            : question.answer || "";
+        })(),
       }));
       if (answers.some((entry) => !entry.answer))
         throw new Error("The requested clarification has not been answered.");
@@ -199,21 +237,62 @@ export function createRequestUserInputTool(
           ...answers,
         ],
       };
-      const result = await detectTurnIntent(revised, getAllSkills(), {
-        signal: context.signal,
-      });
-      if (!result.classifiedIntent)
-        throw new Error(
-          "Semantic interpretation of the clarification is unavailable. Actions remain paused.",
+      const selection = context.request.actionPreparation.sourceSelection;
+      if (selection && revised.classifiedIntent?.semantic) {
+        const answer =
+          input.questions.find((question) => question.id === "reference")
+            ?.answer || "";
+        const selected = selection.candidates.filter(
+          (candidate) =>
+            answer === `source:${candidate.id}` ||
+            [candidate.name, candidate.path].some(
+              (name) =>
+                name.toLocaleLowerCase() === answer.trim().toLocaleLowerCase(),
+            ),
         );
-      revised.classifiedIntent = result.classifiedIntent;
+        if (selected.length !== 1)
+          throw new Error(
+            "Choose one of the displayed source collections or enter its exact name. The action remains paused.",
+          );
+        const intent = revised.classifiedIntent;
+        revised.classifiedIntent = {
+          ...intent,
+          actionIntents: intent.actionIntents.map((action, index) =>
+            index === selection.actionIndex
+              ? {
+                  ...action,
+                  parameters: {
+                    ...action.parameters,
+                    sourceCollectionId: selected[0].id,
+                  },
+                }
+              : action,
+          ),
+          semantic: {
+            ...intent.semantic!,
+            revision: intent.semantic!.revision + 1,
+            inputDigest: await semanticInputDigest(revised),
+          },
+        };
+      } else {
+        const result = await interpret(revised, getAllSkills(), {
+          signal: context.signal,
+        });
+        if (!result.classifiedIntent)
+          throw new Error(
+            "Semantic interpretation of the clarification is unavailable. Actions remain paused.",
+          );
+        revised.classifiedIntent = result.classifiedIntent;
+      }
       let contract: import("../../types").AgentActionContract | undefined;
       let issues: string[] = [];
+      let sourceSelection: import("../../contracts/actionPreparation").ActionPreparation["sourceSelection"];
       try {
         contract = (await prepare(revised)) || undefined;
       } catch (error) {
         if (!(error instanceof ActionReferenceResolutionError)) throw error;
         issues = [error.message];
+        sourceSelection = error.sourceSelection;
       }
       if (
         context.signal?.aborted ||
@@ -234,6 +313,7 @@ export function createRequestUserInputTool(
       context.request.actionPreparation = {
         state: issues.length ? "needs_input" : "ready",
         issues,
+        sourceSelection,
       };
       await context.checkpointActionProgress?.();
       return {

@@ -840,6 +840,58 @@ describe("transactional Plan task transitions", function () {
     await savePlanExecutionLedger(execution());
   });
 
+  it("ends planning at the persisted reviewable plan without a second approval question", async function () {
+    const artifact = await new PlanExecutionCoordinator().updateDraft({
+      planId: "ready-terminal",
+      conversationKey: 41,
+      provider: "original",
+      revision: 1,
+      ready: true,
+      explanation: "Read the paper and explain it.",
+      contract: { deliverable: { kind: "answer" } },
+      steps: [
+        {
+          content: "Read the paper",
+          activeForm: "Reading",
+          expectedEffect: "read",
+          acceptanceCriteria: [
+            {
+              criterionId: "read",
+              description: "Read the paper body",
+              verifier: "verified_read",
+            },
+          ],
+        },
+      ],
+    });
+    const tool = createUpdatePlanTool();
+    const result = {
+      callId: "ready",
+      name: "update_plan",
+      ok: true,
+      actionReceipts: [],
+      content: { artifact },
+    };
+    const terminal = await tool.resolveTerminalResult?.(
+      { ready: true } as never,
+      result,
+      {} as never,
+    );
+    assert.isOk(
+      terminal,
+      "A persisted reviewable plan is a host-owned terminal result",
+    );
+    assert.include(terminal!.finalText, "Read the paper");
+    assert.equal(terminal!.providerTranscript, "tool_only");
+    assert.isNull(
+      await tool.resolveTerminalResult?.(
+        { ready: false } as never,
+        result,
+        {} as never,
+      ),
+    );
+  });
+
   it("reloads a native proposal and retry context from its saved activity trace", async function () {
     await ensureConversationKeyLedgerEntry({
       conversationKey: 41,

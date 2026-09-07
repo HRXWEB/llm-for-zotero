@@ -1,3 +1,6 @@
+import type { PreparedActionCall } from "./tools/workflowSteps";
+import { loadWorkflowMaterial } from "./documents/workflowMaterial";
+import { loadWorkflowCheckpoint } from "./contracts/workflowCheckpoint";
 import { hasCurrentSemanticIntent } from "./model/semanticTransport";
 import { SemanticIntentService } from "./model/semanticIntentService";
 import { AgentToolRegistry } from "./tools/registry";
@@ -455,6 +458,7 @@ type ToolWorkflowDelivery = {
 };
 
 type ToolWorkflowOutcome = {
+  failed?: boolean;
   toolResult: AgentToolResult;
   delivery?: ToolWorkflowDelivery;
   stopRun?: boolean;
@@ -771,6 +775,9 @@ export class AgentRuntime {
         : resolveAgentRuntimeRequest(requestInput, {
             resolvePaperContext: this.paperContextResolver,
           });
+    request.workflowCheckpoint = await loadWorkflowCheckpoint(
+      request.conversationKey,
+    );
     if (request.planContext?.phase === "executing") {
       const plan = request.planContext;
       const artifact = await loadPlanArtifact(plan.planId, plan.revision);
@@ -947,6 +954,10 @@ export class AgentRuntime {
       const latestPriorRun = await getLatestAgentRunForConversation(
         request.conversationKey,
       );
+      request.workflowCheckpoint = await loadWorkflowCheckpoint(
+        request.conversationKey,
+        latestPriorRun,
+      );
       const interruptedPriorRun =
         latestPriorRun?.status === "failed" &&
         latestPriorRun.finalText === INTERRUPTED_AGENT_RUN_MARKER
@@ -1000,6 +1011,12 @@ export class AgentRuntime {
           if (writeAllowed()) await params.onEvent?.(redactedEvent);
         }
       };
+      if (request.workflowCheckpoint)
+        await emit({
+          type: "provider_event",
+          providerType: "agent_workflow_predecessor",
+          payload: request.workflowCheckpoint,
+        });
       const actionContractSession = new ActionContractRunSession({
         request,
         contracts: this.registry,
@@ -1411,7 +1428,7 @@ export class AgentRuntime {
       });
       const captureInstructionInventory =
         request.metadata?.instructionHarnessInventory === true;
-      const renderedPrompt = await renderAgentPromptEnvelope(
+      let renderedPrompt = await renderAgentPromptEnvelope(
         request,
         toolDefinitions,
         matchedSkills,
@@ -2080,6 +2097,7 @@ export class AgentRuntime {
         round: number,
         options: {
           inheritedApproval?: AgentInheritedApproval;
+          checkpointedWorkflow?: boolean;
         } = {},
       ): Promise<ExecutedToolCall> => {
         const lifecycleError = (): ExecutedToolCall => ({
@@ -2152,6 +2170,7 @@ export class AgentRuntime {
             {
               callerKind: options.inheritedApproval ? "action" : "model",
               inheritedApproval: options.inheritedApproval,
+              checkpointedWorkflow: options.checkpointedWorkflow,
               isExecutionAllowed: executionAllowed,
               executeWithLock: (task) =>
                 withConversationWriteLock(request.conversationKey, task),
@@ -2411,21 +2430,33 @@ export class AgentRuntime {
         return {
           callId,
           name: toolResult.name,
-          content: contentWithReceipt,
+          content: {
+            ...contentWithReceipt,
+            ...(activePlanSession.workflowProgress()
+              ? { planProgress: activePlanSession.workflowProgress() }
+              : {}),
+          },
           followupMessages,
         };
       };
+      const workflowSummaries: string[] = [];
       const executeToolWorkflow = async (
         call: AgentToolCall,
         round: number,
         options: {
           modelCallId?: string;
+          preparedAction?: PreparedActionCall;
           suppressModelDelivery?: boolean;
           inheritedApproval?: AgentInheritedApproval;
+          checkpointedWorkflow?: boolean;
         } = {},
       ): Promise<ToolWorkflowOutcome> => {
-        if (params.signal?.aborted || !writeAllowed()) {
+        if (params.signal?.aborted) throw new Error("Aborted");
+        if (!writeAllowed()) {
           return {
+            failed: true,
+            stopRun: true,
+            finalText: "Conversation lifecycle changed before execution.",
             toolResult: {
               callId: call.id,
               name: call.name,
@@ -2442,8 +2473,27 @@ export class AgentRuntime {
             },
           };
         }
+        // A provider may batch a prerequisite read and a bound action. Recheck
+        // readiness at this tool boundary, using the host's canonical arguments
+        // while preserving the provider call ID solely for result delivery.
+        let preparedAction = options.preparedAction;
+        if (
+          !preparedAction &&
+          options.modelCallId &&
+          !options.inheritedApproval
+        ) {
+          const next = await this.registry.getNextWorkflowStep(
+            request,
+            activePlanSession.activeWorkflowObligationIds(),
+          );
+          if (next.kind === "action" && next.prepared.call.name === call.name)
+            preparedAction = next.prepared;
+        }
+        if (preparedAction) call = preparedAction.call;
         const executedCall = await executePreparedToolCall(call, round, {
           inheritedApproval: options.inheritedApproval,
+          checkpointedWorkflow:
+            Boolean(preparedAction) || options.checkpointedWorkflow,
         });
         const { toolResult, toolDefinition, input, documentEvidenceRefs } =
           executedCall;
@@ -2458,6 +2508,37 @@ export class AgentRuntime {
               }
             : { content: toolResult.content, documentEvidenceRefs }
           : undefined;
+
+        if (preparedAction) {
+          const verified =
+            toolResult.ok &&
+            toolResult.actionReceipts.some(
+              (receipt) =>
+                receipt.obligationId === preparedAction.obligationId &&
+                receipt.verification === "verified" &&
+                ["applied", "already_satisfied"].includes(receipt.status),
+            );
+          if (!verified) {
+            const failure =
+              readToolError(toolResult) ||
+              "The requested state change could not be verified. Remaining actions have not been executed; recorded progress has been retained.";
+            return {
+              toolResult,
+              failed: true,
+              stopRun: true,
+              finalText: failure,
+              delivery: options.suppressModelDelivery
+                ? undefined
+                : await buildToolDelivery(
+                    toolResult,
+                    deliveryCallId,
+                    toolDefinition,
+                    { error: failure, result: toolResult.content },
+                  ),
+            };
+          }
+          workflowSummaries.push(preparedAction.summary);
+        }
 
         if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
           const terminal = await toolDefinition.resolveTerminalResult(
@@ -2659,6 +2740,177 @@ export class AgentRuntime {
           ),
         };
       };
+      // A prepared effect already has its native identities and arguments. It
+      // uses the same permission, journal and receipt path as any model call.
+      let referencesClarified = false;
+      if (request.actionPreparation?.state === "needs_input") {
+        const clarification = await executeToolWorkflow(
+          {
+            id: `preparation:${runId}`,
+            name: "request_user_input",
+            arguments: {
+              questions: [
+                {
+                  id: "reference",
+                  question: request.actionPreparation.issues.join("\n"),
+                  options:
+                    request.actionPreparation.sourceSelection?.candidates.map(
+                      (candidate) => ({
+                        id: `source:${candidate.id}`,
+                        label: candidate.path,
+                        description:
+                          "Remove this membership and preserve every other membership.",
+                      }),
+                    ) || [],
+                },
+              ],
+            },
+          },
+          0,
+          { suppressModelDelivery: true },
+        );
+        if (!clarification.toolResult.ok)
+          return completeRun(
+            readToolError(clarification.toolResult) ||
+              "The requested action is still awaiting your input.",
+            "failed",
+          );
+        if (
+          (
+            request.actionPreparation as import("./contracts/actionPreparation").ActionPreparation
+          ).state !== "ready"
+        )
+          return completeRun(
+            request.actionPreparation.issues.join("\n") ||
+              "The requested references remain unresolved.",
+            "failed",
+          );
+        referencesClarified = true;
+      }
+      if (request.actionProgress?.materialOutputs?.length) {
+        const retained = await loadWorkflowMaterial(request);
+        if (retained)
+          finalizedMaterial = {
+            documentId: retained.documentId,
+            finalText: retained.visibleMarkdown,
+          };
+      }
+      let operationSequence = 0;
+      context.invokeRegisteredOperation = async (name, args) => {
+        const tool = this.registry.getTool(name);
+        if (
+          !tool ||
+          tool.spec.executionClass === "control" ||
+          name === "zotero_script" ||
+          tool.spec.exposure === "internal" ||
+          tool.isAvailable?.(request) === false
+        )
+          throw new Error("Unknown or unavailable registered operation.");
+        const outcome = await executeToolWorkflow(
+          {
+            id: `workflow-script:${runId}:${++operationSequence}`,
+            name,
+            arguments: args,
+          },
+          0,
+          { suppressModelDelivery: true, checkpointedWorkflow: true },
+        );
+        await actionContractSession.checkpoint();
+        return outcome.toolResult;
+      };
+      const advanceHostWorkflow =
+        async (): Promise<AgentRuntimeOutcome | null> => {
+          while (true) {
+            const next = await this.registry.getNextWorkflowStep(
+              request,
+              activePlanSession.activeWorkflowObligationIds(),
+            );
+            if (next.kind === "blocked")
+              return completeRun(next.reason, "failed");
+            if (next.kind === "model") return null;
+            if (next.kind === "complete") {
+              if (!workflowSummaries.length) return null;
+              const intent = request.classifiedIntent;
+              const canReport =
+                Boolean(finalizedMaterial) ||
+                (intent?.retrievalIntent === "none" &&
+                  intent.externalSearchIntent === "none" &&
+                  intent.deliverableIntent === "chat");
+              if (!canReport) return null;
+              const decision = await actionContractSession.evaluateFinal({
+                canCorrect: false,
+              });
+              if (decision.kind !== "accept")
+                return completeRun(
+                  decision.kind === "fail"
+                    ? decision.failure
+                    : decision.correction,
+                  "failed",
+                );
+              const planDecision = await activePlanSession.evaluateFinal({
+                canCorrect: false,
+              });
+              if (planDecision.kind !== "accept") return null;
+              const text =
+                workflowSummaries.join("\n\n") ||
+                actionContractSession.receiptStatus() ||
+                "The requested actions are verified complete.";
+              newTranscriptMessages.push({
+                role: "assistant",
+                content: finalizedMaterial?.finalText || text,
+              });
+              return completeRun(text);
+            }
+            const prepared = next.prepared;
+            await emit({
+              type: "status",
+              text: "Applying the next resolved action",
+            });
+            const result = await executeToolWorkflow(prepared.call, 0, {
+              suppressModelDelivery: true,
+              preparedAction: prepared,
+            });
+            if (result.failed)
+              return completeRun(
+                result.finalText || "The action failed.",
+                "failed",
+              );
+            const message: AgentUserMessage = {
+              role: "user",
+              content: JSON.stringify({
+                type: "host_workflow_progress",
+                instruction:
+                  "This is verified host execution evidence. Continue only unfinished work within the frozen request; do not repeat these completed actions.",
+                summary: prepared.summary,
+                actionReceipts: result.toolResult.actionReceipts,
+                progress: request.actionProgress,
+                planProgress: activePlanSession.workflowProgress(),
+              }),
+            };
+            continuationSession.appendHostMessage(message);
+            newTranscriptMessages.push(message);
+            await persistTranscriptCheckpoint({ requireAccepted: true });
+          }
+        };
+      if (referencesClarified) {
+        // The first model call must see the resolved authority, not the
+        // pre-clarification prompt that correctly prohibited effects.
+        renderedPrompt = await renderAgentPromptEnvelope(
+          request,
+          toolDefinitions,
+          matchedSkills,
+          resourceContextPlan,
+          {
+            contentInputs:
+              resolveCapabilitiesContentInputs(adapterCapabilities),
+          },
+        );
+        continuationSession.restartWithMessages(
+          composeAgentModelInput(renderedPrompt.envelope, {
+            transcriptMessages: transcriptMessagesForPrompt,
+          }),
+        );
+      }
       const rollbackCommittedStreamedText = async (
         stepStreamedText: string,
       ): Promise<void> => {
@@ -2684,6 +2936,8 @@ export class AgentRuntime {
           segmentRound <= maxRounds;
           segmentRound += 1
         ) {
+          const hostOutcome = await advanceHostWorkflow();
+          if (hostOutcome) return hostOutcome;
           round += 1;
           let stepResult: { step: AgentModelStep; stepStreamedText: string };
           try {
@@ -2706,7 +2960,7 @@ export class AgentRuntime {
           if (terminalOutcome) {
             return completeRun(
               terminalOutcome.finalText || currentAnswerText,
-              "completed",
+              terminalOutcome.failed ? "failed" : "completed",
               { documentId: terminalOutcome.documentId },
             );
           }
@@ -2923,9 +3177,13 @@ export class AgentRuntime {
                 });
               }
               await persistTranscriptCheckpoint();
-              return completeRun(stopFinalText, "completed", {
-                documentId: outcome.documentId,
-              });
+              return completeRun(
+                stopFinalText,
+                outcome.failed ? "failed" : "completed",
+                {
+                  documentId: outcome.documentId,
+                },
+              );
             }
           }
           appendRoundContinuation();

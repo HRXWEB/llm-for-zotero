@@ -267,7 +267,7 @@ describe("action compatibility after tool refactors", function () {
       progress
         .filter((event) => event.type === "step_done")
         .map((event) => ("summary" in event ? event.summary : "")),
-      "Moved 2 items",
+      "Filed 2 items",
     );
   });
 

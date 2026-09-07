@@ -46,6 +46,9 @@ export class LiveDriver {
     request: Partial<AgentRuntimeRequestInput> = {},
     expected: ConfirmationExpectation = "none",
     invokeUI?: () => Promise<unknown>,
+    answerQuestion?: (
+      action: import("../src/agent/types").AgentPendingAction,
+    ) => Record<string, unknown> | Promise<Record<string, unknown>>,
   ): Promise<Turn> {
     setOriginalAgentPermissionMode(mode);
     assertExact(
@@ -73,13 +76,18 @@ export class LiveDriver {
       });
       if (event.type === "confirmation_required") {
         confirmations++;
-        const decision = confirmationDecision(
-          mode,
-          expected,
-          event.action.mode || "approval",
-          runtime.getToolDefinition(event.action.toolName)?.spec
-            .executionClass === "external_effect",
-        );
+        const decision =
+          event.action.toolName === "request_user_input" &&
+          answerQuestion &&
+          expected === "review"
+            ? { approve: true, failure: undefined as string | undefined }
+            : confirmationDecision(
+                mode,
+                expected,
+                event.action.mode || "approval",
+                runtime.getToolDefinition(event.action.toolName)?.spec
+                  .executionClass === "external_effect",
+              );
         try {
           assertExact(
             await this.inspectEffectState(),
@@ -92,7 +100,10 @@ export class LiveDriver {
               event.action.fields.length,
             "Confirmation card must describe the proposed action",
           );
-          if (decision.approve) {
+          if (
+            decision.approve &&
+            event.action.toolName !== "request_user_input"
+          ) {
             const proposal = [...events]
               .reverse()
               .find(
@@ -116,7 +127,13 @@ export class LiveDriver {
         if (decision.failure)
           errors.push(`${decision.failure}: ${event.action.toolName}`);
         if (decision.approve) approvals++;
-        runtime.resolveConfirmation(event.requestId, decision.approve);
+        runtime.resolveConfirmation(
+          event.requestId,
+          decision.approve,
+          event.action.toolName === "request_user_input"
+            ? await answerQuestion?.(event.action)
+            : undefined,
+        );
         if (errors.length) controller.abort();
       }
       if (

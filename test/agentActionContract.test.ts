@@ -1333,7 +1333,7 @@ describe("Action Contract V2", function () {
           progress: service.createProgress(contract),
         })
       )?.message || "",
-      "does not match",
+      "different parameters",
     );
   });
 
@@ -1942,7 +1942,7 @@ describe("Action Contract V2", function () {
         });
         assert.include(
           (await service.validateScope(contract, wrongTarget))?.message || "",
-          "does not match",
+          "different parameters",
         );
       }
       entry.mutate();
@@ -2042,6 +2042,89 @@ describe("Action Contract V2", function () {
       "does not match",
     );
   });
+
+  for (const validParent of [true, false]) {
+    it(
+      validParent
+        ? "closes a parent-paper note obligation using verified note identity and parent coverage"
+        : "does not credit parent coverage when the created note belongs to a different paper",
+      async function () {
+        const { service, items } = createHarness();
+        items.set(41, {
+          tags: [],
+          collections: [],
+          fields: { title: "Paper" },
+        });
+        items.set(700, {
+          tags: [],
+          collections: [],
+          fields: {},
+          kind: "note",
+          parentItemId: validParent ? 41 : 42,
+          noteHtml: "<p>Grounded summary.</p>",
+        });
+        const request = requestWithIntents(
+          [
+            {
+              capability: "zotero.notes",
+              operation: "note_create",
+              proofDomain: "zotero_state",
+              coverage: "one",
+              targetKind: "papers",
+              scopeRole: "source",
+              parameters: { noteMode: "create" },
+            },
+          ],
+          { selectedCollection: 0, activeItemId: 41 },
+        );
+        request.classifiedIntent!.paperTargetIntent = "active";
+        const contract = await service.createContract(request);
+        assert.deepEqual(
+          contract.obligations[0].targetBoundary?.frozenTargetIds,
+          [41],
+        );
+        const progress = service.createProgress(contract);
+        const prepared = await service.prepare(
+          {
+            ...mutationTool(),
+            describeAction: () => [
+              {
+                id: "note-for-paper",
+                proofDomain: "zotero_state",
+                capability: "zotero.notes",
+                operation: "note_create",
+                source: "zotero_native",
+                parameters: {
+                  noteMode: "create",
+                  targetItemId: 41,
+                  expectedText: "Grounded summary.",
+                },
+                requestedTargets: ["item:41"],
+                destinationCollectionIds: [],
+              },
+            ],
+          },
+          {},
+        );
+        assert.isNull(await service.validateScope(contract, prepared));
+        const receipts = service.finalize(contract, prepared, {
+          ok: true,
+          effect: "applied",
+          content: { noteId: 700 },
+        });
+        service.applyReceipts(progress, receipts);
+        assert.equal(
+          evaluateActionContract(contract, receipts, progress).state,
+          validParent ? "satisfied" : "unverified",
+        );
+        if (validParent) {
+          assert.deepEqual(receipts[0].appliedTargets, ["item:41"]);
+          assert.include(receipts[0].verifiedFacts, "created_note:item:700");
+          assert.deepEqual(progress.obligations[0].unresolvedTargetIds, []);
+        } else assert.deepEqual(receipts[0].appliedTargets, []);
+      },
+    );
+  }
 
   it("closes Zotero-note and file-export obligations independently", async function () {
     const { service, items } = createHarness();

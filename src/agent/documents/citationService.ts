@@ -245,7 +245,7 @@ export function bindCitationEvidenceRefs(
   }));
 }
 
-export function formatDocumentCitations(params: {
+export async function formatDocumentCitations(params: {
   gateway: ZoteroGateway;
   draftMarkdown: string;
   clusters: readonly PlanCitationCluster[];
@@ -253,10 +253,10 @@ export function formatDocumentCitations(params: {
   evidence: readonly DocumentCitationEvidence[];
   spec: DocumentSpec;
   requireEvidence?: boolean;
-}): {
+}): Promise<{
   visibleMarkdown: string;
   citationBundle: FormattedCitationBundle;
-} {
+}> {
   const draftMarkdown = stripHandwrittenReferences(params.draftMarkdown);
   const corpusKeys = new Set(params.corpus.map(sourceKey));
   const evidenceByRef = new Map(
@@ -364,6 +364,9 @@ export function formatDocumentCitations(params: {
     };
   }
 
+  // App readiness does not await the style registry. Native init() joins its
+  // existing initialization promise, including any bundled style update.
+  await Zotero.Styles?.init?.();
   const formatted = params.gateway.formatStructuredCitations({
     clusters: resolved,
     styleId: params.spec.citationStyle.styleId,

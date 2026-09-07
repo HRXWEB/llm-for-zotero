@@ -743,7 +743,7 @@ export class PlanDocumentFinalizer {
     const durableAssets = await materializePlanDocumentAssets(
       params.input.assets,
     );
-    const formatted = formatPlanDocumentCitations({
+    const formatted = await formatPlanDocumentCitations({
       gateway: this.gateway,
       draftMarkdown: resolvedQuotes.markdown,
       clusters: params.input.citations,
@@ -1129,7 +1129,7 @@ export class DirectDocumentFinalizer {
       ),
     });
     validateVisibleDocumentPrivacy(resolvedQuotes.markdown);
-    const formatted = formatDocumentCitations({
+    const formatted = await formatDocumentCitations({
       gateway: this.gateway,
       draftMarkdown: resolvedQuotes.markdown,
       clusters: params.input.citations,

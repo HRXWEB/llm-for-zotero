@@ -27,11 +27,60 @@ const contract = (
 
 export const catalog: Contract[] = [
   contract(
+    "semantic.create-file",
+    "semantic",
+    "auto",
+    false,
+    "Create a named destination, carry its verified native identity into a move, preserve unrelated memberships, and complete both steps without execution-model rounds.",
+  ),
+  contract(
+    "semantic.compound-clarified",
+    "semantic",
+    "auto",
+    false,
+    "A compound request with an ambiguous source fills that native reference, preserves unrelated membership, and finishes the exact attached summary without rediscovering authority.",
+  ),
+  contract(
+    "semantic.compound-implicit",
+    "semantic",
+    "auto",
+    false,
+    "The natural compound request with an implicit source moves the active paper, summarizes its PDF, and attaches the exact finalized summary.",
+  ),
+  contract(
+    "semantic.action-cases",
+    "semantic",
+    "auto",
+    false,
+    "Paraphrases, multilingual moves, additive filing, real source clarification, and collection deletion execute with native verification and no execution-model rounds.",
+  ),
+  contract(
+    "semantic.move",
+    "semantic",
+    "auto",
+    false,
+    "The exact ordinary move request resolves its implicit source, executes once without execution-model rounds, and verifies native source absence and destination presence.",
+  ),
+  contract(
     "semantic.compound",
     "semantic",
     "auto",
     false,
     "Move, summarize, and attach a finalized summary note with native evidence.",
+  ),
+  contract(
+    "semantic.compound-revise",
+    "semantic",
+    "auto",
+    false,
+    "Replace an interrupted note save with an exact-content file save while retaining the completed move and immutable summary.",
+  ),
+  contract(
+    "semantic.compound-resume",
+    "semantic",
+    "auto",
+    false,
+    "Recover a lost note-save response using the same finalized summary and native note, without replaying the move or generation.",
   ),
   contract(
     "semantic.compound-plan",

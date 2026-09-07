@@ -80,7 +80,7 @@ describe("plan document citation serialization", function () {
     );
   });
 
-  it("links each exact CSL label without adding a second numbered citation group", function () {
+  it("links each exact CSL label without adding a second numbered citation group", async function () {
     const evidence: ResearchEvidenceRecord[] = [
       {
         version: 2,
@@ -115,7 +115,7 @@ describe("plan document citation serialization", function () {
         createdAt: 1,
       },
     ];
-    const result = formatPlanDocumentCitations({
+    const result = await formatPlanDocumentCitations({
       gateway: {
         formatStructuredCitations: ({
           clusters,
@@ -214,8 +214,8 @@ describe("plan document citation serialization", function () {
     assert.include(noteHtml, 'href="zotero://select/library/items/BBBB2222"');
   });
 
-  it("replaces a model-authored References section with the host bibliography", function () {
-    const result = formatPlanDocumentCitations({
+  it("replaces a model-authored References section with the host bibliography", async function () {
+    const result = await formatPlanDocumentCitations({
       gateway: {
         formatStructuredCitations: () => ({
           clusters: [
@@ -288,8 +288,8 @@ describe("plan document citation serialization", function () {
     assert.include(result.visibleMarkdown, "Alpha. 2020.");
   });
 
-  it("binds a literal multi-paper label to its adjacent sequence of citation tokens", function () {
-    const result = formatPlanDocumentCitations({
+  it("binds a literal multi-paper label to its adjacent sequence of citation tokens", async function () {
+    const result = await formatPlanDocumentCitations({
       gateway: {
         formatStructuredCitations: () => ({
           clusters: [

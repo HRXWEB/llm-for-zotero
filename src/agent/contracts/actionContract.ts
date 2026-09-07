@@ -1,3 +1,5 @@
+import { actionDependencies } from "./workflowDependencies";
+import { validatedWorkflowReuse } from "./workflowContinuation";
 import {
   validWorkflowDependencies,
   workflowDependencyIssue,
@@ -49,6 +51,7 @@ export type ScopeValidationFailure = {
     | "workflow_dependency"
     | "missing_typed_proposal"
     | "different_operation"
+    | "different_parameters"
     | "closed_obligation"
     | "hard_constraint"
     | "protected_target"
@@ -389,15 +392,21 @@ export class ActionContractService {
       throw new Error(
         "The semantic workflow contains unresolved or cyclic dependencies.",
       );
+    const reuse = validatedWorkflowReuse(request);
     const intents: import("../types").AgentActionIntent[] = [];
-    for (const intent of request.classifiedIntent.actionIntents)
+    for (const [
+      index,
+      intent,
+    ] of request.classifiedIntent.actionIntents.entries())
       intents.push(
-        await resolveDescriptiveTargets(
-          this.gateway,
-          request,
-          intent,
-          this.references,
-        ),
+        reuse?.reuse.actions.some((link) => link.actionIndex === index)
+          ? intent
+          : await resolveDescriptiveTargets(
+              this.gateway,
+              request,
+              intent,
+              this.references,
+            ),
       );
     if (
       request.classifiedIntent.semantic.reading.coverage === "exhaustive" &&
@@ -429,16 +438,34 @@ export class ActionContractService {
       );
     }
     const contractId = createContractId(request);
+    const reusedActions = new Map(
+      (reuse?.reuse.actions || []).map((link) => [
+        link.actionIndex,
+        reuse!.checkpoint.contract.obligations.filter(
+          (obligation, position) =>
+            (obligation.sourceActionIndex ?? position) ===
+            link.previousActionIndex,
+        ),
+      ]),
+    );
     const collectionCreations = new Map<number, AgentActionObligation[]>();
     for (const [index, intent] of intents.entries()) {
       if (intent.operation !== "create_collection") continue;
       collectionCreations.set(
         index,
         (
-          await resolveScope(this.gateway, request, intent, [], this.references)
+          reusedActions.get(index) ||
+          (await resolveScope(
+            this.gateway,
+            request,
+            intent,
+            [],
+            this.references,
+          ))
         ).map((obligation, offset) => ({
           ...obligation,
           id: `${contractId}:creation:${index}:${offset}`,
+          sourceActionIndex: index,
         })),
       );
     }
@@ -446,20 +473,49 @@ export class ActionContractService {
     for (const [index, intent] of intents.entries()) {
       const obligations =
         collectionCreations.get(index) ||
+        reusedActions.get(index) ||
         (await resolveScope(
           this.gateway,
           request,
           intent,
           [...collectionCreations.values()].flat(),
           this.references,
+          index,
         ));
       resolved.push(
         ...obligations.map((obligation) => ({
           ...obligation,
+          dependsOn: actionDependencies(intent).length
+            ? actionDependencies(intent)
+            : undefined,
+          contentFrom: intent.contentFrom,
           sourceActionIndex: index,
         })),
       );
     }
+    if (reuse)
+      for (const obligation of resolved) {
+        if (!obligation.destinationCreation) continue;
+        const oldId = obligation.destinationCreation.obligationId;
+        const old = reuse.checkpoint.contract.obligations.find(
+          (entry) => entry.id === oldId,
+        );
+        const link = reuse.reuse.actions.find(
+          (entry) => entry.previousActionIndex === old?.sourceActionIndex,
+        );
+        const creation = link
+          ? collectionCreations.get(link.actionIndex)?.[0]
+          : undefined;
+        if (old && !creation)
+          throw new Error(
+            "The reused destination creation has no current workflow owner.",
+          );
+        if (creation)
+          obligation.destinationCreation = {
+            ...obligation.destinationCreation,
+            obligationId: creation.id,
+          };
+      }
     return {
       version: 4,
       id: contractId,
@@ -562,6 +618,15 @@ export class ActionContractService {
     progress.updatedAt = Date.now();
   }
 
+  resolveWorkflowContract(
+    contract: AgentActionContract | undefined,
+    progress?: AgentActionProgressLedger,
+  ) {
+    return contract
+      ? resolveCreatedDestinations(this.gateway, contract, progress)
+      : undefined;
+  }
+
   async prepare(
     tool: AgentToolDefinition<any, any>,
     input: unknown,
@@ -614,15 +679,22 @@ export class ActionContractService {
     for (const proposal of prepared.proposals) {
       const matches = matchingObligations(contract, proposal);
       if (!matches.length) {
+        const sameOperation = contract.obligations.filter(
+          (obligation) =>
+            obligation.operation === proposal.operation &&
+            obligation.proofDomain === proposal.proofDomain,
+        );
         return failure(
-          `Action ${proposal.operation} in ${proposal.proofDomain} does not match any authorized obligation.`,
+          sameOperation.length
+            ? `Action ${proposal.operation} has different parameters from the resolved request. Expected one of ${JSON.stringify(sameOperation.map((obligation) => obligation.parameters || {}))}; received ${JSON.stringify(proposal.parameters || {})}. Resolve this discrepancy before execution.`
+            : `Action ${proposal.operation} in ${proposal.proofDomain} does not match any authorized obligation.`,
           contract,
           prepared,
           proposal.requestedTargets.length
             ? proposal.requestedTargets
             : [proposal.operation],
           undefined,
-          "different_operation",
+          sameOperation.length ? "different_parameters" : "different_operation",
         );
       }
       let openMatches = matches.filter((obligation) =>
@@ -1145,16 +1217,29 @@ export class ActionContractService {
         params.content,
         this.gateway,
       );
+      // The obligation concerns the parent paper; the created note is its
+      // output. Native verification above has already checked that exact
+      // parent relationship and the stored content before crediting coverage.
+      const coveredTargets =
+        proposal.operation === "note_create" &&
+        proposal.parameters?.targetItemId
+          ? [itemTarget(proposal.parameters.targetItemId)]
+          : verification.targets;
       return verification.targets
         ? {
             ...base,
             verification: "verified",
             status: params.effect === "none" ? "already_satisfied" : "applied",
-            requestedTargets: verification.targets,
-            appliedTargets:
-              params.effect === "none" ? [] : verification.targets,
+            requestedTargets: coveredTargets!,
+            verifiedFacts: [
+              ...base.verifiedFacts,
+              ...(proposal.operation === "note_create"
+                ? verification.targets.map((target) => `created_note:${target}`)
+                : []),
+            ],
+            appliedTargets: params.effect === "none" ? [] : coveredTargets!,
             alreadySatisfiedTargets:
-              params.effect === "none" ? verification.targets : [],
+              params.effect === "none" ? coveredTargets! : [],
           }
         : {
             ...base,

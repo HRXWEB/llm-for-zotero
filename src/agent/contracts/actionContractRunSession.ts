@@ -1,3 +1,9 @@
+import { carryWorkflowProgress } from "./workflowContinuation";
+import type { ActionContractCheckpoint } from "./workflowCheckpoint";
+export {
+  readLatestActionContractCheckpoint,
+  type ActionContractCheckpoint,
+} from "./workflowCheckpoint";
 import { ActionReferenceResolutionError } from "./actionScope";
 import type {
   AgentEvent,
@@ -13,11 +19,6 @@ import type {
   AgentActionProgressLedger,
   AgentActionReceipt,
 } from "./types";
-
-export type ActionContractCheckpoint = {
-  contract: AgentActionContract;
-  progress: AgentActionProgressLedger;
-};
 
 export type ActionContractInitialization =
   | { kind: "ready" }
@@ -47,35 +48,6 @@ type ActionContractRunSessionParams = {
   contracts: ActionContractCreationPort;
   emit: (event: AgentEvent) => Promise<void>;
 };
-
-export function readLatestActionContractCheckpoint(
-  events: readonly AgentEvent[],
-): ActionContractCheckpoint | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (
-      event.type !== "provider_event" ||
-      event.providerType !== "agent_action_contract"
-    ) {
-      continue;
-    }
-    const contract = event.payload?.contract as AgentActionContract | undefined;
-    const progress = event.payload?.progress as
-      | AgentActionProgressLedger
-      | undefined;
-    if (
-      contract?.version === 4 &&
-      typeof contract.id === "string" &&
-      Array.isArray(contract.obligations) &&
-      progress?.version === 1 &&
-      progress.contractId === contract.id &&
-      Array.isArray(progress.obligations)
-    ) {
-      return { contract, progress };
-    }
-  }
-  return null;
-}
 
 export class ActionContractRunSession {
   private readonly request: ResolvedAgentRuntimeRequest;
@@ -114,13 +86,8 @@ export class ActionContractRunSession {
             this.request.actionContract.id
         )
           this.request.actionProgress = params.checkpoint.progress;
-      } else if (
-        params.checkpoint &&
-        this.request.classifiedIntent?.semantic?.continuation === "resume"
-      ) {
-        this.request.actionContract = params.checkpoint.contract;
-        this.request.actionProgress = params.checkpoint.progress;
       } else {
+        this.request.workflowCheckpoint ||= params.checkpoint || undefined;
         this.request.actionPreparation = { state: "resolving", issues: [] };
         this.request.actionContract =
           (await this.contracts.createActionContract(this.request)) ||
@@ -133,6 +100,7 @@ export class ActionContractRunSession {
         this.request.actionPreparation = {
           state: "needs_input",
           issues: [reason],
+          sourceSelection: error.sourceSelection,
         };
         await this.emit({
           type: "provider_event",
@@ -162,6 +130,20 @@ export class ActionContractRunSession {
       if (this.request.actionProgress?.contractId !== contract.id) {
         this.request.actionProgress =
           this.contracts.createActionProgress(contract);
+      }
+      if (this.request.planContext?.phase !== "executing") {
+        try {
+          await carryWorkflowProgress(
+            this.request,
+            contract,
+            this.request.actionProgress!,
+          );
+        } catch (error) {
+          return {
+            kind: "failed",
+            userMessage: `Prior workflow evidence could not be reused: ${String(error)}`,
+          };
+        }
       }
       await this.emitSnapshot();
     }

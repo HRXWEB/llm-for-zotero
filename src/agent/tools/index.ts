@@ -1,3 +1,5 @@
+import { createWorkflowScriptTool } from "./control/workflowScript";
+import { registerPreparedLibraryActions } from "./preparedLibraryActions";
 import { ModelSemanticReferenceResolver } from "../model/semanticReferenceResolver";
 import { AgentToolRegistry } from "./registry";
 import { PdfService } from "../services/pdfService";
@@ -575,6 +577,11 @@ export function createBuiltInToolRegistry(
     ),
     planAmendments,
   );
+  registry.register(
+    createWorkflowScriptTool((request) =>
+      registry.listToolsForRequest(request),
+    ),
+  );
   const queryLibrary = createQueryLibraryTool(deps.zoteroGateway);
   const readLibrary = createReadLibraryTool(deps.zoteroGateway);
   const libraryRetrieve = createLibraryRetrieveTool(
@@ -774,6 +781,7 @@ export function createBuiltInToolRegistry(
   for (const tool of legacyTools) {
     registry.register(markInternalTool(tool));
   }
+  registerPreparedLibraryActions(registry, deps.zoteroGateway);
   return registry;
 }
 

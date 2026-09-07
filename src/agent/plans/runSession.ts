@@ -132,7 +132,11 @@ export async function recordMcpPlanEvidence(
   }
   return planExecutionCoordinator.advanceVerifiedTasks({
     executionId: plan.executionId,
-    requirementKinds: ["verified_read", "material_integrity"],
+    requirementKinds: [
+      "verified_read",
+      "material_integrity",
+      "mutation_receipts",
+    ],
   });
 }
 
@@ -251,6 +255,39 @@ export class PlanExecutionRunSession {
     return { kind: "ready" };
   }
 
+  activeWorkflowObligationIds(): readonly string[] | undefined {
+    const plan = this.request.planContext;
+    if (!plan) return undefined;
+    if (plan.phase !== "executing") return [];
+    return (
+      this.ledger?.tasks.find(
+        (task) => task.taskId === this.ledger?.activeTaskId,
+      )?.obligationIds || []
+    );
+  }
+
+  workflowProgress() {
+    if (this.request.planContext?.phase !== "executing" || !this.ledger)
+      return undefined;
+    const active = this.ledger.tasks.find(
+      (task) => task.taskId === this.ledger!.activeTaskId,
+    );
+    return {
+      executionId: this.ledger.executionId,
+      activeTask: active
+        ? {
+            taskId: active.taskId,
+            content: active.content,
+            materialOutputId: active.materialOutputId,
+            expectedEffect: active.expectedEffect,
+          }
+        : null,
+      completedTaskIds: this.ledger.tasks
+        .filter((task) => task.status === "completed")
+        .map((task) => task.taskId),
+    };
+  }
+
   async recordToolResult(params: {
     toolName: string;
     executionClass?: "read" | "control" | "external_effect";
@@ -358,7 +395,11 @@ export class PlanExecutionRunSession {
     }
     ledger = await planExecutionCoordinator.advanceVerifiedTasks({
       executionId: plan.executionId,
-      requirementKinds: ["verified_read", "material_integrity"],
+      requirementKinds: [
+        "verified_read",
+        "material_integrity",
+        "mutation_receipts",
+      ],
     });
     this.ledger = ledger;
     this.request.planContext = {
