@@ -32,7 +32,8 @@ export function getOriginalAgentPermissionMode(): OriginalAgentPermissionMode {
       typeof legacy === "string" ? legacy.trim().toLowerCase() : legacy,
     );
   } catch {
-    return "safe";
+    // Match normalizeOriginalAgentPermissionMode: a fresh install is auto.
+    return "auto";
   }
 }
 

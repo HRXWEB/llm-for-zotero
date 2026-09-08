@@ -608,4 +608,20 @@ describe("provider permission modes", function () {
     assert.include(safe.description, "other writes");
     assert.notInclude(safe.description, "every write");
   });
+
+  it("falls back to auto when the preference store is unreadable", function () {
+    const previous = (globalThis as { Zotero?: unknown }).Zotero;
+    (globalThis as { Zotero?: unknown }).Zotero = {
+      Prefs: {
+        get: () => {
+          throw new Error("prefs unavailable");
+        },
+      },
+    };
+    try {
+      assert.equal(getOriginalAgentPermissionMode(), "auto");
+    } finally {
+      (globalThis as { Zotero?: unknown }).Zotero = previous;
+    }
+  });
 });

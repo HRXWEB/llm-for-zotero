@@ -9,6 +9,7 @@ import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
 
 describe("ranked literature discovery workflow", function () {
   const originalFetch = globalThis.fetch;
+  const originalZotero = globalThis.Zotero;
   const gateway = {
     resolveMetadataItem: () => null,
     getEditableArticleMetadata: () => null,
@@ -58,9 +59,14 @@ describe("ranked literature discovery workflow", function () {
         })),
       }),
     })) as typeof fetch;
+    // These fixtures assert the reviewed-shortlist card behavior of Safe
+    // mode; stub the pref store so getOriginalAgentPermissionMode() resolves
+    // deterministically instead of throwing on an absent globalThis.Zotero.
+    globalThis.Zotero = { Prefs: { get: () => "safe" } } as never;
   });
   afterEach(function () {
     globalThis.fetch = originalFetch;
+    globalThis.Zotero = originalZotero;
     clearAgentToolResultHandleStore();
   });
 
