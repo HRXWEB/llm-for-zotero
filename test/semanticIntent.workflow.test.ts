@@ -539,7 +539,10 @@ describe("Semantic intent to native action contract", function () {
 });
 
 describe("permission mode in semantic prompts", function () {
-  const originalZotero = globalThis.Zotero;
+  let originalZotero: typeof globalThis.Zotero;
+  beforeEach(function () {
+    originalZotero = globalThis.Zotero;
+  });
   afterEach(function () {
     globalThis.Zotero = originalZotero;
   });
@@ -583,7 +586,7 @@ describe("permission mode in semantic prompts", function () {
   it("tells the interpreter the mode and asks yolo for assumptions instead of questions", async function () {
     const yolo = await interpreterPrompt("yolo");
     assert.include(yolo, "- Permission mode: yolo");
-    assert.include(yolo, "decisions.assumptions");
+    assert.include(yolo, "list each choice in decisions.assumptions");
     assert.include(
       yolo,
       "Do not emit decisions.questions for ordinary ambiguity",

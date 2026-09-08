@@ -408,7 +408,7 @@ export class ActionContractService {
           throw error;
         skipped.add(index);
         assumptions.push(
-          `Action ${index} (${operation}) was not resolved: ${error.message} The agent decides its target.`,
+          `The requested ${operation.replace(/_/g, " ")} could not be resolved (${error.message}) so the agent will choose its target.`,
         );
         return null;
       }
@@ -555,10 +555,34 @@ export class ActionContractService {
             obligationId: creation.id,
           };
       }
+    // The contract's own copy of the intent is what material production reads,
+    // so a skipped action must not remain a prerequisite or an evidence source
+    // there: the output falls back to the papers already in turn context.
+    const frozenIntent: import("../types").ClassifiedTurnIntent = JSON.parse(
+      JSON.stringify(request.classifiedIntent),
+    );
+    for (const output of frozenIntent.semantic?.materialOutputs || []) {
+      const sourceActionIndexes = output.sourceActionIndexes.filter(
+        (index) => !skipped.has(index),
+      );
+      const afterActions = output.afterActions.filter(
+        (index) => !skipped.has(index),
+      );
+      if (
+        sourceActionIndexes.length === output.sourceActionIndexes.length &&
+        afterActions.length === output.afterActions.length
+      )
+        continue;
+      output.sourceActionIndexes = sourceActionIndexes;
+      output.afterActions = afterActions;
+      assumptions.push(
+        `Material "${output.id}" will draw on the papers in context because its requested source could not be resolved.`,
+      );
+    }
     return {
       version: 4,
       id: contractId,
-      intent: JSON.parse(JSON.stringify(request.classifiedIntent)),
+      intent: frozenIntent,
       hardConstraints: JSON.parse(
         JSON.stringify(request.classifiedIntent.semantic.constraints),
       ),

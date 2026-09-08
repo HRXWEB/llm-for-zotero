@@ -1,13 +1,18 @@
 import { decodeActionContract } from "../src/agent/plans/contracts";
 import { assert } from "chai";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { assertMaterialReady } from "../src/agent/documents/workflowMaterial";
 import { actionFixture } from "./helpers/semanticIntent";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
-function setup(resolve: (input: any) => Promise<any>) {
+function setup(
+  resolve: (input: any) => Promise<any>,
+  overrides: Record<string, unknown> = {},
+) {
   const items = [17, 18, 99].map((id) => ({
     id,
     libraryID: 1,
+    key: `KEY${id}`,
     isRegularItem: () => true,
     getField: (field: string) =>
       field === "title" ? `Paper ${id}` : "Evidence",
@@ -36,9 +41,11 @@ function setup(resolve: (input: any) => Promise<any>) {
     libraryID: 1,
     userText: "Tag drift papers in Source",
     classifiedIntent: intent,
+    ...overrides,
   });
   return {
     request,
+    gateway,
     service: new ActionContractService(gateway as never, { resolve }),
   };
 }
@@ -126,7 +133,102 @@ describe("semantic reference discovery", function () {
     assert.lengthOf(contract.obligations, 0);
     assert.isArray(contract.assumptions);
     assert.match(contract.assumptions![0], /neural or behavioral/);
-    assert.match(contract.assumptions![0], /agent decides/i);
+    assert.match(contract.assumptions![0], /agent will choose/i);
+  });
+  it("yolo detaches a skipped action from the frozen material outputs", async function () {
+    const { request, gateway, service } = setup(
+      async () => ({
+        state: "needs_input",
+        question: "Does drift mean neural or behavioral drift?",
+      }),
+      {
+        activeItemId: 17,
+        activePaperContext: {
+          itemId: 17,
+          contextItemId: 17,
+          title: "Paper 17",
+          libraryID: 1,
+        },
+      },
+    );
+    request.classifiedIntent!.semantic!.materialOutputs = [
+      {
+        id: "summary",
+        description: "Summarize",
+        afterActions: [0],
+        sourceActionIndexes: [0],
+        requiredEvidence: "body",
+      },
+    ];
+    request.documentReadObservations = [
+      {
+        issuer: "zotero_host",
+        libraryID: 1,
+        itemKey: "KEY17",
+        capabilities: ["body"],
+      },
+    ] as never;
+    const contract = await service.createContract(request, { mode: "yolo" });
+    assert.lengthOf(contract.obligations, 0);
+    const frozen = contract.intent!.semantic!.materialOutputs![0];
+    assert.deepEqual(frozen.sourceActionIndexes, []);
+    assert.deepEqual(frozen.afterActions, []);
+    assert.isTrue(
+      contract.assumptions!.some((line) => line.includes("summary")),
+      `assumptions must name the detached output: ${JSON.stringify(contract.assumptions)}`,
+    );
+    // The request's own interpretation must not be rewritten by contract building.
+    assert.deepEqual(
+      request.classifiedIntent!.semantic!.materialOutputs![0]
+        .sourceActionIndexes,
+      [0],
+    );
+    assert.deepEqual(
+      request.classifiedIntent!.semantic!.materialOutputs![0].afterActions,
+      [0],
+    );
+    request.actionContract = contract;
+    assert.doesNotThrow(() =>
+      assertMaterialReady(request, frozen, gateway as never),
+    );
+  });
+  it("yolo keeps obligation indexes aligned when an earlier action is skipped", async function () {
+    const { request, service } = setup(async () => ({
+      state: "needs_input",
+      question: "Does drift mean neural or behavioral drift?",
+    }));
+    const first = request.classifiedIntent!.actionIntents[0];
+    request.classifiedIntent!.actionIntents.push({
+      ...first,
+      discovery: undefined,
+      dependsOn: [0],
+      scope: {
+        kind: "collection",
+        referenceKind: "literal",
+        path: "Source",
+        includeDescendants: false,
+      },
+    });
+    const contract = await service.createContract(request, { mode: "yolo" });
+    assert.isNotEmpty(contract.obligations);
+    for (const obligation of contract.obligations) {
+      assert.equal(obligation.sourceActionIndex, 1);
+      assert.isUndefined(obligation.dependsOn);
+    }
+    assert.isTrue(
+      contract.assumptions!.some((line) =>
+        line.includes("neural or behavioral"),
+      ),
+      `assumptions must record the unresolved action: ${JSON.stringify(contract.assumptions)}`,
+    );
+    for (const mode of ["safe", "auto"] as const) {
+      try {
+        await service.createContract(request, { mode });
+        assert.fail("must still ask outside yolo");
+      } catch (error) {
+        assert.include(String(error), "neural or behavioral");
+      }
+    }
   });
   it("yolo carries interpreter questions as assumptions", async function () {
     const { request, service } = setup(async () => ({
