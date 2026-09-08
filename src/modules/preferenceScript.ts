@@ -70,6 +70,8 @@ import {
   getProviderPreset,
   getProviderPresetProtocolOptions,
   providerPresetRequiresApiKey,
+  normalizeProviderPresetId,
+  resolveProviderPresetId,
   type ProviderPresetId,
 } from "../utils/providerPresets";
 import {
@@ -360,14 +362,6 @@ function getProviderProfile(index: number): ProviderProfile {
 }
 
 const DEFAULT_AGENT_BRIDGE_URL = "http://127.0.0.1:19787";
-
-function normalizeProviderPresetId(value: unknown): ProviderPresetId {
-  if (typeof value !== "string") return "customized";
-  return value === "customized" ||
-    PROVIDER_PRESETS.some((preset) => preset.id === value)
-    ? (value as ProviderPresetId)
-    : "customized";
-}
 
 function getPresetSelectHelperText(presetId: ProviderPresetId): string {
   if (presetId === "customized") {
@@ -1357,13 +1351,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         el(doc, "span", HELPER_STYLE, authModeHelperText),
       );
 
-      const selectedPresetId: ProviderPresetId =
-        group.authMode === "codex_auth" ||
-        group.authMode === "codex_app_server" ||
-        group.authMode === "copilot_auth" ||
-        group.authMode === "webchat"
-          ? "customized"
-          : (group.presetIdOverride ?? detectProviderPreset(group.apiBase));
+      const selectedPresetId = resolveProviderPresetId(group);
       const selectedPreset =
         selectedPresetId === "customized"
           ? null
@@ -1443,14 +1431,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         customizedOption.selected = selectedPresetId === "customized";
         providerPresetSelect.appendChild(customizedOption);
         providerPresetSelect.addEventListener("change", () => {
-          const nextPresetId = normalizeProviderPresetId(
-            providerPresetSelect.value,
-          );
-          if (nextPresetId === "customized") {
-            group.presetIdOverride = "customized";
-            // Keep existing apiBase so user can edit it
-          } else {
-            group.presetIdOverride = undefined;
+          const nextPresetId =
+            normalizeProviderPresetId(providerPresetSelect.value) ??
+            "customized";
+          group.presetIdOverride = nextPresetId;
+          // Customized keeps the existing URL so the user can edit it.
+          if (nextPresetId !== "customized") {
             group.apiBase = getProviderPreset(nextPresetId).defaultApiBase;
             group.providerProtocol =
               getProviderPreset(nextPresetId).defaultProtocol;

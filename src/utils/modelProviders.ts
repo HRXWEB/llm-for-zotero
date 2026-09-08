@@ -11,7 +11,12 @@ import {
   normalizeProviderProtocolForAuthMode,
   type ProviderProtocol,
 } from "./providerProtocol";
-import { detectProviderPreset, getProviderPreset } from "./providerPresets";
+import {
+  detectProviderPreset,
+  getProviderPreset,
+  normalizeProviderPresetId,
+  resolveProviderPresetId,
+} from "./providerPresets";
 import type { ProviderPresetId } from "./providerPresets";
 import type { ModelInputMode, OutputTokenLimitSetting } from "../shared/types";
 import {
@@ -476,7 +481,7 @@ function normalizeGroup(
       apiBase,
     }),
     models,
-    presetIdOverride: normalizePresetIdOverride(rawGroup.presetIdOverride),
+    presetIdOverride: normalizeProviderPresetId(rawGroup.presetIdOverride),
   };
 }
 
@@ -599,13 +604,6 @@ function normalizeAndCollapseModelProviderGroups(
   }
   return groups;
 }
-function normalizePresetIdOverride(
-  value: unknown,
-): ProviderPresetId | undefined {
-  if (value !== "customized") return undefined;
-  return "customized";
-}
-
 function normalizeGroupModel(
   model: unknown,
   authMode: ModelProviderAuthMode,
@@ -651,24 +649,12 @@ function normalizeGroupModel(
   };
 }
 
-function resolveStoredPresetId(group: ModelProviderGroup): ProviderPresetId {
-  if (
-    group.authMode === "codex_auth" ||
-    group.authMode === "codex_app_server" ||
-    group.authMode === "copilot_auth" ||
-    group.authMode === "webchat"
-  ) {
-    return "customized";
-  }
-  return group.presetIdOverride ?? detectProviderPreset(group.apiBase);
-}
-
 function resolveRuntimeProviderProtocol(
   group: ModelProviderGroup,
   modelEntry?: ModelProviderModel,
 ): ProviderProtocol {
   const authMode = normalizeProviderAuthMode(group.authMode);
-  const presetId = resolveStoredPresetId(group);
+  const presetId = resolveProviderPresetId(group);
   const fallback =
     presetId === "customized"
       ? undefined
@@ -1042,10 +1028,11 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
       }
       continue;
     }
-    const baseProviderLabel = deriveProviderLabel(
-      group.apiBase,
-      groupIndex + 1,
-    );
+    const presetId = resolveProviderPresetId(group);
+    const baseProviderLabel =
+      presetId === "customized"
+        ? deriveProviderLabel(group.apiBase, groupIndex + 1)
+        : getProviderPreset(presetId).label;
     const providerLabel =
       authMode === "codex_app_server"
         ? `${baseProviderLabel} (app server)`
@@ -1103,7 +1090,7 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
 export function buildProviderCatalogIdentity(
   group: ModelProviderGroup,
 ): ModelCatalogIdentity {
-  const presetId = resolveStoredPresetId(group);
+  const presetId = resolveProviderPresetId(group);
   return {
     provider: presetId === "customized" ? undefined : presetId,
     model: "",
