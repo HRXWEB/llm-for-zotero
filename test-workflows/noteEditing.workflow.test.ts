@@ -228,7 +228,9 @@ describe("workflow: note editing mode", function () {
     assert.isUndefined(send.selectedTextNoteContexts?.[0]?.parentItemId);
     assert.equal(send.activeNoteContext?.noteKind, "standalone");
     assert.isUndefined(send.activeNoteContext?.parentItemId);
-    assert.isUndefined(
+    // The note chats in its own conversation, so the send still carries a
+    // resolved context source; a standalone note simply resolves to no paper.
+    assert.isNull(
       send.contextSource?.paperContext,
       await diagnosticsMessage(api, panel.panelId),
     );
