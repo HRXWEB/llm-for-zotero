@@ -1131,6 +1131,7 @@
 /* --- Unified expandable sidebar --- */
 
 .llm-standalone-sidebar {
+  position: relative;
   display: flex;
   flex-direction: row;
   flex-shrink: 0;
@@ -1951,11 +1952,35 @@
   transition: none;
 }
 
-/* Collapsed state keeps the same controls as an ordered 48px icon rail. */
+/* Collapsed means gone: the panel leaves the flow so the chat starts at the
+ * window edge, and comes back only as a hover flyout over the content. */
+.llm-standalone-sidebar[data-sidebar-state="collapsed"] {
+  overflow: visible;
+}
+
 .llm-standalone-sidebar[data-sidebar-state="collapsed"]
   .llm-standalone-sidebar-panel {
-  width: 48px !important;
-  border-right: 1px solid var(--stroke-secondary);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  transform: translateX(-100%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+  transition:
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.llm-standalone-sidebar[data-sidebar-state="collapsed"][data-sidebar-flyout="open"]
+  .llm-standalone-sidebar-panel {
+  transform: translateX(0);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .llm-standalone-sidebar[data-sidebar-state="collapsed"]
@@ -2125,51 +2150,6 @@
   margin: 2px 12px;
 }
 
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-sidebar-header {
-  justify-content: center;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-nav-row {
-  width: 32px;
-  margin: 0 8px;
-  padding: 0 7px;
-  gap: 0;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-nav-label {
-  width: 0;
-  flex: 0 0 0;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-8px);
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-history-region {
-  display: none !important;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-primary-action-group {
-  width: 32px;
-  margin: 0 8px;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-primary-action-group
-  .llm-standalone-nav-row {
-  flex: 0 0 32px;
-  margin: 0;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-nav-aux-action {
-  display: none !important;
-}
-
 .llm-standalone-sidebar-refresh {
   font-size: 15px;
   line-height: 1;
@@ -2323,7 +2303,11 @@
 /* Tab row — centers the tab group at top of content area */
 .llm-standalone-tab-row {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) 56px;
+  /* Both side tracks are defined identically, so they always split the free
+   * space evenly and the tab group stays centred no matter which controls the
+   * leading slot is currently holding. A bare 1fr would grow with its content
+   * and drag the tabs off centre. */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   height: var(--llm-standalone-toolbar-row-height);
   min-height: var(--llm-standalone-toolbar-row-height);
@@ -2333,6 +2317,9 @@
 }
 
 .llm-standalone-tab-row-leading {
+  /* The flyout keeps its header surface behind these relocated controls. */
+  position: relative;
+  z-index: 21;
   grid-column: 1;
   justify-self: start;
   display: flex;
@@ -7996,6 +7983,9 @@ label.llm-search-results-item:hover {
 }
 
 .llm-mermaid-window-root {
+  /* The diagram canvas has its own light and dark surface, independent of the
+   * app theme, so the traffic light strip above it follows that surface. */
+  --llm-window-titlebar-bg: var(--llm-mermaid-canvas-bg);
   --llm-mermaid-canvas-bg: #ffffff;
   --llm-mermaid-canvas-border: rgba(148, 163, 184, 0.42);
   --llm-mermaid-button-bg: transparent;
@@ -8063,6 +8053,12 @@ label.llm-search-results-item:hover {
     opacity 0.12s ease,
     background 0.12s ease,
     color 0.12s ease;
+}
+
+/* Keep diagram actions on the titlebar centerline and above its drag surface. */
+:root[customtitlebar] .llm-mermaid-window-toolbar {
+  top: 4px;
+  z-index: 11;
 }
 
 .llm-mermaid-window-btn:hover:not(:disabled) {
@@ -13909,49 +13905,28 @@ label.llm-search-results-item:hover {
   -moz-window-dragging: drag;
 }
 
+/* The traffic lights sit 12px from the window edge wherever they are, so each
+ * host contributes only the part its own padding does not already cover.
+ * Zeroing a row's leading padding instead would make that row asymmetric and
+ * pull the centred tab group off the window's midline. */
+:root[customtitlebar] .llm-standalone-sidebar-header .llm-window-buttons {
+  margin-inline-start: 4px;
+}
+
+:root[customtitlebar] .llm-standalone-tab-row .llm-window-buttons {
+  margin-inline-start: 0;
+}
+
 :root[customtitlebar] .llm-standalone-nav-toggle,
 :root[customtitlebar] .llm-standalone-tab-group,
 :root[customtitlebar] .llm-standalone-runtime-system-controls {
   -moz-window-dragging: no-drag;
 }
 
-/* The collapsed rail is exactly the traffic light footprint: a 12px inset,
- * the 52px button box, and a matching 12px trailing inset. The collapse
- * toggle moves to the tab row at this width, so the header keeps only the
- * window controls and must stay left-aligned under them. */
-:root[customtitlebar]
-  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-sidebar-panel {
-  width: 76px !important;
-}
-
-:root[customtitlebar]
-  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-sidebar-header {
-  justify-content: flex-start;
-  padding-inline: 0;
-}
-
-:root[customtitlebar]
-  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-nav-row,
-:root[customtitlebar]
-  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-primary-action-group {
-  margin: 0 22px;
-}
-
-/* Both side columns grow by the same amount so the centre column, and the
- * segmented tabs inside it, stay centred on the content area whether or not
- * the collapse toggle is currently sitting in the leading slot. */
-:root[customtitlebar] .llm-standalone-tab-row {
-  grid-template-columns: 94px minmax(0, 1fr) 94px;
-}
-
-/* Document windows have no toolbar of their own, so they get a bare strip for
- * the traffic lights. It is fixed to the viewport and painted, because the
- * document scrolls underneath it. */
-.llm-document-titlebar {
+/* Document and diagram windows have no toolbar of their own, so they get a
+ * bare strip for the traffic lights. It is fixed to the viewport and painted,
+ * because their content scrolls underneath it. */
+.llm-window-titlebar {
   position: fixed;
   top: 0;
   left: 0;
@@ -13960,7 +13935,7 @@ label.llm-search-results-item:hover {
   display: flex;
   align-items: center;
   height: 38px;
-  background: var(--material-background);
+  background: var(--llm-window-titlebar-bg, var(--material-background));
   -moz-window-dragging: drag;
 }
 

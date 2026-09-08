@@ -1,7 +1,8 @@
 import { assert } from "chai";
 import {
   createStandaloneSidebarView,
-  setStandaloneSidebarCollapsedToggleHost,
+  setStandaloneSidebarCollapsedChromeHost,
+  setStandaloneSidebarFlyoutOpen,
   setStandaloneSidebarState,
 } from "../src/modules/contextPanel/standaloneSidebarView";
 
@@ -144,7 +145,7 @@ describe("standalone sidebar view", function () {
     );
   });
 
-  it("uses one stateful sidebar for expanded labels and collapsed icons", function () {
+  it("uses one stateful sidebar for expanded and collapsed presentation", function () {
     const view = createView();
 
     setStandaloneSidebarState(view, "collapsed");
@@ -164,10 +165,10 @@ describe("standalone sidebar view", function () {
     assert.equal(view.toggleButton.getAttribute("aria-expanded"), "true");
   });
 
-  it("hands the collapse toggle to the tab row when the collapsed rail only fits the window buttons", function () {
+  it("hands the window controls and the collapse toggle to the tab row when collapsed", function () {
     const view = createView();
     const tabRowLeading = new FakeElement("div");
-    setStandaloneSidebarCollapsedToggleHost(
+    setStandaloneSidebarCollapsedChromeHost(
       view,
       tabRowLeading as unknown as HTMLElement,
     );
@@ -176,17 +177,20 @@ describe("standalone sidebar view", function () {
 
     setStandaloneSidebarState(view, "collapsed");
 
+    // The rail is gone entirely while collapsed, so nothing may be left
+    // behind in it: both the traffic lights and the toggle move out.
     assert.deepEqual(tabRowLeading.children, [
+      view.windowButtons,
       view.toggleButton,
       runtimeControls,
     ]);
-    assert.deepEqual(view.header.children, [view.windowButtons]);
+    assert.deepEqual(view.header.children, []);
   });
 
-  it("returns the collapse toggle to the sidebar header when the rail expands", function () {
+  it("returns the window controls and the toggle to the header when the rail expands", function () {
     const view = createView();
     const tabRowLeading = new FakeElement("div");
-    setStandaloneSidebarCollapsedToggleHost(
+    setStandaloneSidebarCollapsedChromeHost(
       view,
       tabRowLeading as unknown as HTMLElement,
     );
@@ -201,7 +205,7 @@ describe("standalone sidebar view", function () {
     ]);
   });
 
-  it("keeps the collapse toggle in the header when no tab row host is offered", function () {
+  it("keeps the header intact when no tab row host is offered", function () {
     const view = createView();
 
     setStandaloneSidebarState(view, "collapsed");
@@ -210,5 +214,29 @@ describe("standalone sidebar view", function () {
       view.windowButtons,
       view.toggleButton,
     ]);
+  });
+
+  it("tracks the hover flyout separately from the permanent state", function () {
+    const view = createView();
+    setStandaloneSidebarState(view, "collapsed");
+
+    setStandaloneSidebarFlyoutOpen(view, true);
+    assert.equal(view.root.dataset.sidebarFlyout, "open");
+    assert.equal(view.toggleButton.getAttribute("aria-expanded"), "true");
+    assert.equal(view.root.dataset.sidebarState, "collapsed");
+
+    setStandaloneSidebarFlyoutOpen(view, false);
+    assert.equal(view.root.dataset.sidebarFlyout, "closed");
+    assert.equal(view.toggleButton.getAttribute("aria-expanded"), "false");
+  });
+
+  it("dismisses an open flyout as soon as the sidebar state changes", function () {
+    const view = createView();
+    setStandaloneSidebarState(view, "collapsed");
+    setStandaloneSidebarFlyoutOpen(view, true);
+
+    setStandaloneSidebarState(view, "expanded");
+
+    assert.equal(view.root.dataset.sidebarFlyout, "closed");
   });
 });

@@ -43,7 +43,12 @@ function readDefaultPrefs(): string {
 
 function extractCssRule(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = css.match(new RegExp(`${escapedSelector}\\s*\\{[^}]*\\}`));
+  // Anchor on a rule, comment or block boundary. Without it, a selector such
+  // as ".llm-standalone-sidebar-header" also matches the tail of a descendant
+  // selector that ends with it, and the assertions read the wrong rule.
+  const match = css.match(
+    new RegExp(`(^|[};/])\\s*${escapedSelector}\\s*\\{[^}]*\\}`),
+  );
   return match?.[0] || "";
 }
 
@@ -225,7 +230,7 @@ describe("standalone window layout CSS", function () {
     assert.include(readDefaultPrefs(), 'pref("standaloneSidebarWidth", 220)');
   });
 
-  it("collapses the unified sidebar with the same three-action rail", function () {
+  it("collapses the unified sidebar out of the layout entirely", function () {
     const css = readPanelCss();
     const sidebarViewSource = readStandaloneSidebarViewSource();
     const collapsedPanelRule =
@@ -233,7 +238,7 @@ describe("standalone window layout CSS", function () {
         /\.llm-standalone-sidebar\[data-sidebar-state="collapsed"\][^{]+\.llm-standalone-sidebar-panel\s*\{[^}]*\}/,
       )?.[0] || "";
 
-    assert.include(collapsedPanelRule, "width: 48px !important");
+    assert.include(collapsedPanelRule, "position: absolute");
     assert.include(css, ".llm-standalone-nav-label");
     assert.notInclude(css, ".llm-standalone-chat-section");
     assert.notInclude(css, ".llm-standalone-chats-header");
@@ -423,7 +428,7 @@ describe("standalone window layout CSS", function () {
     assert.include(tabRowRule, "display: grid");
     assert.include(
       tabRowRule,
-      "grid-template-columns: 56px minmax(0, 1fr) 56px",
+      "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)",
     );
     assert.include(leadingRule, "grid-column: 1");
     assert.include(leadingRule, "justify-self: start");

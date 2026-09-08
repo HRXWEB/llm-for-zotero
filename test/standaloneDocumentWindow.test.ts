@@ -36,6 +36,16 @@ class FakeElement {
   hasAttribute(name: string): boolean {
     return Object.prototype.hasOwnProperty.call(this.attributes, name);
   }
+
+  querySelector(selector: string): FakeElement | null {
+    const wanted = selector.replace(".", "");
+    for (const child of this.children) {
+      if (child.className.split(" ").includes(wanted)) return child;
+      const nested = child.querySelector(selector);
+      if (nested) return nested;
+    }
+    return null;
+  }
 }
 
 class FakeDocument {
@@ -280,7 +290,7 @@ describe("standalone document window", function () {
     );
 
     const strip = targetDoc.documentElement.children.find(
-      (child) => child.className === "llm-document-titlebar",
+      (child) => child.className === "llm-window-titlebar",
     );
     assert.isDefined(strip, "expected a drag strip on the document element");
     assert.equal(strip?.children[0]?.className, "llm-window-buttons");
@@ -294,7 +304,7 @@ describe("standalone document window", function () {
 
     assert.isUndefined(
       targetDoc.documentElement.children.find(
-        (child) => child.className === "llm-document-titlebar",
+        (child) => child.className === "llm-window-titlebar",
       ),
     );
   });

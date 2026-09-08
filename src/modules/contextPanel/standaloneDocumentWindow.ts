@@ -1,5 +1,6 @@
 import { config } from "../../../package.json";
 import { HTML_NS } from "../../utils/domHelpers";
+import { installStandaloneWindowTitlebar } from "./standaloneWindowTitlebar";
 
 const WINDOW_FEATURES =
   "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen,dialog=no,dependent=no";
@@ -60,26 +61,6 @@ function installAddonStylesheet(targetDoc: Document): void {
   css.type = "text/css";
   css.href = `chrome://${config.addonRef}/content/zoteroPane.css`;
   targetDoc.documentElement?.appendChild(css);
-}
-
-/**
- * Adds the strip the traffic lights sit in once the document has opted out of
- * the native title bar. It is a sibling of the render root because renderers
- * replace every child of that root.
- */
-function installCustomTitlebar(targetDoc: Document): void {
-  const root = targetDoc.documentElement;
-  if (!root?.hasAttribute("customtitlebar")) return;
-  const strip = targetDoc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-  strip.className = "llm-document-titlebar";
-  const windowButtons = targetDoc.createElementNS(
-    HTML_NS,
-    "div",
-  ) as HTMLDivElement;
-  windowButtons.className = "llm-window-buttons";
-  windowButtons.setAttribute("aria-hidden", "true");
-  strip.appendChild(windowButtons);
-  root.appendChild(strip);
 }
 
 export function openStandaloneDocumentWindow(
@@ -165,7 +146,7 @@ export function openStandaloneDocumentWindow(
       );
       installSourceTheme(options.sourceDoc, doc);
       installAddonStylesheet(doc);
-      installCustomTitlebar(doc);
+      installStandaloneWindowTitlebar(doc, doc.documentElement);
       setDocumentFontScale(1);
       options.render(doc, root, newWin);
       newWin.addEventListener(

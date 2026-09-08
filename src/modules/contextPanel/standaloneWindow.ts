@@ -198,9 +198,11 @@ import { setStatus } from "./textUtils";
 import { getRegisteredConversationScope } from "../../shared/conversationRegistry";
 import {
   createStandaloneSidebarView,
-  setStandaloneSidebarCollapsedToggleHost,
+  setStandaloneSidebarCollapsedChromeHost,
+  setStandaloneSidebarFlyoutOpen,
   setStandaloneSidebarState,
 } from "./standaloneSidebarView";
+import { installStandaloneSidebarFlyout } from "./standaloneSidebarFlyout";
 
 type StandaloneSessionState = {
   pending: boolean;
@@ -685,6 +687,7 @@ export function openStandaloneChat(options?: {
   let cleanupStandalonePrefObserver: (() => void) | null = null;
   let cleanupStandaloneVerticalResize: (() => void) | null = null;
   let cleanupStandaloneSidebarResize: (() => void) | null = null;
+  let cleanupStandaloneSidebarFlyout: (() => void) | null = null;
   let enforceStandaloneMinimumSize: (() => void) | null = null;
 
   const initWindow = () => {
@@ -963,9 +966,8 @@ export function openStandaloneChat(options?: {
       };
 
       // The leading slot is the tab row's single grid cell on the left. It
-      // holds the runtime controls, and the sidebar's collapse toggle joins
-      // them there whenever the collapsed rail is given over to the native
-      // window controls.
+      // holds the runtime controls; the window buttons and sidebar toggle
+      // join them whenever the sidebar is collapsed.
       const tabRowLeading = doc.createElementNS(
         HTML_NS,
         "div",
@@ -996,12 +998,17 @@ export function openStandaloneChat(options?: {
       const sidebarList = sidebarView.list;
       const sidebarResizeHandle = sidebarView.resizeHandle;
 
-      // With the native title bar gone the traffic lights occupy the sidebar
-      // header, and the collapsed rail is only wide enough for them. Hand the
-      // collapse toggle to the tab row so it stays reachable while collapsed.
-      if (doc.documentElement?.hasAttribute("customtitlebar")) {
-        setStandaloneSidebarCollapsedToggleHost(sidebarView, tabRowLeading);
-      }
+      // A collapsed sidebar renders nothing at all, so the window controls and
+      // the collapse toggle move into the tab row for as long as it is hidden,
+      // and hovering the toggle floats the sidebar back over the content.
+      setStandaloneSidebarCollapsedChromeHost(sidebarView, tabRowLeading);
+      cleanupStandaloneSidebarFlyout = installStandaloneSidebarFlyout({
+        win: newWin,
+        toggle: iconSidebarToggle,
+        panel: sidebarPanel,
+        isCollapsed: () => sidebar.dataset.sidebarState === "collapsed",
+        setOpen: (open) => setStandaloneSidebarFlyoutOpen(sidebarView, open),
+      });
 
       // Export popup — floating menu from the content-title Export action
       const exportPopup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
@@ -4248,6 +4255,8 @@ export function openStandaloneChat(options?: {
     cleanupStandaloneVerticalResize = null;
     cleanupStandaloneSidebarResize?.();
     cleanupStandaloneSidebarResize = null;
+    cleanupStandaloneSidebarFlyout?.();
+    cleanupStandaloneSidebarFlyout = null;
     standaloneItemChangeHandler = null;
     themeObserver?.disconnect();
     themeObserver = null;

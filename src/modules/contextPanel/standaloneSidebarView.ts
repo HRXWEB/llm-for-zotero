@@ -14,10 +14,10 @@ export type StandaloneSidebarView = {
   windowButtons: HTMLDivElement;
   toggleButton: HTMLButtonElement;
   /**
-   * Where the collapse toggle lives while the rail is too narrow to hold it
-   * next to the window controls. Null keeps the toggle in the header.
+   * Where the window controls and the collapse toggle live while the rail is
+   * not rendered. Null keeps both in the header.
    */
-  collapsedToggleHost: HTMLElement | null;
+  collapsedChromeHost: HTMLElement | null;
   newChatButton: HTMLButtonElement;
   newChatLabel: HTMLSpanElement;
   searchButton: HTMLButtonElement;
@@ -213,7 +213,7 @@ export function createStandaloneSidebarView(
     primaryNavigation,
     windowButtons,
     toggleButton,
-    collapsedToggleHost: null,
+    collapsedChromeHost: null,
     newChatButton: newChat.button,
     newChatLabel: newChat.label,
     searchButton: search.button,
@@ -246,34 +246,44 @@ export function setStandaloneSidebarState(
     expanded ? "Collapse sidebar" : "Expand sidebar",
   );
   view.toggleButton.setAttribute("aria-label", view.toggleButton.title);
-  view.toggleButton.setAttribute("aria-expanded", String(expanded));
-  placeToggleButton(view, expanded);
+  placeWindowChrome(view, expanded);
+  // A flyout belongs to one collapsed moment; any state change ends it.
+  setStandaloneSidebarFlyoutOpen(view, false);
 }
 
 /**
- * Offers a second home for the collapse toggle. The collapsed rail is only wide
- * enough for the native window controls, so the toggle moves to the row the
- * caller nominates instead of being hidden or duplicated.
+ * Offers the row that holds the window controls and the collapse toggle while
+ * the rail is collapsed away. The collapsed sidebar renders nothing at all, so
+ * both have to live somewhere else for the whole time it is hidden.
  */
-export function setStandaloneSidebarCollapsedToggleHost(
+export function setStandaloneSidebarCollapsedChromeHost(
   view: StandaloneSidebarView,
   host: HTMLElement | null,
 ): void {
-  view.collapsedToggleHost = host;
-  placeToggleButton(view, view.root.dataset.sidebarState !== "collapsed");
+  view.collapsedChromeHost = host;
+  placeWindowChrome(view, view.root.dataset.sidebarState !== "collapsed");
 }
 
-function placeToggleButton(
+/** Hover reveal of the collapsed sidebar, independent of the pinned state. */
+export function setStandaloneSidebarFlyoutOpen(
+  view: StandaloneSidebarView,
+  open: boolean,
+): void {
+  view.root.dataset.sidebarFlyout = open ? "open" : "closed";
+  view.toggleButton.setAttribute(
+    "aria-expanded",
+    String(view.root.dataset.sidebarState === "expanded" || open),
+  );
+}
+
+function placeWindowChrome(
   view: StandaloneSidebarView,
   expanded: boolean,
 ): void {
-  const host =
-    !expanded && view.collapsedToggleHost
-      ? view.collapsedToggleHost
-      : view.header;
-  if (host === view.header) {
-    view.header.appendChild(view.toggleButton);
+  const host = !expanded && view.collapsedChromeHost;
+  if (!host) {
+    view.header.append(view.windowButtons, view.toggleButton);
     return;
   }
-  host.prepend(view.toggleButton);
+  host.prepend(view.windowButtons, view.toggleButton);
 }

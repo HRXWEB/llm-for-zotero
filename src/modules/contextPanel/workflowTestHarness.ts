@@ -2834,8 +2834,40 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
         ? "tab-row"
         : "sidebar-header"
       : undefined,
+    sidebarWidthPx: sidebar ? sidebar.getBoundingClientRect().width : undefined,
+    sidebarFlyout:
+      sidebar?.dataset.sidebarFlyout === "open" ? "open" : "closed",
     sidebarPanelWidthPx: sidebarPanel
       ? sidebarPanel.getBoundingClientRect().width
+      : undefined,
+    sidebarPanelOpacity: sidebarPanel
+      ? Number(win?.getComputedStyle(sidebarPanel)?.opacity ?? Number.NaN)
+      : undefined,
+    sidebarContent: sidebarPanel
+      ? {
+          labels: Array.from(
+            sidebarPanel.querySelectorAll(".llm-standalone-nav-label"),
+          ).map((node) => {
+            const label = node as HTMLElement;
+            return {
+              text: label.textContent || "",
+              width: label.getBoundingClientRect().width,
+              opacity: Number(win?.getComputedStyle(label)?.opacity),
+            };
+          }),
+          historyHeight:
+            sidebarPanel
+              .querySelector(".llm-standalone-history-region")
+              ?.getBoundingClientRect().height || 0,
+          historyText:
+            sidebarPanel.querySelector(".llm-standalone-sidebar-list")
+              ?.textContent || "",
+          actionWidths: Array.from(
+            sidebarPanel.querySelectorAll("[data-sidebar-action]"),
+          ).map(
+            (action) => (action as HTMLElement).getBoundingClientRect().width,
+          ),
+        }
       : undefined,
     windowButtonsWidthPx: windowButtons
       ? windowButtons.getBoundingClientRect().width
@@ -3002,6 +3034,46 @@ async function waitForStandaloneSidebarWidthSettled(
     const width = panel.getBoundingClientRect().width;
     if (width === previous) return;
     previous = width;
+    await Zotero.Promise.delay(25);
+  }
+}
+
+/**
+ * Reveals the collapsed sidebar the way a pointer does. The panel slides in
+ * over 180ms, so wait for it to settle before any caller measures it.
+ */
+async function hoverStandaloneSidebarToggle(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const toggle = doc.querySelector(
+    ".llm-standalone-nav-toggle",
+  ) as HTMLElement | null;
+  if (!toggle) throw new Error("Standalone sidebar toggle was not rendered");
+  const view = doc.defaultView;
+  const event = new (
+    view as unknown as { MouseEvent: typeof MouseEvent }
+  ).MouseEvent("mouseenter", { bubbles: false, cancelable: false });
+  toggle.dispatchEvent(event);
+  await Zotero.Promise.delay(25);
+  await waitForStandaloneSidebarPanelSettled(doc);
+  return readStandaloneDiagnostics();
+}
+
+/** Waits until the flyout's slide-in transition stops moving the panel. */
+async function waitForStandaloneSidebarPanelSettled(
+  doc: Document,
+): Promise<void> {
+  const panel = doc.querySelector(
+    ".llm-standalone-sidebar-panel",
+  ) as HTMLElement | null;
+  if (!panel) return;
+  let previous = "";
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const rect = panel.getBoundingClientRect();
+    const opacity = doc.defaultView?.getComputedStyle(panel)?.opacity || "";
+    const sample = `${rect.left}:${rect.width}:${opacity}`;
+    if (sample === previous) return;
+    previous = sample;
     await Zotero.Promise.delay(25);
   }
 }
@@ -4904,6 +4976,7 @@ export function installWorkflowTestHarness(targetAddon: {
     openStandaloneForLibraryAfterRestart,
     clickStandaloneTab,
     toggleStandaloneSidebar,
+    hoverStandaloneSidebarToggle,
     clickStandaloneSystemToggle,
     clickStandaloneSystemTogglesRapidly,
     measureStandaloneRuntimeGeometry,

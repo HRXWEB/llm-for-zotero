@@ -243,7 +243,16 @@ export type WorkflowTestStandaloneDiagnostics = {
   sidebarState?: "expanded" | "collapsed";
   customTitlebar: boolean;
   collapseToggleHost?: "sidebar-header" | "tab-row";
+  sidebarWidthPx?: number;
+  sidebarFlyout?: "open" | "closed";
   sidebarPanelWidthPx?: number;
+  sidebarPanelOpacity?: number;
+  sidebarContent?: {
+    labels: Array<{ text: string; width: number; opacity: number }>;
+    historyHeight: number;
+    historyText: string;
+    actionWidths: number[];
+  };
   windowButtonsWidthPx?: number;
   sidebarActionOrder: string[];
   sidebarPrimaryActionOrder: string[];
@@ -582,6 +591,7 @@ export type WorkflowTestApi = {
     tab: "paper" | "open",
   ) => Promise<WorkflowTestStandaloneDiagnostics>;
   toggleStandaloneSidebar: () => Promise<WorkflowTestStandaloneDiagnostics>;
+  hoverStandaloneSidebarToggle: () => Promise<WorkflowTestStandaloneDiagnostics>;
   clickStandaloneSystemToggle: (
     system: RuntimeConversationSystem,
   ) => Promise<WorkflowTestStandaloneDiagnostics>;
