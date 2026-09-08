@@ -7,10 +7,17 @@ export type StandaloneSidebarView = {
   panel: HTMLDivElement;
   header: HTMLDivElement;
   primaryNavigation: HTMLElement;
-  libraryIdentity: HTMLDivElement;
-  libraryIcon: HTMLSpanElement;
-  libraryName: HTMLSpanElement;
+  /**
+   * Reserved box the platform draws its native window controls into once the
+   * document opts out of the native title bar. Empty and hidden otherwise.
+   */
+  windowButtons: HTMLDivElement;
   toggleButton: HTMLButtonElement;
+  /**
+   * Where the collapse toggle lives while the rail is too narrow to hold it
+   * next to the window controls. Null keeps the toggle in the header.
+   */
+  collapsedToggleHost: HTMLElement | null;
   newChatButton: HTMLButtonElement;
   newChatLabel: HTMLSpanElement;
   searchButton: HTMLButtonElement;
@@ -88,22 +95,8 @@ export function createStandaloneSidebarView(
   panel.id = "llm-standalone-sidebar-panel";
 
   const header = createHtmlElement(doc, "div", "llm-standalone-sidebar-header");
-  const libraryIdentity = createHtmlElement(
-    doc,
-    "div",
-    "llm-standalone-library-identity",
-  );
-  const libraryIcon = createHtmlElement(
-    doc,
-    "span",
-    "llm-standalone-nav-icon llm-standalone-library-icon",
-  );
-  libraryIcon.setAttribute("aria-hidden", "true");
-  const libraryName = createHtmlElement(
-    doc,
-    "span",
-    "llm-standalone-library-name",
-  );
+  const windowButtons = createHtmlElement(doc, "div", "llm-window-buttons");
+  windowButtons.setAttribute("aria-hidden", "true");
   const toggleButton = createHtmlElement(
     doc,
     "button",
@@ -111,8 +104,7 @@ export function createStandaloneSidebarView(
   );
   toggleButton.type = "button";
   toggleButton.setAttribute("aria-controls", panel.id);
-  libraryIdentity.append(libraryIcon, libraryName);
-  header.append(libraryIdentity, toggleButton);
+  header.append(windowButtons, toggleButton);
 
   const primaryNavigation = createHtmlElement(
     doc,
@@ -219,10 +211,9 @@ export function createStandaloneSidebarView(
     panel,
     header,
     primaryNavigation,
-    libraryIdentity,
-    libraryIcon,
-    libraryName,
+    windowButtons,
     toggleButton,
+    collapsedToggleHost: null,
     newChatButton: newChat.button,
     newChatLabel: newChat.label,
     searchButton: search.button,
@@ -256,13 +247,33 @@ export function setStandaloneSidebarState(
   );
   view.toggleButton.setAttribute("aria-label", view.toggleButton.title);
   view.toggleButton.setAttribute("aria-expanded", String(expanded));
+  placeToggleButton(view, expanded);
 }
 
-export function setStandaloneSidebarLibraryName(
+/**
+ * Offers a second home for the collapse toggle. The collapsed rail is only wide
+ * enough for the native window controls, so the toggle moves to the row the
+ * caller nominates instead of being hidden or duplicated.
+ */
+export function setStandaloneSidebarCollapsedToggleHost(
   view: StandaloneSidebarView,
-  libraryName: string,
+  host: HTMLElement | null,
 ): void {
-  const normalizedName = libraryName.trim() || view.translate("My Library");
-  view.libraryName.textContent = normalizedName;
-  view.libraryName.title = normalizedName;
+  view.collapsedToggleHost = host;
+  placeToggleButton(view, view.root.dataset.sidebarState !== "collapsed");
+}
+
+function placeToggleButton(
+  view: StandaloneSidebarView,
+  expanded: boolean,
+): void {
+  const host =
+    !expanded && view.collapsedToggleHost
+      ? view.collapsedToggleHost
+      : view.header;
+  if (host === view.header) {
+    view.header.appendChild(view.toggleButton);
+    return;
+  }
+  host.prepend(view.toggleButton);
 }

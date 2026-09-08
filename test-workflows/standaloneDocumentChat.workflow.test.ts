@@ -46,7 +46,10 @@ function diagnosticsMessage(
     {
       activeTab: diagnostics.activeTab,
       sidebarState: diagnostics.sidebarState,
-      sidebarLibraryName: diagnostics.sidebarLibraryName,
+      customTitlebar: diagnostics.customTitlebar,
+      collapseToggleHost: diagnostics.collapseToggleHost,
+      sidebarPanelWidthPx: diagnostics.sidebarPanelWidthPx,
+      windowButtonsWidthPx: diagnostics.windowButtonsWidthPx,
       sidebarActionOrder: diagnostics.sidebarActionOrder,
       sidebarPrimaryActionOrder: diagnostics.sidebarPrimaryActionOrder,
       titleActionLabels: diagnostics.titleActionLabels,
@@ -134,10 +137,20 @@ describe("workflow: standalone document chat", function () {
       "expanded",
       diagnosticsMessage(expanded),
     );
-    assert.isNotEmpty(
-      expanded.sidebarLibraryName || "",
+    // The library icon and label are gone from the header for good; on macOS
+    // the native traffic lights take that space instead.
+    assert.equal(
+      expanded.collapseToggleHost,
+      "sidebar-header",
       diagnosticsMessage(expanded),
     );
+    if (expanded.customTitlebar) {
+      assert.isAbove(
+        expanded.windowButtonsWidthPx ?? 0,
+        0,
+        diagnosticsMessage(expanded),
+      );
+    }
     assert.deepEqual(
       expanded.sidebarActionOrder,
       ["new-chat", "search-history", "skills", "preferences"],
@@ -165,7 +178,8 @@ describe("workflow: standalone document chat", function () {
       diagnosticsMessage(expanded),
     );
     assert.isAtMost(
-      expanded.alignment?.toolbarTextCenterDeltaPx ?? Number.POSITIVE_INFINITY,
+      expanded.alignment?.toolbarControlCenterDeltaPx ??
+        Number.POSITIVE_INFINITY,
       0.5,
       diagnosticsMessage(expanded),
     );
@@ -186,6 +200,29 @@ describe("workflow: standalone document chat", function () {
       expanded.sidebarActionOrder,
       diagnosticsMessage(collapsedSidebar),
     );
+
+    // With no native title bar the collapsed rail is only as wide as the
+    // traffic lights, so the collapse toggle has to move to the tab row to
+    // stay reachable. Platforms that keep their title bar keep it in place.
+    if (collapsedSidebar.customTitlebar) {
+      assert.equal(
+        collapsedSidebar.collapseToggleHost,
+        "tab-row",
+        diagnosticsMessage(collapsedSidebar),
+      );
+      assert.closeTo(
+        collapsedSidebar.sidebarPanelWidthPx ?? 0,
+        76,
+        1,
+        diagnosticsMessage(collapsedSidebar),
+      );
+    } else {
+      assert.equal(
+        collapsedSidebar.collapseToggleHost,
+        "sidebar-header",
+        diagnosticsMessage(collapsedSidebar),
+      );
+    }
   });
 
   it("opens a top-level Zotero PDF attachment in Paper Chat and sends with attachment-owned context", async function () {

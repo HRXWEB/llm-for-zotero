@@ -241,14 +241,17 @@ export type WorkflowTestTargetedQuoteRefreshResult = {
 export type WorkflowTestStandaloneDiagnostics = {
   activeTab?: "paper" | "open" | null;
   sidebarState?: "expanded" | "collapsed";
-  sidebarLibraryName?: string;
+  customTitlebar: boolean;
+  collapseToggleHost?: "sidebar-header" | "tab-row";
+  sidebarPanelWidthPx?: number;
+  windowButtonsWidthPx?: number;
   sidebarActionOrder: string[];
   sidebarPrimaryActionOrder: string[];
   titleActionLabels: string[];
   alignment?: {
     toolbarCenterDeltaPx: number;
     titleCenterDeltaPx: number;
-    toolbarTextCenterDeltaPx: number;
+    toolbarControlCenterDeltaPx: number;
     titleTextCenterDeltaPx: number;
   };
   conversationKey?: number;

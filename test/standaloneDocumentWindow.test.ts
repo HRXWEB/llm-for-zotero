@@ -32,6 +32,10 @@ class FakeElement {
   setAttribute(name: string, value: string): void {
     this.attributes[name] = value;
   }
+
+  hasAttribute(name: string): boolean {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name);
+  }
 }
 
 class FakeDocument {
@@ -239,5 +243,59 @@ describe("standalone document window", function () {
 
     assert.isFalse(targetWin.dispatchKey({ key: "x", metaKey: true }));
     assert.equal(fontSize(), "31px");
+  });
+
+  function openWithRender(
+    targetDoc: FakeDocument,
+    render: (doc: Document, root: HTMLElement) => void,
+  ): boolean {
+    const targetWin = createWindow(targetDoc);
+    const sourceDoc = {
+      documentElement: new FakeElement(),
+      defaultView: {
+        getComputedStyle: () => ({ getPropertyValue: () => "" }),
+        openDialog: () => targetWin,
+      },
+    };
+    return openStandaloneDocumentWindow({
+      sourceDoc: sourceDoc as unknown as Document,
+      chromeDocument: "standaloneResponseDocument.xhtml",
+      windowName: `response-window-${Math.random()}`,
+      rootId: "document-root",
+      title: "Response from Codex",
+      render,
+    });
+  }
+
+  it("installs a traffic light drag strip that a re-rendered document cannot wipe", function () {
+    const targetDoc = new FakeDocument(new FakeElement());
+    targetDoc.documentElement.setAttribute("customtitlebar", "true");
+
+    assert.isTrue(
+      openWithRender(targetDoc, (_doc, root) => {
+        // The real renderers replace every child of the root, so the strip
+        // has to live outside it.
+        (root as unknown as FakeElement).children.length = 0;
+      }),
+    );
+
+    const strip = targetDoc.documentElement.children.find(
+      (child) => child.className === "llm-document-titlebar",
+    );
+    assert.isDefined(strip, "expected a drag strip on the document element");
+    assert.equal(strip?.children[0]?.className, "llm-window-buttons");
+    assert.equal(strip?.children[0]?.attributes["aria-hidden"], "true");
+  });
+
+  it("leaves document windows untouched when the platform keeps its title bar", function () {
+    const targetDoc = new FakeDocument(new FakeElement());
+
+    assert.isTrue(openWithRender(targetDoc, () => undefined));
+
+    assert.isUndefined(
+      targetDoc.documentElement.children.find(
+        (child) => child.className === "llm-document-titlebar",
+      ),
+    );
   });
 });

@@ -62,6 +62,26 @@ function installAddonStylesheet(targetDoc: Document): void {
   targetDoc.documentElement?.appendChild(css);
 }
 
+/**
+ * Adds the strip the traffic lights sit in once the document has opted out of
+ * the native title bar. It is a sibling of the render root because renderers
+ * replace every child of that root.
+ */
+function installCustomTitlebar(targetDoc: Document): void {
+  const root = targetDoc.documentElement;
+  if (!root?.hasAttribute("customtitlebar")) return;
+  const strip = targetDoc.createElementNS(HTML_NS, "div") as HTMLDivElement;
+  strip.className = "llm-document-titlebar";
+  const windowButtons = targetDoc.createElementNS(
+    HTML_NS,
+    "div",
+  ) as HTMLDivElement;
+  windowButtons.className = "llm-window-buttons";
+  windowButtons.setAttribute("aria-hidden", "true");
+  strip.appendChild(windowButtons);
+  root.appendChild(strip);
+}
+
 export function openStandaloneDocumentWindow(
   options: StandaloneDocumentWindowOptions,
 ): boolean {
@@ -145,6 +165,7 @@ export function openStandaloneDocumentWindow(
       );
       installSourceTheme(options.sourceDoc, doc);
       installAddonStylesheet(doc);
+      installCustomTitlebar(doc);
       setDocumentFontScale(1);
       options.render(doc, root, newWin);
       newWin.addEventListener(

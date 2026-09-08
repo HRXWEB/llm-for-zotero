@@ -258,14 +258,6 @@ describe("standalone window layout CSS", function () {
   it("uses one balanced row grid with narrow Preferences separation", function () {
     const css = readPanelCss();
     const headerRule = extractCssRule(css, ".llm-standalone-sidebar-header");
-    const libraryIdentityRule = extractCssRule(
-      css,
-      ".llm-standalone-library-identity",
-    );
-    const libraryIconRule = extractCssRule(
-      css,
-      ".llm-standalone-library-icon::before",
-    );
     const navIconRule = extractCssRule(css, ".llm-standalone-nav-icon");
     const navRowRule = extractCssRule(css, ".llm-standalone-nav-row");
     const footerDividerRule = extractCssRule(
@@ -277,15 +269,20 @@ describe("standalone window layout CSS", function () {
       ".llm-standalone-preferences-region",
     );
 
-    assert.include(libraryIconRule, 'url("icons/action-library.svg")');
     assert.include(headerRule, "padding: 6px 8px");
     assert.include(headerRule, "margin-bottom: 0");
-    assert.include(libraryIdentityRule, "padding: 0 8px");
     assert.include(navRowRule, "padding: 0 8px");
-    assert.include(libraryIdentityRule, "gap: 6px");
     assert.include(navIconRule, "width: 18px");
     assert.include(footerDividerRule, "margin: 2px 12px");
     assert.include(preferencesRegionRule, "padding-bottom: 4px");
+  });
+
+  it("drops the library identity styling along with the header label", function () {
+    const css = readPanelCss();
+
+    assert.notInclude(css, "llm-standalone-library-identity");
+    assert.notInclude(css, "llm-standalone-library-name");
+    assert.notInclude(css, "llm-standalone-library-icon");
   });
 
   it("shares toolbar and title centerlines across the sidebar and content", function () {
@@ -318,7 +315,6 @@ describe("standalone window layout CSS", function () {
   it("aligns control text optically and uses the chat font size throughout the sidebar", function () {
     const css = readPanelCss();
     const rootRule = extractCssRule(css, "#llmforzotero-standalone-chat-root");
-    const libraryNameRule = extractCssRule(css, ".llm-standalone-library-name");
     const navRowRule = extractCssRule(css, ".llm-standalone-nav-row");
     const conversationRule = extractCssRule(css, ".llm-standalone-conv-item");
     const tabRule = extractCssRule(css, ".llm-standalone-tab");
@@ -326,13 +322,7 @@ describe("standalone window layout CSS", function () {
 
     assert.include(rootRule, "--llm-standalone-ui-font-size: var(--llm-fs-12)");
     assert.include(rootRule, "--llm-standalone-ui-line-height");
-    for (const rule of [
-      libraryNameRule,
-      navRowRule,
-      conversationRule,
-      tabRule,
-      titleRule,
-    ]) {
+    for (const rule of [navRowRule, conversationRule, tabRule, titleRule]) {
       assert.include(rule, "font-size: var(--llm-standalone-ui-font-size)");
       assert.include(rule, "line-height: var(--llm-standalone-ui-line-height)");
     }
@@ -427,10 +417,7 @@ describe("standalone window layout CSS", function () {
   it("centers tabs in a symmetric grid without overlaying runtime controls", function () {
     const css = readPanelCss();
     const tabRowRule = extractCssRule(css, ".llm-standalone-tab-row");
-    const runtimeControlsRule = extractCssRule(
-      css,
-      ".llm-standalone-runtime-system-controls",
-    );
+    const leadingRule = extractCssRule(css, ".llm-standalone-tab-row-leading");
     const tabGroupRule = extractCssRule(css, ".llm-standalone-tab-group");
 
     assert.include(tabRowRule, "display: grid");
@@ -438,9 +425,9 @@ describe("standalone window layout CSS", function () {
       tabRowRule,
       "grid-template-columns: 56px minmax(0, 1fr) 56px",
     );
-    assert.include(runtimeControlsRule, "grid-column: 1");
-    assert.include(runtimeControlsRule, "justify-self: start");
-    assert.notInclude(runtimeControlsRule, "position: absolute");
+    assert.include(leadingRule, "grid-column: 1");
+    assert.include(leadingRule, "justify-self: start");
+    assert.notInclude(leadingRule, "position: absolute");
     assert.include(tabGroupRule, "grid-column: 2");
     assert.include(tabGroupRule, "justify-self: center");
     assert.notInclude(css, ".llm-standalone-claude-toggle");

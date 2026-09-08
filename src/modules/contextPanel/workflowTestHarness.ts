@@ -2753,11 +2753,17 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   const sidebar = doc?.querySelector(
     ".llm-standalone-sidebar",
   ) as HTMLElement | null;
-  const sidebarLibraryName = doc?.querySelector(
-    ".llm-standalone-library-name",
-  ) as HTMLElement | null;
   const sidebarHeader = doc?.querySelector(
     ".llm-standalone-sidebar-header",
+  ) as HTMLElement | null;
+  const sidebarPanel = doc?.querySelector(
+    ".llm-standalone-sidebar-panel",
+  ) as HTMLElement | null;
+  const windowButtons = doc?.querySelector(
+    ".llm-standalone-sidebar-header .llm-window-buttons",
+  ) as HTMLElement | null;
+  const collapseToggle = doc?.querySelector(
+    ".llm-standalone-nav-toggle",
   ) as HTMLElement | null;
   const tabRow = doc?.querySelector(
     ".llm-standalone-tab-row",
@@ -2800,10 +2806,9 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   };
   const toolbarCenters = [centerY(sidebarHeader), centerY(tabRow)];
   const titleCenters = [centerY(newChatAction), centerY(contentTitleRow)];
-  const toolbarTextCenters = [
-    textCenterY(sidebarLibraryName),
-    textCenterY(activeTab),
-  ];
+  // The header carries no text of its own any more, so the collapse toggle is
+  // what has to share a centreline with the tabs beside it.
+  const toolbarControlCenters = [centerY(collapseToggle), centerY(activeTab)];
   const titleTextCenters = [textCenterY(newChatLabel), textCenterY(titleEl)];
   const centerDelta = (centers: Array<number | null>): number | undefined => {
     if (centers.some((value) => value === null)) return undefined;
@@ -2811,7 +2816,7 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   };
   const toolbarCenterDeltaPx = centerDelta(toolbarCenters);
   const titleCenterDeltaPx = centerDelta(titleCenters);
-  const toolbarTextCenterDeltaPx = centerDelta(toolbarTextCenters);
+  const toolbarControlCenterDeltaPx = centerDelta(toolbarControlCenters);
   const titleTextCenterDeltaPx = centerDelta(titleTextCenters);
   return {
     activeTab: activeTabName,
@@ -2821,7 +2826,20 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
         : sidebar?.dataset.sidebarState === "expanded"
           ? "expanded"
           : undefined,
-    sidebarLibraryName: sidebarLibraryName?.textContent?.trim() || undefined,
+    customTitlebar: Boolean(
+      doc?.documentElement?.hasAttribute("customtitlebar"),
+    ),
+    collapseToggleHost: collapseToggle
+      ? collapseToggle.closest(".llm-standalone-tab-row")
+        ? "tab-row"
+        : "sidebar-header"
+      : undefined,
+    sidebarPanelWidthPx: sidebarPanel
+      ? sidebarPanel.getBoundingClientRect().width
+      : undefined,
+    windowButtonsWidthPx: windowButtons
+      ? windowButtons.getBoundingClientRect().width
+      : undefined,
     sidebarActionOrder: Array.from(
       sidebar?.querySelectorAll("[data-sidebar-action]") || [],
     ).map((node) => (node as HTMLElement).dataset.sidebarAction || ""),
@@ -2839,13 +2857,13 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
     alignment:
       toolbarCenterDeltaPx === undefined ||
       titleCenterDeltaPx === undefined ||
-      toolbarTextCenterDeltaPx === undefined ||
+      toolbarControlCenterDeltaPx === undefined ||
       titleTextCenterDeltaPx === undefined
         ? undefined
         : {
             toolbarCenterDeltaPx,
             titleCenterDeltaPx,
-            toolbarTextCenterDeltaPx,
+            toolbarControlCenterDeltaPx,
             titleTextCenterDeltaPx,
           },
     conversationKey: mountedItem ? getConversationKey(mountedItem) : undefined,
@@ -2967,6 +2985,27 @@ async function clickStandaloneTab(
   return readStandaloneDiagnostics();
 }
 
+/**
+ * The rail animates its width over 280ms. Reading geometry before that settles
+ * reports a mid-transition width, so wait until two consecutive measurements
+ * agree before any caller inspects the layout.
+ */
+async function waitForStandaloneSidebarWidthSettled(
+  doc: Document,
+): Promise<void> {
+  const panel = doc.querySelector(
+    ".llm-standalone-sidebar-panel",
+  ) as HTMLElement | null;
+  if (!panel) return;
+  let previous = Number.NaN;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const width = panel.getBoundingClientRect().width;
+    if (width === previous) return;
+    previous = width;
+    await Zotero.Promise.delay(25);
+  }
+}
+
 async function toggleStandaloneSidebar(): Promise<WorkflowTestStandaloneDiagnostics> {
   assertWorkflowTestEnabled();
   const doc = await waitForStandaloneReady();
@@ -2976,6 +3015,7 @@ async function toggleStandaloneSidebar(): Promise<WorkflowTestStandaloneDiagnost
   if (!button) throw new Error("Standalone sidebar toggle was not rendered");
   button.click();
   await Zotero.Promise.delay(25);
+  await waitForStandaloneSidebarWidthSettled(doc);
   return readStandaloneDiagnostics();
 }
 

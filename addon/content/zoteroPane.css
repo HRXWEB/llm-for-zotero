@@ -1215,11 +1215,6 @@
   -webkit-mask-image: url("icons/action-skill.svg");
 }
 
-.llm-standalone-library-icon::before {
-  mask-image: url("icons/action-library.svg");
-  -webkit-mask-image: url("icons/action-library.svg");
-}
-
 .llm-standalone-nav-icon-preferences::before {
   mask-image: url("icons/action-settings.svg");
   -webkit-mask-image: url("icons/action-settings.svg");
@@ -1981,32 +1976,6 @@
   gap: 6px;
 }
 
-.llm-standalone-library-identity {
-  display: flex;
-  align-items: center;
-  flex: 1 1 auto;
-  gap: 6px;
-  min-height: 32px;
-  min-width: 0;
-  padding: 0 8px;
-  box-sizing: border-box;
-}
-
-.llm-standalone-library-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: var(--llm-standalone-ui-font-size);
-  line-height: var(--llm-standalone-ui-line-height);
-  font-weight: 500;
-  color: var(--fill-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition:
-    opacity 180ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 .llm-standalone-primary-nav {
   position: relative;
   display: flex;
@@ -2159,11 +2128,6 @@
 .llm-standalone-sidebar[data-sidebar-state="collapsed"]
   .llm-standalone-sidebar-header {
   justify-content: center;
-}
-
-.llm-standalone-sidebar[data-sidebar-state="collapsed"]
-  .llm-standalone-library-identity {
-  display: none;
 }
 
 .llm-standalone-sidebar[data-sidebar-state="collapsed"]
@@ -2345,7 +2309,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .llm-standalone-sidebar-panel,
-  .llm-standalone-library-name,
   .llm-standalone-nav-label,
   .llm-standalone-nav-row,
   .llm-standalone-nav-toggle,
@@ -2369,9 +2332,13 @@
   flex-shrink: 0;
 }
 
-.llm-standalone-runtime-system-controls {
+.llm-standalone-tab-row-leading {
   grid-column: 1;
   justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 /* Segmented control container */
@@ -13906,4 +13873,97 @@ label.llm-search-results-item:hover {
 .llm-remove-img-btn:focus-visible {
   outline: 1px solid var(--color-accent);
   outline-offset: 1px;
+}
+
+/* --- Custom title bar (macOS) ---------------------------------------------
+ *
+ * addon/content/standaloneTitlebar.js sets [customtitlebar] on the document
+ * element of the standalone windows, but only on macOS. The native title bar
+ * is then gone and the plugin's own top rows become the top edge of the
+ * window, so those rows take over both jobs the title bar used to do: they
+ * host the traffic lights, and they drag the window.
+ *
+ * Every rule below is scoped to that attribute. Windows and Linux keep their
+ * native title bar and caption buttons, and their layout is untouched.
+ */
+
+/* Reserved box the platform draws the traffic lights into. It takes no space
+ * until the document opts out of the native title bar. */
+.llm-window-buttons {
+  display: none;
+}
+
+:root[customtitlebar] .llm-window-buttons {
+  display: block;
+  appearance: -moz-window-button-box;
+  -moz-appearance: -moz-window-button-box;
+  flex: 0 0 auto;
+  width: 52px;
+  height: 16px;
+  margin-inline-start: 12px;
+  -moz-window-dragging: no-drag;
+}
+
+:root[customtitlebar] .llm-standalone-sidebar-header,
+:root[customtitlebar] .llm-standalone-tab-row {
+  -moz-window-dragging: drag;
+}
+
+:root[customtitlebar] .llm-standalone-nav-toggle,
+:root[customtitlebar] .llm-standalone-tab-group,
+:root[customtitlebar] .llm-standalone-runtime-system-controls {
+  -moz-window-dragging: no-drag;
+}
+
+/* The collapsed rail is exactly the traffic light footprint: a 12px inset,
+ * the 52px button box, and a matching 12px trailing inset. The collapse
+ * toggle moves to the tab row at this width, so the header keeps only the
+ * window controls and must stay left-aligned under them. */
+:root[customtitlebar]
+  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
+  .llm-standalone-sidebar-panel {
+  width: 76px !important;
+}
+
+:root[customtitlebar]
+  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
+  .llm-standalone-sidebar-header {
+  justify-content: flex-start;
+  padding-inline: 0;
+}
+
+:root[customtitlebar]
+  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
+  .llm-standalone-nav-row,
+:root[customtitlebar]
+  .llm-standalone-sidebar[data-sidebar-state="collapsed"]
+  .llm-standalone-primary-action-group {
+  margin: 0 22px;
+}
+
+/* Both side columns grow by the same amount so the centre column, and the
+ * segmented tabs inside it, stay centred on the content area whether or not
+ * the collapse toggle is currently sitting in the leading slot. */
+:root[customtitlebar] .llm-standalone-tab-row {
+  grid-template-columns: 94px minmax(0, 1fr) 94px;
+}
+
+/* Document windows have no toolbar of their own, so they get a bare strip for
+ * the traffic lights. It is fixed to the viewport and painted, because the
+ * document scrolls underneath it. */
+.llm-document-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  background: var(--material-background);
+  -moz-window-dragging: drag;
+}
+
+:root[customtitlebar] .llm-plan-document-window-content {
+  padding-top: 68px;
 }

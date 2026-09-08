@@ -26,6 +26,7 @@ tmp/
 .claude/
 .codex/
 AGENTS.md
+CLAUDE.md
 # Local design notes
 /docs/
 /docs/claude-session-isolation-design.md

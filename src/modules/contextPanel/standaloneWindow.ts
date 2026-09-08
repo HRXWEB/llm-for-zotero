@@ -198,7 +198,7 @@ import { setStatus } from "./textUtils";
 import { getRegisteredConversationScope } from "../../shared/conversationRegistry";
 import {
   createStandaloneSidebarView,
-  setStandaloneSidebarLibraryName,
+  setStandaloneSidebarCollapsedToggleHost,
   setStandaloneSidebarState,
 } from "./standaloneSidebarView";
 
@@ -962,9 +962,20 @@ export function openStandaloneChat(options?: {
         });
       };
 
+      // The leading slot is the tab row's single grid cell on the left. It
+      // holds the runtime controls, and the sidebar's collapse toggle joins
+      // them there whenever the collapsed rail is given over to the native
+      // window controls.
+      const tabRowLeading = doc.createElementNS(
+        HTML_NS,
+        "div",
+      ) as HTMLDivElement;
+      tabRowLeading.className = "llm-standalone-tab-row-leading";
+      tabRowLeading.append(standaloneRuntimeSystemControls.group);
+
       const tabRow = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
       tabRow.className = "llm-standalone-tab-row";
-      tabRow.append(standaloneRuntimeSystemControls.group, tabGroup);
+      tabRow.append(tabRowLeading, tabGroup);
 
       // -- Lower area: sidebar + content side by side --
       const lowerArea = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
@@ -984,6 +995,13 @@ export function openStandaloneChat(options?: {
       const standaloneHistoryUndoBtn = sidebarView.undoButton;
       const sidebarList = sidebarView.list;
       const sidebarResizeHandle = sidebarView.resizeHandle;
+
+      // With the native title bar gone the traffic lights occupy the sidebar
+      // header, and the collapsed rail is only wide enough for them. Hand the
+      // collapse toggle to the tab row so it stays reachable while collapsed.
+      if (doc.documentElement?.hasAttribute("customtitlebar")) {
+        setStandaloneSidebarCollapsedToggleHost(sidebarView, tabRowLeading);
+      }
 
       // Export popup — floating menu from the content-title Export action
       const exportPopup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
@@ -1239,33 +1257,6 @@ export function openStandaloneChat(options?: {
           return Math.floor(paperLibraryID);
         }
         return libraryID;
-      };
-
-      const syncStandaloneLibraryName = () => {
-        const currentLibraryID = getCurrentLibraryScopeID();
-        let name = "";
-        try {
-          const libraries = (
-            Zotero as unknown as {
-              Libraries?: {
-                getName?: (targetLibraryID: number) => unknown;
-                get?: (
-                  targetLibraryID: number,
-                ) => { name?: unknown } | null | undefined;
-              };
-            }
-          ).Libraries;
-          const directName = libraries?.getName?.(currentLibraryID);
-          if (typeof directName === "string") name = directName.trim();
-          if (!name) {
-            const objectName = libraries?.get?.(currentLibraryID)?.name;
-            if (typeof objectName === "string") name = objectName.trim();
-          }
-        } catch {
-          // The personal-library fallback keeps the navigation usable while
-          // Zotero is still bringing its library registry online.
-        }
-        setStandaloneSidebarLibraryName(sidebarView, name || t("My Library"));
       };
 
       const getLibraryIDForPaperItem = (
@@ -1778,7 +1769,6 @@ export function openStandaloneChat(options?: {
 
           clearContent();
           updateContentTitle();
-          syncStandaloneLibraryName();
 
           buildUI(contentArea, mountedItem);
 
