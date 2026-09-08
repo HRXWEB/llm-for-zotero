@@ -2,7 +2,7 @@ import { assert } from "chai";
 import { resolveActionInteraction } from "../src/agent/authorization/interaction";
 
 describe("interaction compatibility", function () {
-  it("retains review for legacy active Plan obligations without explicit interaction metadata", function () {
+  it("treats an executing-plan obligation without a stated preference as default", function () {
     const request = {
       planContext: { phase: "executing" },
       actionContract: {
@@ -16,12 +16,12 @@ describe("interaction compatibility", function () {
     ] as any;
     assert.equal(
       resolveActionInteraction(request, proposals).reviewPreference,
-      "review",
+      "default",
     );
-    request.actionContract.obligations[0].reviewPreference = "default";
+    request.actionContract.obligations[0].reviewPreference = "review";
     assert.equal(
       resolveActionInteraction(request, proposals).reviewPreference,
-      "default",
+      "review",
     );
   });
   it("does not pause another note action because review was requested for a different note", function () {

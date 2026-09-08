@@ -25,11 +25,7 @@ export function resolveActionInteraction(
         );
       }),
     )
-    .map(
-      (obligation) =>
-        obligation.reviewPreference ??
-        (request.planContext?.phase === "executing" ? "review" : "default"),
-    );
+    .map((obligation) => obligation.reviewPreference ?? "default");
   return {
     entryPoint:
       request.actionEntryPoint || (forceReview ? "action_ui" : "conversation"),
