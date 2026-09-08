@@ -155,6 +155,13 @@ export type AgentActionContract = {
   obligations: AgentActionObligation[];
   /** Readings the host or interpreter chose on the user's behalf (yolo). */
   assumptions?: string[];
+  /**
+   * Requested actions the host dropped while building the contract because
+   * their reference could not be resolved (yolo only). They carry no
+   * obligation, so completion evaluation reports each one as not performed
+   * unless a receipt for the same operation shows the agent did it anyway.
+   */
+  skippedActions?: { actionIndex: number; operation: AgentActionOperation }[];
 };
 
 export type AgentActionObligationProgress = {

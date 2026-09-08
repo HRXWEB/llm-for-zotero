@@ -305,18 +305,59 @@ function receiptVerified(receipt: AgentActionReceipt): boolean {
   );
 }
 
+/**
+ * A requested action the host dropped during contract building has no
+ * obligation to satisfy, so nothing else in this evaluation would notice it.
+ * It counts as done only when some receipt shows the same operation actually
+ * took effect; an unmatched judgment receipt qualifies, because in yolo the
+ * agent is expected to perform the dropped action with a target of its own
+ * choosing.
+ */
+function uncoveredSkippedActions(
+  contract: AgentActionContract,
+  receipts: AgentActionReceipt[],
+): string {
+  const effective = new Set(
+    receipts
+      .filter(
+        (receipt) =>
+          receipt.status === "applied" ||
+          receipt.status === "already_satisfied" ||
+          receipt.status === "partial" ||
+          receipt.status === "observed",
+      )
+      .map((receipt) => receipt.operation),
+  );
+  const uncovered = [
+    ...new Set(
+      (contract.skippedActions || [])
+        .filter((skipped) => !effective.has(skipped.operation))
+        .map((skipped) => skipped.operation),
+    ),
+  ];
+  return uncovered
+    .map(
+      (operation) =>
+        `The requested ${operation.replace(/_/g, " ")} could not be resolved and was not performed.`,
+    )
+    .join(" ");
+}
+
 export function evaluateActionContract(
   contract: AgentActionContract,
   receipts: AgentActionReceipt[],
   progress?: AgentActionProgressLedger,
 ): ContractEvaluation {
+  const skippedFailure = uncoveredSkippedActions(contract, receipts);
   // The action contract is a completion contract, not a retrospective tool
   // allowlist. Authorization already enforced hard constraints before a tool
   // could run. With no requested obligations there is therefore nothing for
   // finalization to prove, and unrelated rejected, cancelled, or unverified
   // exploratory calls must not invalidate an informational answer.
   if (!contract.obligations.length) {
-    return { state: "satisfied" };
+    return skippedFailure
+      ? { state: "failed", failure: skippedFailure }
+      : { state: "satisfied" };
   }
   const missing: AgentActionObligation[] = [];
   const failed: AgentActionObligation[] = [];
@@ -379,7 +420,10 @@ export function evaluateActionContract(
       (receipt) => receipt.verification === "unverified",
     );
   }
-  if (!missing.length) return { state: "satisfied" };
+  if (!missing.length)
+    return skippedFailure
+      ? { state: "failed", failure: skippedFailure }
+      : { state: "satisfied" };
 
   const labels = missing.map((obligation) => {
     const scope = obligation.scope
@@ -398,13 +442,14 @@ export function evaluateActionContract(
       ),
     ),
   ];
-  const state = failed.length
-    ? "failed"
-    : sawPartial
-      ? "partial"
-      : sawUnverified
-        ? "unverified"
-        : "pending";
+  const state =
+    failed.length || skippedFailure
+      ? "failed"
+      : sawPartial
+        ? "partial"
+        : sawUnverified
+          ? "unverified"
+          : "pending";
   const guidance = actionToolGuidanceForCapabilities(
     missing.map((obligation) => obligation.capability),
   );
@@ -415,7 +460,8 @@ export function evaluateActionContract(
       `${guidance} Retry only unresolved targets. Completion requires independently verified post-state; a successful call, command exit, script output, or model prose is not semantic proof.`,
     failure:
       `I could not verify completion of: ${labels.join("; ")}.` +
-      (failureReasons.length ? ` ${failureReasons.join("; ")}` : ""),
+      (failureReasons.length ? ` ${failureReasons.join("; ")}` : "") +
+      (skippedFailure ? ` ${skippedFailure}` : ""),
   };
 }
 

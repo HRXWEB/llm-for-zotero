@@ -968,7 +968,36 @@ export function decodeActionContract(value: unknown): AgentActionContract {
             "effects.libraryMutation.contract.assumptions",
           ),
         }),
+    ...(input.skippedActions === undefined
+      ? {}
+      : {
+          skippedActions: decodeSkippedActions(
+            input.skippedActions,
+            "effects.libraryMutation.contract.skippedActions",
+          ),
+        }),
   };
+}
+
+function decodeSkippedActions(
+  value: unknown,
+  label: string,
+): NonNullable<AgentActionContract["skippedActions"]> {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((entry, index) => {
+    const skipped = record(entry, `${label}[${index}]`);
+    const actionIndex = Number(skipped.actionIndex);
+    if (!Number.isInteger(actionIndex) || actionIndex < 0)
+      throw new Error(`${label}[${index}].actionIndex must be an index`);
+    const operation = text(skipped.operation, `${label}[${index}].operation`);
+    if (!operationCatalogEntry(operation))
+      throw new Error(`${label}[${index}].operation is invalid`);
+    return {
+      actionIndex,
+      operation:
+        operation as AgentActionContract["obligations"][number]["operation"],
+    };
+  });
 }
 
 function decodeMutationIntent(value: unknown): ResearchDerivedMutationIntent {

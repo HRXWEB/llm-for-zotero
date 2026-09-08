@@ -1,5 +1,8 @@
 import { assert } from "chai";
-import { evaluatePreparedActionContract } from "../src/agent/contracts/actionEvaluation";
+import {
+  evaluateActionContract,
+  evaluatePreparedActionContract,
+} from "../src/agent/contracts/actionEvaluation";
 import {
   semanticContractFixture,
   classifiedFixture,
@@ -87,5 +90,57 @@ describe("prepared action completion", function () {
     );
     assert.equal(decision.state, "pending");
     assert.isString(decision.correction);
+  });
+
+  function tagReceipt(
+    status: import("../src/agent/contracts/types").AgentActionReceipt["status"],
+  ): import("../src/agent/contracts/types").AgentActionReceipt {
+    return {
+      version: 2,
+      id: "contract:unmatched:apply_tags",
+      proposalId: "proposal:apply_tags",
+      proofDomain: "zotero_state",
+      capability: "zotero.tags",
+      operation: "apply_tags",
+      verification: "verified",
+      status,
+      requestedTargets: ["item:41"],
+      appliedTargets: status === "applied" ? ["item:41"] : [],
+      alreadySatisfiedTargets: [],
+      rejectedTargets: [],
+      reasons: [],
+      verifiedFacts: [],
+    };
+  }
+
+  it("reports a dropped action as not performed instead of bare success", function () {
+    const contract = semanticContractFixture({
+      id: "dropped",
+      writeDisposition: "none",
+      obligations: [],
+      skippedActions: [{ actionIndex: 0, operation: "apply_tags" }],
+    });
+    const decision = evaluateActionContract(contract, []);
+    assert.equal(decision.state, "failed");
+    assert.include(decision.failure!, "apply tags");
+    assert.include(decision.failure!, "not performed");
+  });
+
+  it("accepts a dropped action covered by the agent's own judgment write", function () {
+    const contract = semanticContractFixture({
+      id: "dropped-then-done",
+      writeDisposition: "none",
+      obligations: [],
+      skippedActions: [{ actionIndex: 0, operation: "apply_tags" }],
+    });
+    assert.equal(
+      evaluateActionContract(contract, [tagReceipt("applied")]).state,
+      "satisfied",
+    );
+    // A receipt that did not apply anything does not cover the dropped action.
+    assert.equal(
+      evaluateActionContract(contract, [tagReceipt("failed")]).state,
+      "failed",
+    );
   });
 });

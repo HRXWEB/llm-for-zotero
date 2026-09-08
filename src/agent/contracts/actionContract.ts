@@ -395,10 +395,10 @@ export class ActionContractService {
         ),
       );
     }
-    const skipped = new Set<number>();
+    const skipped = new Map<number, import("./types").AgentActionOperation>();
     const attempt = async <T>(
       index: number,
-      operation: string,
+      operation: import("./types").AgentActionOperation,
       run: () => Promise<T>,
     ): Promise<T | null> => {
       try {
@@ -409,7 +409,7 @@ export class ActionContractService {
         // Judgment authority resolves ambiguity, never the user's own
         // prohibitions: a constraint violation stays a pre-turn refusal.
         if (error.cause === "hard_constraint") throw error;
-        skipped.add(index);
+        skipped.set(index, operation);
         assumptions.push(
           `The requested ${operation.replace(/_/g, " ")} could not be resolved (${error.message}) so the agent will choose its target.`,
         );
@@ -599,6 +599,13 @@ export class ActionContractService {
           : `${contractId}:obligation:${index}`,
       })),
       ...(assumptions.length ? { assumptions } : {}),
+      ...(skipped.size
+        ? {
+            skippedActions: [...skipped.entries()]
+              .sort(([left], [right]) => left - right)
+              .map(([actionIndex, operation]) => ({ actionIndex, operation })),
+          }
+        : {}),
     };
   }
 

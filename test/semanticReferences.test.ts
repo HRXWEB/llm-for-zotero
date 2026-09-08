@@ -162,6 +162,17 @@ describe("semantic reference discovery", function () {
     assert.isArray(contract.assumptions);
     assert.match(contract.assumptions![0], /neural or behavioral/);
     assert.match(contract.assumptions![0], /agent will choose/i);
+    // A dropped action must stay visible to end-of-turn evaluation, or an
+    // empty contract reports bare success for work that never happened.
+    assert.deepEqual(contract.skippedActions, [
+      { actionIndex: 0, operation: "apply_tags" },
+    ]);
+    // It also has to survive the checkpoint round trip, or a resumed turn
+    // forgets that the action was never performed.
+    assert.deepEqual(
+      decodeActionContract(JSON.parse(JSON.stringify(contract))).skippedActions,
+      contract.skippedActions,
+    );
   });
   it("yolo detaches a skipped action from the frozen material outputs", async function () {
     const { request, gateway, service } = setup(
@@ -198,6 +209,9 @@ describe("semantic reference discovery", function () {
     ] as never;
     const contract = await service.createContract(request, { mode: "yolo" });
     assert.lengthOf(contract.obligations, 0);
+    assert.deepEqual(contract.skippedActions, [
+      { actionIndex: 0, operation: "apply_tags" },
+    ]);
     const frozen = contract.intent!.semantic!.materialOutputs![0];
     assert.deepEqual(frozen.sourceActionIndexes, []);
     assert.deepEqual(frozen.afterActions, []);
@@ -239,6 +253,9 @@ describe("semantic reference discovery", function () {
     });
     const contract = await service.createContract(request, { mode: "yolo" });
     assert.isNotEmpty(contract.obligations);
+    assert.deepEqual(contract.skippedActions, [
+      { actionIndex: 0, operation: "apply_tags" },
+    ]);
     for (const obligation of contract.obligations) {
       assert.equal(obligation.sourceActionIndex, 1);
       assert.isUndefined(obligation.dependsOn);
@@ -268,6 +285,7 @@ describe("semantic reference discovery", function () {
     request.classifiedIntent!.semantic!.assumptions = ["Assumed append."];
     const contract = await service.createContract(request, { mode: "yolo" });
     assert.lengthOf(contract.obligations, 1);
+    assert.isUndefined(contract.skippedActions);
     assert.deepEqual(contract.assumptions, [
       "Assumed append.",
       "Unresolved: Append or replace? The agent decides.",
