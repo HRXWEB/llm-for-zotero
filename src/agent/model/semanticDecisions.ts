@@ -50,6 +50,7 @@ export type SemanticDecisions = {
   bulk: boolean;
   continuation: "new" | "resume" | "revise";
   questions: string[];
+  assumptions?: string[];
 };
 
 export type SemanticIntent = SemanticDecisions & {
@@ -152,6 +153,8 @@ export function parseSemanticDecisions(
     value.generationMode !== undefined &&
     !["transform", "reason"].includes(String(value.generationMode))
   )
+    return null;
+  if (value.assumptions !== undefined && !listOf(value.assumptions))
     return null;
   if (
     value.responseIntent !== undefined &&
@@ -267,7 +270,7 @@ noteDestination:"none"|"zotero"|"file"|"both", conversationOnly:boolean, respons
 reading:{source:"provided_context"|"metadata"|"document_text"|"rendered_pages",coverage:"overview"|"targeted"|"exhaustive"},
 literature:"none"|"discover"|"import"|"select_then_import", requestedCount?:positive integer,
 literatureMode?:"references"|"citations", literatureSource?:"openalex"|"arxiv"|"europepmc",
-retrievalPurpose?:"factual"|"conceptual"|"methodological"|"comparative"|"citation"|"visual"|"general", pages?:positive integer[] (one-based requested pages only), figures?:{labels:string[],includeSupplementary:boolean,kind:"figures"|"tables"|"both"}, researchScopeCount?:positive integer, supportTools?:string[], visualMode?:"general"|"figure"|"equation", bulk:boolean, continuation:"new"|"resume"|"revise", questions:string[].
+retrievalPurpose?:"factual"|"conceptual"|"methodological"|"comparative"|"citation"|"visual"|"general", pages?:positive integer[] (one-based requested pages only), figures?:{labels:string[],includeSupplementary:boolean,kind:"figures"|"tables"|"both"}, researchScopeCount?:positive integer, supportTools?:string[], visualMode?:"general"|"figure"|"equation", bulk:boolean, continuation:"new"|"resume"|"revise", questions:string[], assumptions?:string[].
 Set generationMode:transform for faithful rewording, polishing, shortening, translation, or formatting of supplied text without new analysis or changed claims. These tasks use ordinary generation instead of extended deliberation. Set reason for deriving new conclusions, checking reasoning, substantive revision, or an explicit request to think deeply; these retain the configured reasoning mode.
 Set responseIntent:receipt when the requested outcome is only an applied edit and its verified result (for example, rewrite this part). Set answer when the user also asks for an explanation, comparison or other substantive response after the action. Do not drop those requested outcomes.
 Use reading.source:provided_context when the supplied note, selection or user text is sufficient, including faithful rewriting, polishing, shortening and translation. This requires no paper retrieval. Use document_text or rendered_pages only when the requested outcome needs evidence from a source document; the presence of papers in workspace context does not itself require reading them.

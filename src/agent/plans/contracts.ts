@@ -960,6 +960,14 @@ export function decodeActionContract(value: unknown): AgentActionContract {
     writeDisposition: input.writeDisposition,
     interpretationSource: input.interpretationSource,
     obligations,
+    ...(input.assumptions === undefined
+      ? {}
+      : {
+          assumptions: stringArray(
+            input.assumptions,
+            "effects.libraryMutation.contract.assumptions",
+          ),
+        }),
   };
 }
 

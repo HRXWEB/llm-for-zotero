@@ -9,6 +9,7 @@ import {
   SEMANTIC_COMPLETION_TIMEOUT_MS,
 } from "./semanticTransport";
 import { parseSemanticDecisions } from "./semanticDecisions";
+import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import {
   logUtilityLLMFailure,
   type UtilityLLMFailureReason,
@@ -88,6 +89,7 @@ export class SemanticIntentService {
       request,
       skills.filter((skill) => isSkillContextEligible(skill, request)),
       destinations,
+      getOriginalAgentPermissionMode(),
     );
     const eligibleSkills = skills.filter((skill) =>
       isSkillContextEligible(skill, request),

@@ -537,3 +537,105 @@ describe("Semantic intent to native action contract", function () {
     );
   });
 });
+
+describe("permission mode in semantic prompts", function () {
+  const originalZotero = globalThis.Zotero;
+  afterEach(function () {
+    globalThis.Zotero = originalZotero;
+  });
+
+  function stubMode(mode: "safe" | "auto" | "yolo") {
+    globalThis.Zotero = {
+      Prefs: {
+        get: (key: string) =>
+          key.endsWith("originalAgentPermissionMode") ? mode : undefined,
+      },
+    } as never;
+  }
+
+  async function interpreterPrompt(mode: "safe" | "auto" | "yolo") {
+    stubMode(mode);
+    let prompt = "";
+    await detectTurnIntent(
+      resolvedAgentRequest({
+        conversationKey: 1,
+        mode: "agent",
+        libraryID: 1,
+        userText: "File this paper",
+        model: "deepseek-chat",
+        apiBase: "https://api.deepseek.com",
+        apiKey: "fixture",
+      }),
+      [],
+      {
+        llmCall: async (params) => {
+          prompt = params.prompt || "";
+          return {
+            text: JSON.stringify(interpretation),
+            completion: { status: "complete" },
+          };
+        },
+      },
+    );
+    return prompt;
+  }
+
+  it("tells the interpreter the mode and asks yolo for assumptions instead of questions", async function () {
+    const yolo = await interpreterPrompt("yolo");
+    assert.include(yolo, "- Permission mode: yolo");
+    assert.include(yolo, "decisions.assumptions");
+    assert.include(
+      yolo,
+      "Do not emit decisions.questions for ordinary ambiguity",
+    );
+    const safe = await interpreterPrompt("safe");
+    assert.include(safe, "- Permission mode: safe");
+    assert.notInclude(safe, "Do not emit decisions.questions");
+  });
+
+  it("tells the reference resolver to pick the best-supported candidate in yolo", async function () {
+    const prompts: Record<string, string> = {};
+    for (const mode of ["yolo", "safe"] as const) {
+      stubMode(mode);
+      await new ModelSemanticReferenceResolver().resolve(
+        {
+          request: resolvedAgentRequest({
+            conversationKey: 1,
+            mode: "agent",
+            libraryID: 1,
+            userText: "File this in the reading folder",
+            model: "deepseek-chat",
+            apiBase: "https://api.deepseek.com",
+            apiKey: "fixture",
+          }),
+          entity: "collection",
+          description: "reading folder",
+          candidates: [
+            { id: 5, libraryID: 1, label: "Reading", details: "Reading" },
+            {
+              id: 6,
+              libraryID: 1,
+              label: "Reading 2025",
+              details: "Reading 2025",
+            },
+          ],
+        },
+        {
+          llmCall: async (params) => {
+            prompts[mode] = params.prompt || "";
+            return {
+              text: JSON.stringify({
+                state: "resolved",
+                ids: [5],
+                reason: "closest",
+              }),
+              completion: { status: "complete" },
+            };
+          },
+        },
+      );
+    }
+    assert.include(prompts.yolo, "select the best-supported one");
+    assert.notInclude(prompts.safe, "select the best-supported one");
+  });
+});

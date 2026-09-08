@@ -117,6 +117,40 @@ describe("semantic reference discovery", function () {
       assert.include(String(error), "neural or behavioral");
     }
   });
+  it("yolo records an unresolved reference as an assumption instead of asking", async function () {
+    const { request, service } = setup(async () => ({
+      state: "needs_input",
+      question: "Does drift mean neural or behavioral drift?",
+    }));
+    const contract = await service.createContract(request, { mode: "yolo" });
+    assert.lengthOf(contract.obligations, 0);
+    assert.isArray(contract.assumptions);
+    assert.match(contract.assumptions![0], /neural or behavioral/);
+    assert.match(contract.assumptions![0], /agent decides/i);
+  });
+  it("yolo carries interpreter questions as assumptions", async function () {
+    const { request, service } = setup(async () => ({
+      state: "resolved",
+      ids: [17],
+      reason: "metadata",
+    }));
+    request.classifiedIntent!.semantic!.questions = ["Append or replace?"];
+    request.classifiedIntent!.semantic!.assumptions = ["Assumed append."];
+    const contract = await service.createContract(request, { mode: "yolo" });
+    assert.lengthOf(contract.obligations, 1);
+    assert.deepEqual(contract.assumptions, [
+      "Assumed append.",
+      "Unresolved: Append or replace? The agent decides.",
+    ]);
+    for (const mode of ["safe", "auto"] as const) {
+      try {
+        await service.createContract(request, { mode });
+        assert.fail("must still ask outside yolo");
+      } catch (error) {
+        assert.include(String(error), "Append or replace?");
+      }
+    }
+  });
 });
 
 describe("semantic integration", function () {

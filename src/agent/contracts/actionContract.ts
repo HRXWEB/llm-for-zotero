@@ -33,6 +33,8 @@ import {
   resolveScope,
   resolveDescriptiveTargets,
 } from "./actionScope";
+import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
+import type { OriginalAgentPermissionMode } from "../../shared/originalAgentPermissionMode";
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
 import { innermostToolResult, toolResultString } from "./toolResultEnvelope";
@@ -374,15 +376,43 @@ export class ActionContractService {
 
   async createContract(
     request: AgentRuntimeRequest,
+    options: { mode?: OriginalAgentPermissionMode } = {},
   ): Promise<AgentActionContract> {
     if (!request.classifiedIntent?.semantic)
       throw new Error(
         "A semantic interpretation is required before constructing an action contract.",
       );
-    if (request.classifiedIntent.semantic.questions.length)
-      throw new ActionReferenceResolutionError(
-        request.classifiedIntent.semantic.questions.join("\n"),
+    const judgment =
+      (options.mode ?? getOriginalAgentPermissionMode()) === "yolo";
+    const semantic = request.classifiedIntent.semantic;
+    const assumptions: string[] = [...(semantic.assumptions || [])];
+    if (semantic.questions.length) {
+      if (!judgment)
+        throw new ActionReferenceResolutionError(semantic.questions.join("\n"));
+      assumptions.push(
+        ...semantic.questions.map(
+          (question) => `Unresolved: ${question} The agent decides.`,
+        ),
       );
+    }
+    const skipped = new Set<number>();
+    const attempt = async <T>(
+      index: number,
+      operation: string,
+      run: () => Promise<T>,
+    ): Promise<T | null> => {
+      try {
+        return await run();
+      } catch (error) {
+        if (!judgment || !(error instanceof ActionReferenceResolutionError))
+          throw error;
+        skipped.add(index);
+        assumptions.push(
+          `Action ${index} (${operation}) was not resolved: ${error.message} The agent decides its target.`,
+        );
+        return null;
+      }
+    };
     if (
       !validWorkflowDependencies(
         request.classifiedIntent.actionIntents,
@@ -397,17 +427,23 @@ export class ActionContractService {
     for (const [
       index,
       intent,
-    ] of request.classifiedIntent.actionIntents.entries())
-      intents.push(
-        reuse?.reuse.actions.some((link) => link.actionIndex === index)
-          ? intent
-          : await resolveDescriptiveTargets(
+    ] of request.classifiedIntent.actionIntents.entries()) {
+      const resolvedIntent = reuse?.reuse.actions.some(
+        (link) => link.actionIndex === index,
+      )
+        ? intent
+        : await attempt(index, intent.operation, () =>
+            resolveDescriptiveTargets(
               this.gateway,
               request,
               intent,
               this.references,
             ),
-      );
+          );
+      // Keep index alignment for dependsOn and destinationFrom; skipped
+      // entries produce no obligations below.
+      intents.push(resolvedIntent ?? intent);
+    }
     if (
       request.classifiedIntent.semantic.reading.coverage === "exhaustive" &&
       !intents.some((intent) => intent.operation === "read_full")
@@ -450,19 +486,17 @@ export class ActionContractService {
     );
     const collectionCreations = new Map<number, AgentActionObligation[]>();
     for (const [index, intent] of intents.entries()) {
+      if (skipped.has(index)) continue;
       if (intent.operation !== "create_collection") continue;
+      const created =
+        reusedActions.get(index) ||
+        (await attempt(index, intent.operation, () =>
+          resolveScope(this.gateway, request, intent, [], this.references),
+        ));
+      if (!created) continue;
       collectionCreations.set(
         index,
-        (
-          reusedActions.get(index) ||
-          (await resolveScope(
-            this.gateway,
-            request,
-            intent,
-            [],
-            this.references,
-          ))
-        ).map((obligation, offset) => ({
+        created.map((obligation, offset) => ({
           ...obligation,
           id: `${contractId}:creation:${index}:${offset}`,
           sourceActionIndex: index,
@@ -471,23 +505,28 @@ export class ActionContractService {
     }
     const resolved: AgentActionObligation[] = [];
     for (const [index, intent] of intents.entries()) {
+      if (skipped.has(index)) continue;
       const obligations =
         collectionCreations.get(index) ||
         reusedActions.get(index) ||
-        (await resolveScope(
-          this.gateway,
-          request,
-          intent,
-          [...collectionCreations.values()].flat(),
-          this.references,
-          index,
+        (await attempt(index, intent.operation, () =>
+          resolveScope(
+            this.gateway,
+            request,
+            intent,
+            [...collectionCreations.values()].flat(),
+            this.references,
+            index,
+          ),
         ));
+      if (!obligations) continue;
+      const dependencies = actionDependencies(intent).filter(
+        (dependency) => !skipped.has(dependency),
+      );
       resolved.push(
         ...obligations.map((obligation) => ({
           ...obligation,
-          dependsOn: actionDependencies(intent).length
-            ? actionDependencies(intent)
-            : undefined,
+          dependsOn: dependencies.length ? dependencies : undefined,
           contentFrom: intent.contentFrom,
           sourceActionIndex: index,
         })),
@@ -532,6 +571,7 @@ export class ActionContractService {
           ? obligation.id
           : `${contractId}:obligation:${index}`,
       })),
+      ...(assumptions.length ? { assumptions } : {}),
     };
   }
 

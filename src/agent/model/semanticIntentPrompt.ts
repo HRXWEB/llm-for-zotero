@@ -4,12 +4,14 @@ import { workflowCheckpointEvidence } from "../contracts/workflowCheckpoint";
 import { resolveSkillRequestContext } from "../skills/contextEligibility";
 import type { AgentSkill } from "../skills/skillLoader";
 import type { AgentRuntimeRequest } from "../types";
+import type { OriginalAgentPermissionMode } from "../../shared/originalAgentPermissionMode";
 import { ACTION_INTENT_RESPONSE_SCHEMA } from "./actionIntent";
 import { SEMANTIC_DECISION_INSTRUCTIONS } from "./semanticDecisions";
 
 function buildRoutingContext(
   skills: AgentSkill[],
   request: AgentRuntimeRequest,
+  mode: OriginalAgentPermissionMode,
 ): string {
   const skillList = skills
     .map(
@@ -45,6 +47,7 @@ function buildRoutingContext(
       `- Selected tag scopes: ${request.turnPaperScope.tags.length}`,
     );
   }
+  context.push(`- Permission mode: ${mode}`);
 
   return [
     "You are the sole semantic intent interpreter for a Zotero agent. Interpret the requested outcomes, constraints, and complete references first. Skill selection is optional supporting information.",
@@ -82,13 +85,17 @@ export function buildSemanticPrompt(
   request: AgentRuntimeRequest,
   skills: AgentSkill[],
   destinations: ReturnType<typeof getNotesDirectoryConfig>,
+  mode: OriginalAgentPermissionMode,
 ): string {
   return [
-    buildRoutingContext(skills, request),
+    buildRoutingContext(skills, request, mode),
 
     "Also classify the exact requested action obligations in this Zotero request.",
     "Questions, advice, negation, hypotheticals, and reads have no mutation actions.",
     "Capture reviewPreference separately for each action: default for ordinary delegated work, review when the user wants to inspect it before application, and direct when they explicitly request no optional confirmation. Model-selected tags, metadata values or collection assignments do not inherently require review. Never change the selected permission mode. A later explicit revision can change this preference; a resume preserves it.",
+    mode === "yolo"
+      ? "Permission mode yolo: the user delegated judgment for this turn. Do not emit decisions.questions for ordinary ambiguity such as append versus replace, a similar collection name, or an unspecified destination. Choose the most reasonable reading, encode it in actionIntents, and list each choice in decisions.assumptions as one short sentence. Emit a question only when no reasonable reading exists."
+      : "Ask questions only for material ambiguity that context or discovery cannot resolve; list any reading you had to choose in decisions.assumptions.",
     "Tag effects are literal: add while preserving old tags is apply_tags, remove specified tags is remove_tags, and replace the old tags with an exact set is set_item_tags. Interpret the complete instruction, including a later clause clarifying replacement.",
     `Available operations: ${Object.keys(OPERATION_CATALOG).join(", ")}.`,
     'A collection move is one atomic move_to_collection obligation with constraints:{"collectionMode":"move"}; it both adds the destination and removes the named source. Do not add a separate remove_from_collection obligation for the same move. Add-only collection filing is move_to_collection without that constraint.',

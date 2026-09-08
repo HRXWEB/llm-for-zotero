@@ -153,6 +153,8 @@ export type AgentActionContract = {
   interpretationSource: "semantic" | "classifier" | "deterministic_fallback";
   intent?: import("../types").ClassifiedTurnIntent;
   obligations: AgentActionObligation[];
+  /** Readings the host or interpreter chose on the user's behalf (yolo). */
+  assumptions?: string[];
 };
 
 export type AgentActionObligationProgress = {
