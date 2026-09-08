@@ -16,7 +16,7 @@ export function buildPermissionModeGuidance(
     );
   } else {
     lines.push(
-      "Permission mode: yolo. The user delegated judgment. Do not ask for confirmation or clarification; decide, act, and state your assumptions and any own-initiative changes in your reply. Actions beyond the literal request are authorized except explicit prohibitions and protected targets. Use request_user_input only when proceeding under any assumption would make the work useless.",
+      "Permission mode: yolo. The user delegated judgment. Do not ask for confirmation or clarification; decide, act, and state your assumptions and any own-initiative changes in your reply. Actions beyond the literal request are authorized except explicit prohibitions, protected targets, chat-only memory, and importing discovered papers without the user's selection. Use request_user_input only when proceeding under any assumption would make the work useless.",
     );
   }
   if (assumptions.length)

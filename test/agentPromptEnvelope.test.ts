@@ -410,6 +410,13 @@ describe("agent prompt envelope", function () {
       const yolo = await promptText("yolo", ["Assumed append."]);
       assert.include(yolo, "Permission mode: yolo");
       assert.include(yolo, "Do not ask for confirmation or clarification");
+      // The guidance must not read as unlimited authority: the rails that
+      // still block in yolo belong in the same sentence.
+      assert.include(yolo, "chat-only memory");
+      assert.include(
+        yolo,
+        "importing discovered papers without the user's selection",
+      );
       assert.include(yolo, "Interpretation assumptions: Assumed append.");
       const auto = await promptText("auto");
       assert.include(auto, "Permission mode: auto");

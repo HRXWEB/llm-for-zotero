@@ -20,6 +20,7 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
+import { getOriginalAgentPermissionModeDescription } from "../src/shared/originalAgentPermissionMode";
 import {
   migrateClaudePermissionMode,
   migrateCodexPermissionState,
@@ -618,7 +619,25 @@ describe("provider permission modes", function () {
     assert.include(byKey["original:yolo"], "own judgment");
     assert.include(byKey["original:yolo"], "beyond the literal request");
     assert.include(byKey["original:yolo"], "Claude Code or Codex");
+    // Every rail that still blocks in yolo has to be named, or the option
+    // understates what the mode leaves enforced.
+    assert.include(byKey["original:yolo"], "chat-only memory");
+    assert.include(
+      byKey["original:yolo"],
+      "paper selection card before importing discovered papers",
+    );
     assert.notInclude(byKey["original:yolo"], "require review");
+    assert.notInclude(byKey["original:yolo"], "Only explicit prohibitions");
+  });
+
+  it("names the same yolo rails in the long mode description", function () {
+    const description = getOriginalAgentPermissionModeDescription();
+    assert.include(description, "chat-only memory");
+    assert.include(
+      description,
+      "the paper selection card before importing discovered papers",
+    );
+    assert.include(description, "the change journal remain enforced");
   });
 
   it("falls back to auto when the preference store is unreadable", function () {

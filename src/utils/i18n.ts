@@ -392,8 +392,8 @@ const zhCN: Record<string, string> = {
     "直接创建用户请求的新笔记。其他写入、命令、脚本和网络操作会先显示以供审核。文献发现会显示选择卡片。",
   "Requested actions run without review. Existing-note edits are applied and then shown as a diff. The agent asks only for genuine ambiguity in the request or for dangerous shell commands.":
     "请求的操作无需审核即可执行。对现有笔记的编辑会先应用，再以差异形式展示。仅在请求确有歧义或涉及危险的 shell 命令时，Agent 才会询问。",
-  "The agent acts on its own judgment without asking and may take actions beyond the literal request. Only explicit prohibitions, protected items, the database, and plan integrity checks remain enforced. Also applies to plugin tools called by Claude Code or Codex.":
-    "Agent 自行判断并执行，不再询问，且可以执行超出字面请求的操作。仅明确的禁止事项、受保护条目、数据库以及计划完整性检查仍然生效。同样适用于 Claude Code 或 Codex 调用的插件工具。",
+  "The agent acts on its own judgment without asking and may take actions beyond the literal request. Explicit prohibitions, protected items, the database, plan integrity checks, chat-only memory, and the paper selection card before importing discovered papers remain enforced. Also applies to plugin tools called by Claude Code or Codex.":
+    "Agent 自行判断并执行，不再询问，且可以执行超出字面请求的操作。明确的禁止事项、受保护条目、数据库、计划完整性检查、仅限对话的记忆，以及导入已发现论文前的论文选择卡片仍然生效。同样适用于 Claude Code 或 Codex 调用的插件工具。",
   "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
     "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",

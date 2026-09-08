@@ -88,9 +88,9 @@ describe("instruction harness inventory", function () {
     const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
     assert.include(
       prompt,
-      "literature_review for user selection when the user asks to choose or in safe mode",
+      "literature_review to present discovery results (its selection card appears in safe mode or when the user asks to choose; discovery never imports on its own in any mode)",
     );
-    assert.include(prompt, "library_import for explicit import requests");
+    assert.include(prompt, "library_import only for explicit import requests");
     assert.notInclude(prompt, "only for imports, note saving");
   });
   it("keeps the shared semantic contracts provider-neutral", function () {

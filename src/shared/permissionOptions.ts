@@ -46,7 +46,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Yolo",
       compactLabel: "yolo",
       description:
-        "The agent acts on its own judgment without asking and may take actions beyond the literal request. Only explicit prohibitions, protected items, the database, and plan integrity checks remain enforced. Also applies to plugin tools called by Claude Code or Codex.",
+        "The agent acts on its own judgment without asking and may take actions beyond the literal request. Explicit prohibitions, protected items, the database, plan integrity checks, chat-only memory, and the paper selection card before importing discovered papers remain enforced. Also applies to plugin tools called by Claude Code or Codex.",
       available: true,
     },
   };
