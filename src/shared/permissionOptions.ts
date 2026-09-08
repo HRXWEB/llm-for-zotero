@@ -28,7 +28,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Safe",
       compactLabel: "safe",
       description:
-        "Create requested new notes directly. Review other writes, filesystem reads outside the current context, commands, scripts, and network actions.",
+        "Requested new notes are created directly. Other writes, commands, scripts, and network actions are shown for review first. Literature discovery shows a selection card.",
       available: true,
     },
     auto: {
@@ -37,7 +37,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Auto",
       compactLabel: "auto",
       description:
-        "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.",
+        "Requested actions run without review. Existing-note edits are applied and then shown as a diff. The agent asks only for genuine ambiguity in the request or for dangerous shell commands.",
       available: true,
     },
     yolo: {
@@ -46,7 +46,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Yolo",
       compactLabel: "yolo",
       description:
-        "Execute every valid in-scope Original Agent action without mode-based prompts. Existing-note changes require review.",
+        "The agent acts on its own judgment without asking and may take actions beyond the literal request. Only explicit prohibitions, protected items, the database, and plan integrity checks remain enforced. Also applies to plugin tools called by Claude Code or Codex.",
       available: true,
     },
   };

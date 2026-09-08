@@ -600,13 +600,25 @@ describe("provider permission modes", function () {
     );
   });
 
-  it("describes requested new notes as confirmation-free in Safe mode", function () {
-    const safe = getOriginalPermissionOptions().find(
-      (entry) => entry.selectionKey === "original:safe",
-    )!;
-    assert.include(safe.description, "Create requested new notes directly");
-    assert.include(safe.description, "other writes");
-    assert.notInclude(safe.description, "every write");
+  it("describes each mode by what the code actually does", function () {
+    const byKey = Object.fromEntries(
+      getOriginalPermissionOptions().map((entry) => [
+        entry.selectionKey,
+        entry.description,
+      ]),
+    );
+    assert.include(
+      byKey["original:safe"],
+      "Requested new notes are created directly",
+    );
+    assert.include(byKey["original:safe"], "shown for review first");
+    assert.notInclude(byKey["original:safe"], "filesystem reads");
+    assert.include(byKey["original:auto"], "applied and then shown as a diff");
+    assert.notInclude(byKey["original:auto"], "require review");
+    assert.include(byKey["original:yolo"], "own judgment");
+    assert.include(byKey["original:yolo"], "beyond the literal request");
+    assert.include(byKey["original:yolo"], "Claude Code or Codex");
+    assert.notInclude(byKey["original:yolo"], "require review");
   });
 
   it("falls back to auto when the preference store is unreadable", function () {

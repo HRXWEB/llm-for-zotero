@@ -85,9 +85,9 @@ describe("bridge settings UI behavior", function () {
       assert.equal(t("Permission mode"), "权限模式");
       assert.equal(
         t(
-          "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.",
+          "Requested actions run without review. Existing-note edits are applied and then shown as a diff. The agent asks only for genuine ambiguity in the request or for dangerous shell commands.",
         ),
-        "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。现有笔记的更改需要审核。",
+        "请求的操作无需审核即可执行。对现有笔记的编辑会先应用，再以差异形式展示。仅在请求确有歧义或涉及危险的 shell 命令时，Agent 才会询问。",
       );
     } finally {
       if (previousZotero) {

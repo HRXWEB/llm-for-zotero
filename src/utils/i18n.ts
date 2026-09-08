@@ -388,12 +388,12 @@ const zhCN: Record<string, string> = {
   "Permission mode": "权限模式",
   safe: "安全",
   yolo: "全自动",
-  "Create requested new notes directly. Review other writes, filesystem reads outside the current context, commands, scripts, and network actions.":
-    "直接创建用户请求的新笔记。审核其他写入、当前上下文之外的文件系统读取，以及命令、脚本和网络操作。",
-  "Execute clear, in-scope actions and ask only for genuine ambiguity or exceptional danger. Existing-note changes require review.":
-    "执行明确且在范围内的操作，仅在确有歧义或存在极端危险时询问。现有笔记的更改需要审核。",
-  "Execute every valid in-scope Original Agent action without mode-based prompts. Existing-note changes require review.":
-    "执行原生 Agent 所有有效且在范围内的操作，不显示基于模式的确认提示。现有笔记的更改需要审核。",
+  "Requested new notes are created directly. Other writes, commands, scripts, and network actions are shown for review first. Literature discovery shows a selection card.":
+    "直接创建用户请求的新笔记。其他写入、命令、脚本和网络操作会先显示以供审核。文献发现会显示选择卡片。",
+  "Requested actions run without review. Existing-note edits are applied and then shown as a diff. The agent asks only for genuine ambiguity in the request or for dangerous shell commands.":
+    "请求的操作无需审核即可执行。对现有笔记的编辑会先应用，再以差异形式展示。仅在请求确有歧义或涉及危险的 shell 命令时，Agent 才会询问。",
+  "The agent acts on its own judgment without asking and may take actions beyond the literal request. Only explicit prohibitions, protected items, the database, and plan integrity checks remain enforced. Also applies to plugin tools called by Claude Code or Codex.":
+    "Agent 自行判断并执行，不再询问，且可以执行超出字面请求的操作。仅明确的禁止事项、受保护条目、数据库以及计划完整性检查仍然生效。同样适用于 Claude Code 或 Codex 调用的插件工具。",
   "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
     "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",
