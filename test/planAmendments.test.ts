@@ -19,6 +19,7 @@ import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 import type { AgentActionContract } from "../src/agent/contracts/types";
 import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
+import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import {
   ZOTERO_MCP_PLAN_TOOL_NAMES,
   ZOTERO_MCP_WRITE_TOOL_NAMES,
@@ -1682,5 +1683,14 @@ describe("autonomous Plan scope amendments", function () {
     });
     assert.equal(job.baseSnapshotId, "snapshot-1");
     assert.equal(job.scopeLineageDigest, "legacy:snapshot-1");
+  });
+
+  it("lets a plan declare reviewPreference on a mutation intent", function () {
+    const tool = createUpdatePlanTool();
+    const schema = JSON.stringify(tool.spec.inputSchema);
+    assert.include(
+      schema,
+      '"reviewPreference":{"type":"string","enum":["default","review","direct"]',
+    );
   });
 });

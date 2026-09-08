@@ -263,6 +263,12 @@ export function createUpdatePlanTool(
                                   type: "object",
                                   additionalProperties: true,
                                 },
+                                reviewPreference: {
+                                  type: "string",
+                                  enum: ["default", "review", "direct"],
+                                  description:
+                                    "review when the user asked to inspect this change before it applies; direct when they said just do it; otherwise default. The permission mode decides whether default is reviewed.",
+                                },
                               },
                             },
                           },
