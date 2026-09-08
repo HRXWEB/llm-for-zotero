@@ -158,7 +158,13 @@ export class InvocationController {
         name: this.call.name,
         ok: false,
         actionReceipts: this.receipts(
-          { ok: false, reason, cancelled },
+          {
+            ok: false,
+            reason,
+            cancelled,
+            content:
+              error instanceof ToolExecutionFailure ? error.content : undefined,
+          },
           assessed,
           input,
         ),

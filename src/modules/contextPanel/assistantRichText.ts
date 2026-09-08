@@ -4,6 +4,7 @@ import { stripWebSourceMarkersForDisplay } from "../../webAccess/attribution";
 import { sanitizeText } from "./textUtils";
 import {
   buildQuoteDisplayMarkdown,
+  buildQuoteExpandedMarkdown,
   getMessageQuoteDisplay,
 } from "./quoteRenderPlan";
 import {
@@ -15,6 +16,10 @@ import {
   injectWebSourceAnchorTokens,
 } from "./webSourceIndicators";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
+import {
+  disposeStreamingMarkdown,
+  renderStreamingMarkdownInto,
+} from "./streamingMarkdown";
 
 export type AssistantCitationContext = {
   panelItem: Zotero.Item;
@@ -23,14 +28,22 @@ export type AssistantCitationContext = {
 };
 
 export function buildAssistantDisplayMarkdownForRender(
-  message: Pick<Message, "text" | "quoteCitations" | "quoteDisplayOverride">,
+  message: Pick<
+    Message,
+    "text" | "quoteCitations" | "quoteDisplayOverride" | "streaming"
+  >,
   webSourceAnchors: readonly WebSourceAnchor[] = [],
 ): string {
   const hasWebSources = webSourceAnchors.length > 0;
   const display = hasWebSources
     ? { markdown: message.text || "", quoteCitations: message.quoteCitations }
     : getMessageQuoteDisplay(message);
-  return buildQuoteDisplayMarkdown({
+  // Quote cards are finalized after streaming. Until then, keep their text
+  // readable instead of publishing an unresolved interactive-render token.
+  const buildDisplay = message.streaming
+    ? buildQuoteExpandedMarkdown
+    : buildQuoteDisplayMarkdown;
+  return buildDisplay({
     markdown: injectWebSourceAnchorTokens(
       stripWebSourceMarkersForDisplay(sanitizeText(display.markdown)),
       webSourceAnchors,
@@ -65,15 +78,30 @@ export function renderAssistantRichText(
     body: Element;
     bubble: HTMLDivElement;
     webSourceAnchors?: readonly WebSourceAnchor[];
+    incremental?: boolean;
+    onContentRendered?: () => void;
   },
 ): void {
   const doc = params.bubble.ownerDocument;
   const anchors = params.webSourceAnchors || [];
-  renderRenderedMarkdownInto(
-    params.bubble,
-    buildAssistantDisplayMarkdownForRender(params.assistantMessage, anchors),
-    doc,
+  const source = buildAssistantDisplayMarkdownForRender(
+    params.assistantMessage,
+    anchors,
   );
-  decorateWebSourceIndicators(params.bubble, doc, anchors);
-  decorateCompletedAssistantCitationLinks(params);
+  const decorate = () => {
+    decorateWebSourceIndicators(params.bubble, doc, anchors);
+    decorateCompletedAssistantCitationLinks(params);
+  };
+  if (params.incremental && params.assistantMessage.streaming) {
+    renderStreamingMarkdownInto(params.bubble, source, doc, () => {
+      decorate();
+      params.onContentRendered?.();
+    });
+  } else {
+    disposeStreamingMarkdown(params.bubble);
+    renderRenderedMarkdownInto(params.bubble, source, doc, {
+      onAsyncContentRendered: params.onContentRendered,
+    });
+    decorate();
+  }
 }

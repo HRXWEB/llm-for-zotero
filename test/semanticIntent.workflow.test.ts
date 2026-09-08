@@ -41,6 +41,70 @@ const interpretation = {
 };
 
 describe("Semantic intent to native action contract", function () {
+  it("corrects a source-paper reference that confuses an active note with an active paper", async function () {
+    let calls = 0;
+    const result = await detectTurnIntent(
+      resolvedAgentRequest({
+        conversationKey: 3,
+        mode: "agent",
+        libraryID: 1,
+        userText:
+          "Read the supplied paper and replace note 3 with a reading note.",
+        activeItemId: 3,
+        activeNoteContext: {
+          noteId: 3,
+          title: "Note",
+          noteKind: "item",
+          noteText: "Original",
+        },
+        selectedPaperContexts: [
+          {
+            libraryID: 1,
+            itemId: 1,
+            contextItemId: 2,
+            title: "Supplied paper",
+          },
+        ],
+        model: "test",
+        apiBase: "https://example.invalid",
+        apiKey: "fixture",
+      }),
+      [],
+      {
+        llmCall: async () => ({
+          text: JSON.stringify({
+            ...interpretation,
+            paperTargetIntent: ++calls === 1 ? "active" : "added",
+            decisions: {
+              ...interpretation.decisions,
+              noteDestination: "zotero",
+              materialOutputs: [
+                {
+                  id: "reading_note",
+                  description: "Reading note",
+                  afterActions: [],
+                  sourceActionIndexes: [],
+                  requiredEvidence: "body",
+                },
+              ],
+            },
+            actionIntents: [
+              {
+                operation: "note_edit",
+                coverage: "one",
+                targetKind: "items",
+                contentFrom: "reading_note",
+                parameters: { targetNoteId: 3, noteMode: "edit" },
+              },
+            ],
+          }),
+          completion: { status: "complete" },
+        }),
+      },
+    );
+    assert.equal(calls, 2);
+    assert.equal(result.classifiedIntent?.paperTargetIntent, "added");
+  });
   it("recovers a literal-reference reply missing its native-name evidence once", async function () {
     let calls = 0;
     const request = resolvedAgentRequest({

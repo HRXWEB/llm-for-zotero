@@ -108,7 +108,7 @@ describe("workflow: multiline note patch review and undo", function () {
       await note.reload(["note"], true);
       const expected = before
         .replace("First paragraph", "Revised summary.")
-        .replace("Second paragraph", "");
+        .replace("<p>Second paragraph</p>", "");
       assert.equal(
         stripZoteroNoteWrapper(note.getNote()),
         stripZoteroNoteWrapper(expected),

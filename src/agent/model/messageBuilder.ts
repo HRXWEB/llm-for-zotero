@@ -604,6 +604,17 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
 function buildReadingInstruction(request: AgentRuntimeRequest): string {
   const reading = request.classifiedIntent?.semantic?.reading;
   if (!reading || reading.source === "metadata") return "";
+  if (reading.source === "provided_context") {
+    const noteEdit =
+      request.classifiedIntent?.actionIntents.length === 1 &&
+      request.classifiedIntent.actionIntents[0].operation === "note_edit";
+    return (
+      "TURN RULE: Use the provided context for this task; no source-document retrieval is required." +
+      (noteEdit
+        ? " Generate the requested replacement, call note_write once, then report its verified result concisely. The host handles native range replacement, save, readback and diff; do not reconstruct HTML or perform a second cleanup edit after success."
+        : "")
+    );
+  }
   const mode =
     reading.source === "rendered_pages"
       ? "visual"

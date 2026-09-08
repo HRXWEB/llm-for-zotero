@@ -1021,6 +1021,7 @@ export type AgentToolPresentationSummary =
  */
 export type AgentSavedNoteResultCard = {
   kind: "saved_note";
+  actionId?: string;
   title: string;
   destination: string;
   bodyHtml: string;
@@ -1034,7 +1035,15 @@ export type AgentNoteChangeResultCard = {
   note: { itemId: number; libraryID: number; key: string };
   conversationKey: number;
   actionId: string;
-  state: "proposed" | "applied" | "failed" | "undone" | "no_op";
+  state:
+    | "proposed"
+    | "applied"
+    | "failed"
+    | "undone"
+    | "no_op"
+    | "mismatch"
+    | "unverified";
+  afterVerified?: boolean;
   before: import("./store/journalRecoveryBlobStore").RecoveryPayload;
   after: import("./store/journalRecoveryBlobStore").RecoveryPayload;
 };

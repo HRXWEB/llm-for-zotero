@@ -15,10 +15,8 @@ import {
 } from "../../authorization/invocationPlan";
 import type { ActionRiskSignal } from "../../authorization/types";
 import { ok, fail, validateObject } from "../shared";
-import {
-  currentMutationActionId,
-  executeExternalMutation,
-} from "../../services/mutationCoordinator";
+import { currentMutationActionId } from "../../services/mutationCoordinator";
+import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { listJournalObservationObjectIds } from "../../store/changeJournal";
 import {
   sha256Bytes,

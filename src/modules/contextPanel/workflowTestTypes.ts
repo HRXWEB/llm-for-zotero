@@ -555,6 +555,7 @@ export type WorkflowTestApi = {
     panelId: string,
     result: import("../../agent/types").AgentToolResult,
     options?: {
+      priorResults?: import("../../agent/types").AgentToolResult[];
       documentId?: string;
       userText?: string;
       actionContract?: import("../../agent/types").AgentActionContract;

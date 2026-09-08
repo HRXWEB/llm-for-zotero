@@ -1,3 +1,6 @@
+import { noteHtmlMatches } from "../src/utils/noteHtml";
+import { renderRawNoteHtml } from "../src/modules/contextPanel/notes";
+import { nativeNoteGateway } from "./helpers/nativeNoteGateway";
 import { actionContractFixture } from "./helpers/semanticIntent";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import {
@@ -2512,33 +2515,35 @@ describe("primitive agent tools", function () {
   });
 
   it("edit_current_note confirms and updates the active note", async function () {
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: () => ({
-        noteId: 55,
-        title: "Draft Note",
-        html: "<p>Original body</p>",
-        text: "Original body",
-        libraryID: 1,
-        noteKind: "standalone",
-      }),
-      replaceCurrentNote: async ({
-        content,
-        expectedOriginalHtml,
-      }: {
-        content: string;
-        expectedOriginalHtml?: string;
-      }) => {
-        assert.equal(expectedOriginalHtml, "<p>Original body</p>");
-        return {
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: () => ({
           noteId: 55,
           title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => undefined,
-    } as never);
+          html: "<p>Original body</p>",
+          text: "Original body",
+          libraryID: 1,
+          noteKind: "standalone",
+        }),
+        onNativeSave: async ({
+          content,
+          expectedOriginalHtml,
+        }: {
+          content: string;
+          expectedOriginalHtml?: string;
+        }) => {
+          assert.equal(expectedOriginalHtml, "<p>Original body</p>");
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => undefined,
+      } as never),
+    );
     const noteRequest = {
       ...baseContext.request,
       activeNoteContext: {
@@ -2615,7 +2620,7 @@ describe("primitive agent tools", function () {
         request: noteRequest,
       })
     ).content;
-    assert.deepEqual(result, {
+    assert.include(result, {
       status: "updated",
       noteId: 55,
       title: "Draft Note",
@@ -2671,27 +2676,29 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note does not police incomplete MinerU figure-block embeds before mutation", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: () => ({
-        noteId: 55,
-        title: "Draft Note",
-        html: "<p>Original body</p>",
-        text: "Original body",
-        libraryID: 1,
-        noteKind: "standalone",
-      }),
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: () => ({
           noteId: 55,
           title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+          html: "<p>Original body</p>",
+          text: "Original body",
+          libraryID: 1,
+          noteKind: "standalone",
+        }),
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/90";
@@ -2770,13 +2777,17 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(
-        replacedContent,
-        [
-          "![Figure 2c](images/fig2c.png)",
-          "",
-          "Figure 2 explains the attractor-network interpretation.",
-        ].join("\n"),
+      assert.isTrue(
+        noteHtmlMatches(
+          replacedContent,
+          renderRawNoteHtml(
+            [
+              "![Figure 2c](images/fig2c.png)",
+              "",
+              "Figure 2 explains the attractor-network interpretation.",
+            ].join("\n"),
+          ),
+        ),
       );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
@@ -2785,27 +2796,29 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note does not police explicit figure notes without extracted crop embeds", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: () => ({
-        noteId: 55,
-        title: "Draft Note",
-        html: "<p>Original body</p>",
-        text: "Original body",
-        libraryID: 1,
-        noteKind: "standalone",
-      }),
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: () => ({
           noteId: 55,
           title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+          html: "<p>Original body</p>",
+          text: "Original body",
+          libraryID: 1,
+          noteKind: "standalone",
+        }),
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/92";
@@ -2892,13 +2905,17 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(
-        replacedContent,
-        [
-          "## Figure 1 - Neural networks",
-          "",
-          "Figure 1 explains the stability-plasticity problem through four panels.",
-        ].join("\n"),
+      assert.isTrue(
+        noteHtmlMatches(
+          replacedContent,
+          renderRawNoteHtml(
+            [
+              "## Figure 1 - Neural networks",
+              "",
+              "Figure 1 explains the stability-plasticity problem through four panels.",
+            ].join("\n"),
+          ),
+        ),
       );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
@@ -2907,20 +2924,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note allows extracted PDF figure crop embeds", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/91";
@@ -3022,7 +3041,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3030,20 +3051,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note does not reject all-figures notes when figure crop metadata is missing", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/92";
@@ -3113,7 +3136,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3121,20 +3146,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note allows explicit text-only all-figures notes when extraction failed", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/95";
@@ -3213,7 +3240,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3221,20 +3250,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note allows no-image-crop all-figures notes when extraction failed", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/96";
@@ -3313,7 +3344,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3321,20 +3354,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note does not reject all-figures notes when figure crop metadata is stale", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/94";
@@ -3425,7 +3460,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3433,20 +3470,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note accepts all-figures crop embeds when only paper title metadata drifted", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/97";
@@ -3586,7 +3625,9 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -3594,20 +3635,22 @@ describe("primitive agent tools", function () {
 
   it("edit_current_note does not reject all-figures notes when expected crops are missing", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: activeDraftNoteSnapshot,
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        replacedContent = content;
-        return {
-          noteId: 55,
-          title: "Draft Note",
-          previousHtml: "<p>Original body</p>",
-          previousText: "Original body",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          return {
+            noteId: 55,
+            title: "Draft Note",
+            previousHtml: "<p>Original body</p>",
+            previousText: "Original body",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const encoder = new TextEncoder();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const cacheDir = "/tmp/llm-for-zotero-mineru/93";
@@ -3732,34 +3775,38 @@ describe("primitive agent tools", function () {
         noteId: 55,
         title: "Draft Note",
       });
-      assert.equal(replacedContent, content);
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
   });
 
   it("edit_current_note compares HTML as Markdown but preserves the approved HTML payload", async function () {
-    const tool = createEditCurrentNoteTool({
-      getActiveNoteSnapshot: () => ({
-        noteId: 55,
-        title: "",
-        html: "<div><p></p></div>",
-        text: "",
-        libraryID: 1,
-        noteKind: "standalone",
-      }),
-      replaceCurrentNote: async ({ content }: { content: string }) => {
-        assert.equal(content, "<p>Approved <em>note</em></p>");
-        return {
+    const tool = createEditCurrentNoteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: () => ({
           noteId: 55,
           title: "",
-          previousHtml: "<div><p></p></div>",
-          previousText: "",
-          nextText: content,
-        };
-      },
-      restoreNoteHtml: async () => {},
-    } as never);
+          html: "<div><p></p></div>",
+          text: "",
+          libraryID: 1,
+          noteKind: "standalone",
+        }),
+        onNativeSave: async ({ content }: { content: string }) => {
+          assert.equal(content, "<p>Approved <em>note</em></p>");
+          return {
+            noteId: 55,
+            title: "",
+            previousHtml: "<div><p></p></div>",
+            previousText: "",
+            nextText: content,
+          };
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const noteRequest = {
       ...baseContext.request,
       activeNoteContext: {
@@ -3821,10 +3868,7 @@ describe("primitive agent tools", function () {
         request: noteRequest,
       })
     ).content;
-    assert.equal(
-      (result as { noteText: string }).noteText,
-      "<p>Approved <em>note</em></p>",
-    );
+    assert.equal((result as { noteText: string }).noteText, "Approved *note*");
   });
 
   it("zotero_script refuses effects when durable authorization persistence is unavailable", async function () {

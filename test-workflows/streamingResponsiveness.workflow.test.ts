@@ -50,6 +50,26 @@ describe("workflow: streaming responsiveness", function () {
         assert.equal(result.ledgerReadsDuringText, 0);
         assert.isTrue(result.progressUpdatePreserved);
         assert.isTrue(result.finalAnswerVisible);
+        assert.isTrue(
+          result.answerVisibleBeforeFinal,
+          "answer text is visible before the final event",
+        );
+        assert.isTrue(
+          result.streamingQuoteVisible,
+          "streaming retains the quotation text",
+        );
+        assert.isTrue(
+          result.streamingQuoteMarkersAbsent,
+          "streaming never exposes internal quote markers",
+        );
+        assert.isTrue(
+          result.refreshedQuoteVisible,
+          "background quote refresh completes quote-card rendering",
+        );
+        assert.isTrue(
+          result.refreshedQuoteMarkersAbsent,
+          "completed targeted refresh never exposes internal quote markers",
+        );
         assert.isTrue(result.composerPreserved);
         assert.isTrue(
           result.resumeVisibilityCorrect,

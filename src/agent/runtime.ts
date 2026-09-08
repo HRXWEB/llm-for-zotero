@@ -1,3 +1,4 @@
+import { resolveNoteEditModelRequest } from "./model/noteEditingPolicy";
 import { buildPaperDisplayLabels } from "../shared/paperDisplayLabels";
 import { listScopeSnapshotItems } from "./research/store";
 import { resolvePreparedActionReview } from "./tools/execution/review";
@@ -1911,7 +1912,7 @@ export class AgentRuntime {
         }
         const modelInput = continuationSession.inputForNextStep();
         const step = await adapter.runStep({
-          request,
+          request: resolveNoteEditModelRequest(request),
           messages: modelInput.messages,
           continuationMessages: modelInput.continuationMessages,
           tools: stepToolSpecs,

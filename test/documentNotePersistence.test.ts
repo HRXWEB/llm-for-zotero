@@ -277,6 +277,67 @@ describe("durable document note association", function () {
       "Exact durable summary.",
     );
   });
+  it("embeds finalized document figures when replacing an existing note", async function () {
+    addFigure();
+    const note = new globals.Zotero.Item("note");
+    note.key = "EXISTING";
+    await note.loadPrimaryData();
+    note.setNote("<p>Original</p>");
+    await note.saveTx();
+    const gateway = {
+      getItem: (id: number) => globals.Zotero.Items.get(id),
+      getActiveNoteSnapshot: () => ({
+        noteId: note.id,
+        title: "Note",
+        libraryID: 1,
+        html: note.getNote(),
+        text: "Original",
+      }),
+    } as any;
+    const tool = createEditCurrentNoteTool(gateway);
+    const input = tool.validate({
+      mode: "edit",
+      targetNoteId: note.id,
+      documentId: document.documentId,
+    });
+    assert.isTrue(input.ok);
+    if (!input.ok) return;
+    const context = {
+      journalFallbackApproved: true,
+      request: {
+        conversationKey: 42,
+        libraryID: 1,
+        actionContract: {
+          id: "workflow",
+          obligations: [
+            {
+              operation: "note_edit",
+              contentFrom: "summary",
+              targetBoundary: { frozenTargetIds: [note.id] },
+            },
+          ],
+        },
+        actionProgress: {
+          contractId: "workflow",
+          materialOutputs: [
+            {
+              outputId: "summary",
+              documentId: document.documentId,
+              documentVersion: 1,
+              contentHash: document.contentHash,
+            },
+          ],
+        },
+      },
+    } as any;
+    await tool.planInvocation(input.value, context);
+    const result = await tool.execute(input.value, context);
+    assert.equal(result.effect, "applied");
+    assert.equal(imageImports, 1);
+    assert.include(note.getNote(), 'data-attachment-key="IMAGE001"');
+    assert.include(note.getNote(), "Exact durable summary.");
+    assert.notInclude(note.getNote(), "Original");
+  });
   it("does not duplicate a native note when recording its association fails", async function () {
     failAssociation = true;
     let error: unknown;
@@ -383,7 +444,10 @@ describe("durable document note association", function () {
   it("does not mark fallback text complete when the figure checkpoint fails", async function () {
     addFigure();
     failFinalization = true;
-    await rejects(savePlanDocumentAsNote(document.documentId), /incomplete/);
+    await rejects(
+      savePlanDocumentAsNote(document.documentId),
+      /Finalization checkpoint/,
+    );
     assert.equal(notes.size, 1);
     assert.isUndefined(state.savedNote);
     assert.isFalse(state.pendingNote.finalized);

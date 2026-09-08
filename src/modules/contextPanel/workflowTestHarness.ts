@@ -4795,17 +4795,17 @@ export function installWorkflowTestHarness(targetAddon: {
                 },
               ]
             : []),
-          {
+          ...[...(options?.priorResults || []), result].map((entry, index) => ({
             runId: "workflow-tool-result",
-            seq: 1,
-            eventType: "tool_result",
+            seq: index + 1,
+            eventType: "tool_result" as const,
             createdAt: Date.now(),
             payload: {
-              type: "tool_result",
-              ...result,
-              actionReceipts: result.actionReceipts || [],
+              type: "tool_result" as const,
+              ...entry,
+              actionReceipts: entry.actionReceipts || [],
             },
-          },
+          })),
         ],
       });
       if (trace) panel.body.appendChild(trace);

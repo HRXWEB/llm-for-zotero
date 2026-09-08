@@ -34,6 +34,11 @@ export type StreamingReplayResult = {
   statusVisible: boolean;
   progressUpdatePreserved: boolean;
   finalAnswerVisible: boolean;
+  answerVisibleBeforeFinal: boolean;
+  streamingQuoteVisible: boolean;
+  streamingQuoteMarkersAbsent: boolean;
+  refreshedQuoteVisible: boolean;
+  refreshedQuoteMarkersAbsent: boolean;
   ledgerReadsDuringText: number;
   geometryReadsDuringText: number;
   renderMs: number[];
@@ -211,6 +216,11 @@ export async function exerciseStreamingReplay(
     statusVisible: false,
     progressUpdatePreserved: false,
     finalAnswerVisible: false,
+    answerVisibleBeforeFinal: false,
+    streamingQuoteVisible: false,
+    streamingQuoteMarkersAbsent: false,
+    refreshedQuoteVisible: false,
+    refreshedQuoteMarkersAbsent: false,
     ledgerReadsDuringText: 0,
     geometryReadsDuringText: 0,
     renderMs: [],
@@ -271,6 +281,7 @@ export async function exerciseStreamingReplay(
   const coalescer = createBlockStreamCoalescer({
     onBlock: (text) => {
       message.pendingFinalText = (message.pendingFinalText || "") + text;
+      message.text = message.pendingFinalText;
       refresh();
     },
   });
@@ -439,10 +450,41 @@ export async function exerciseStreamingReplay(
     result.resumeVisibilityCorrect &&=
       !findProgress() &&
       Boolean(box.querySelector(".llm-plan-recovery-card button"));
-    await handle({
-      type: "final",
-      text: "Final replay answer with **evidence**.",
-    });
+    const quote =
+      "The source quotation remains readable while the answer is still arriving.";
+    const answer = `Final replay answer with **evidence**.\n\n> ${quote}\n>\n> (Workflow, 2026)\n\nThe explanation continues.`;
+    await handle({ type: "message_delta", text: answer });
+    // Exercise the real timer boundary, before any final or other flush event.
+    await Zotero.Promise.delay(700);
+    const answerHost = findWrapper().querySelector<HTMLElement>(
+      ".llm-assistant-answer",
+    );
+    result.answerVisibleBeforeFinal = Boolean(
+      message.streaming &&
+      answerHost &&
+      !answerHost.hidden &&
+      answerHost.textContent?.includes("The explanation continues."),
+    );
+    result.streamingQuoteVisible = Boolean(
+      answerHost?.textContent?.includes(quote),
+    );
+    result.streamingQuoteMarkersAbsent = !answerHost?.textContent?.includes(
+      "[[quote-occurrence:",
+    );
+    await handle({ type: "final", text: answer });
+    message.quoteDisplayOverride = {
+      markdown: `Final replay answer with **evidence**.\n\n> Revalidated quotation stays readable.\n>\n> Not a source quote`,
+      quoteCitations: [],
+    };
+    refresh();
+    result.refreshedQuoteVisible = Boolean(
+      findWrapper()
+        .querySelector(".llm-quote-card")
+        ?.textContent?.includes("Revalidated quotation stays readable."),
+    );
+    result.refreshedQuoteMarkersAbsent = !findWrapper().textContent?.includes(
+      "[[quote-occurrence:",
+    );
     result.finalAnswerVisible = Boolean(
       box.textContent?.includes("Final replay answer with evidence."),
     );

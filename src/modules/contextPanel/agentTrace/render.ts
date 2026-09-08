@@ -1,3 +1,7 @@
+import type {
+  AgentNoteChangeResultCard,
+  AgentSavedNoteResultCard,
+} from "../../../agent/types";
 import { projectPaperReferences } from "../../../shared/paperDisplayLabels";
 import { getAgentRuntime } from "../../../agent";
 import {
@@ -39,7 +43,6 @@ import type {
 import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import type { GeneratedChatImage } from "../../../shared/types";
 import { toFileUrl } from "../../../utils/pathFileUrl";
-import { stripWebSourceMarkersForDisplay } from "../../../webAccess/attribution";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
 import { agentReasoningExpandedCache } from "../agentState";
 import { copyTextToClipboard } from "../clipboard";
@@ -68,7 +71,7 @@ import {
   PLAN_REVISE_EVENT,
   stageApprovedPlanExecution,
 } from "../planModeState";
-import { buildQuoteDisplayMarkdown } from "../quoteRenderPlan";
+import { buildAssistantDisplayMarkdownForRender } from "../assistantRichText";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
 import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
@@ -301,7 +304,7 @@ export function buildAgentTraceMarkdownForRender(
   text: string,
   message?: Pick<
     Message,
-    "text" | "quoteCitations" | "quoteDisplayOverride"
+    "text" | "quoteCitations" | "quoteDisplayOverride" | "streaming"
   > | null,
 ): string {
   const useDisplayOverride =
@@ -315,11 +318,10 @@ export function buildAgentTraceMarkdownForRender(
           message?.quoteDisplayOverride?.quoteCitations ||
           message?.quoteCitations,
       };
-  return buildQuoteDisplayMarkdown({
-    markdown: stripWebSourceMarkersForDisplay(
-      sanitizeText(display.markdown || text || ""),
-    ),
+  return buildAssistantDisplayMarkdownForRender({
+    text: display.markdown || text || "",
     quoteCitations: display.quoteCitations,
+    streaming: message?.streaming,
   });
 }
 
@@ -4129,7 +4131,10 @@ function appendLegacyAgentTraceEvent(
                   ? cards
                   : cards.filter(
                       (card) =>
-                        card.kind === "note_change" && card.state === "failed",
+                        card.kind === "note_change" &&
+                        ["failed", "mismatch", "unverified"].includes(
+                          card.state,
+                        ),
                     ),
               });
             }
@@ -5892,20 +5897,30 @@ export function renderAgentTrace({
   });
 
   let hasSavedNote = false;
-  const shownNoteActions = new Set<string>();
+  const shownNoteActions = new Map<
+    string,
+    AgentNoteChangeResultCard | AgentSavedNoteResultCard
+  >();
   for (const item of processItems) {
     if (item.type !== "card_list") continue;
     for (const card of item.cards) {
-      if (card.kind === "note_change" && !shownNoteActions.has(card.actionId)) {
-        shownNoteActions.add(card.actionId);
-        wrap.appendChild(renderNoteChangeCard(doc, card));
+      if (card.kind === "note_change") {
+        shownNoteActions.set(card.actionId, card);
       }
       if (card.kind === "saved_note") {
         hasSavedNote = true;
-        wrap.appendChild(renderSavedNoteCard(doc, card));
+        if (card.actionId) shownNoteActions.set(card.actionId, card);
+        else wrap.appendChild(renderSavedNoteCard(doc, card));
       }
     }
   }
+
+  for (const card of shownNoteActions.values())
+    wrap.appendChild(
+      card.kind === "note_change"
+        ? renderNoteChangeCard(doc, card)
+        : renderSavedNoteCard(doc, card),
+    );
 
   const planProjection = getPlanProjection(events);
   const visiblePlanProjection =

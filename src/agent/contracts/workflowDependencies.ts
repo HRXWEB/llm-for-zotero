@@ -93,7 +93,9 @@ export function validWorkflowDependencies(
     return Boolean(
       output &&
       output.afterActions.every((dependency) => dependency < index) &&
-      ["note_create", "file_write"].includes(action.operation),
+      ["note_create", "note_edit", "note_append", "file_write"].includes(
+        action.operation,
+      ),
     );
   });
 }

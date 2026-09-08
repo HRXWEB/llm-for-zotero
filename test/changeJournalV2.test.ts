@@ -1,9 +1,9 @@
 import { assert } from "chai";
 import { revertActions } from "../src/agent/services/changeReverter";
-import { executeExternalMutation } from "../src/agent/services/mutationCoordinator";
+import { executeExternalMutation } from "../src/agent/services/externalMutationCoordinator";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import { withActiveJournalAction } from "../src/agent/services/mutationCoordinator";
+import { withActiveJournalAction } from "../src/agent/services/externalMutationCoordinator";
 import {
   clearAgentChangeJournal,
   compactRevertedJournalAction,
@@ -2821,7 +2821,9 @@ describe("durable change journal v2", function () {
     };
     const gateway = {
       getItem: (itemId: number) =>
-        itemId === 7 ? { getNote: () => "<p>Before</p>" } : null,
+        itemId === 7
+          ? { getNote: () => "<p>Before</p>", reload: async () => undefined }
+          : null,
       listSettings: () => [
         {
           key: "export.quickCopy.setting",

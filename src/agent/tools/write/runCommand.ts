@@ -23,7 +23,7 @@ import {
   parseNotesDirectoryWritePolicy,
 } from "../../../utils/notesDirectoryConfig";
 import { ok, fail, validateObject } from "../shared";
-import { executeExternalMutation } from "../../services/mutationCoordinator";
+import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { sha256Bytes } from "../../store/journalRecoveryBlobStore";
 import { fingerprintText } from "../../contracts/actionOperationEvidence";
 

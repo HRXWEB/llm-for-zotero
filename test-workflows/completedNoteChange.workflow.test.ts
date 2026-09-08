@@ -113,6 +113,24 @@ describe("workflow: completed native note change", function () {
       const node = root!.querySelector<HTMLElement>(".llm-note-change-card")!;
       assert.exists(node);
       assert.equal(node.dataset.actionId, card.actionId);
+      const interrupted = JSON.parse(JSON.stringify(result));
+      interrupted.ok = false;
+      interrupted.content.noteChange.state = "unverified";
+      interrupted.content.noteChange.afterVerified = false;
+      const consolidated = workflow.renderToolResultForPanel(
+        panel.panelId,
+        result,
+        { priorResults: [interrupted, result] },
+      );
+      assert.lengthOf(
+        consolidated!.querySelectorAll(".llm-note-change-card"),
+        1,
+      );
+      assert.equal(
+        consolidated!.querySelector(".llm-plan-status")?.textContent,
+        "Applied",
+      );
+      consolidated?.remove();
       for (
         let i = 0;
         i < 100 && !node.textContent?.includes("Verified replacement.");
@@ -183,7 +201,7 @@ describe("workflow: completed native note change", function () {
       failedResult.content.noteChange.description =
         "The write failed; inspect the retained journal.";
       root = workflow.renderToolResultForPanel(panel.panelId, failedResult);
-      assert.include(root?.textContent, "Failed");
+      assert.include(root?.textContent, "Not applied");
       assert.notInclude(
         root?.querySelector(".llm-plan-status")?.textContent,
         "Applied",

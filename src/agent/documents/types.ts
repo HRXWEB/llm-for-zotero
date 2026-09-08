@@ -226,6 +226,7 @@ export type DocumentNoteBinding = Readonly<{
   documentVersion?: number;
   contentHash?: string;
   nativeContentHash?: string;
+  nativeContentHashVersion?: 1;
   parentItemId?: number;
   finalized?: boolean;
 }>;

@@ -1147,10 +1147,18 @@ export class ActionContractService {
       };
     }
     if (!params.ok) {
+      const noteState = (
+        innermostToolResult(params.content)?.noteChange as
+          | { state?: string }
+          | undefined
+      )?.state;
       return {
         ...base,
         verification: "unverified",
-        status: "failed",
+        status:
+          noteState === "unverified" || noteState === "mismatch"
+            ? "unverified"
+            : "failed",
         appliedTargets: [],
         alreadySatisfiedTargets: [],
       };

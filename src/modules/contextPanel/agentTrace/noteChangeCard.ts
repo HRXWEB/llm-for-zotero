@@ -17,20 +17,21 @@ export function renderNoteChangeCard(
   card.dataset.noteId = String(result.note.itemId);
   card.dataset.actionId = result.actionId;
   const layout = createDocumentCardLayout(doc, {
-    title: `${result.state === "failed" ? "Change failed for" : result.state === "proposed" ? "Proposed change to" : result.state === "no_op" ? "No changes to" : "Changed"} ‘${result.title}’`,
+    title: `${result.state === "unverified" ? "Verification unavailable for" : result.state === "mismatch" ? "Unexpected change to" : result.state === "failed" ? "Change not applied to" : result.state === "proposed" ? "Proposed change to" : result.state === "no_op" ? "No changes to" : "Changed"} ‘${result.title}’`,
     status: {
       proposed: "Awaiting review",
       applied: "Applied",
-      failed: "Failed",
+      failed: "Not applied",
+      mismatch: "Needs inspection",
+      unverified: "Unverified",
       undone: "Undone",
       no_op: "No changes needed",
     }[result.state],
-    statusKind:
-      result.state === "failed"
-        ? "error"
-        : result.state === "proposed"
-          ? "pending"
-          : "completed",
+    statusKind: ["failed", "mismatch", "unverified"].includes(result.state)
+      ? "error"
+      : result.state === "proposed"
+        ? "pending"
+        : "completed",
   });
   const description = doc.createElement("p");
   description.className = "llm-note-review-description";
@@ -88,14 +89,20 @@ export function renderNoteChangeCard(
     }),
   ])
     .then(([before, after, actions]) => {
+      if (result.afterVerified === false) {
+        const unavailable = doc.createElement("p");
+        unavailable.textContent =
+          "Native after-state is unavailable. No verified diff can be shown.";
+        layout.content.append(unavailable);
+        return;
+      }
       layout.content.append(
         renderDiffPreviewField(doc, {
           type: "diff_preview",
           id: "appliedNoteChanges",
-          label:
-            result.state === "failed"
-              ? "Recorded before and after state"
-              : "Applied changes",
+          label: ["failed", "mismatch", "unverified"].includes(result.state)
+            ? "Recorded before and after state"
+            : "Applied changes",
           before: normalizeNoteSourceText(before),
           after: normalizeNoteSourceText(after),
         }).element,

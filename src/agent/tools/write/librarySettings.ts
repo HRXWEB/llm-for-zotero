@@ -15,7 +15,7 @@ import {
   stateChangeInvocationPlan,
 } from "../../authorization/invocationPlan";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { executeExternalMutation } from "../../services/mutationCoordinator";
+import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { ok, fail, validateObject } from "../shared";
 
 type LibrarySettingsInput = {

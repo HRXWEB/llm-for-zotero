@@ -1,3 +1,4 @@
+import { canonicalNoteHtml } from "../../utils/noteHtml";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
 import {
   createFinalizedZoteroNote,
@@ -21,6 +22,41 @@ import {
   type DocumentActionState,
   type PlanDocument,
 } from "./types";
+
+/** Embed the finalized document's assets for both new and existing notes. */
+export async function finalizeDocumentNoteHtml(
+  document: PlanDocument,
+  {
+    noteId,
+    saveOptions,
+  }: {
+    noteId: number;
+    saveOptions?: import("../../modules/contextPanel/notePersistence").NotePersistenceSaveOptions;
+  },
+): Promise<{ html: string; warnings: string[] }> {
+  const blocks: string[] = [];
+  const warnings: string[] = [];
+  for (const asset of document.assets) {
+    const bytes = await readVerifiedAssetBytes(asset);
+    const imported = await importNoteImageAsset({
+      noteItemId: noteId,
+      bytes,
+      mimeType: asset.mimeType,
+      saveOptions,
+    });
+    if (!imported?.key) {
+      warnings.push(`Figure ${asset.assetId} could not be embedded`);
+      continue;
+    }
+    blocks.push(
+      `<figure><img data-attachment-key="${escapeNoteHtml(imported.key)}" alt="${escapeNoteHtml(asset.caption)}" /><figcaption>${escapeNoteHtml(asset.caption)}</figcaption></figure>`,
+    );
+  }
+  const html = blocks.length
+    ? `${document.visibleHtml}<h2>Figures</h2>${blocks.join("")}`
+    : document.visibleHtml;
+  return { html, warnings };
+}
 
 function resolveItemByKey(
   libraryID: number,
@@ -68,8 +104,10 @@ export async function savePlanDocumentAsNote(
   }
 }
 
-async function noteContentHash(html: string) {
-  return sha256Text(stripZoteroNoteWrapper(html));
+async function noteContentHash(html: string, canonical = true) {
+  return sha256Text(
+    canonical ? canonicalNoteHtml(html) : stripZoteroNoteWrapper(html),
+  );
 }
 
 /** A checkpoint may advance only the reservation it actually read. */
@@ -150,7 +188,10 @@ async function saveDocumentNote(
         (binding.contentHash && binding.contentHash !== document.contentHash) ||
         (binding.documentVersion &&
           binding.documentVersion !== document.documentVersion) ||
-        (await noteContentHash(existing.getNote())) !== expectedHash ||
+        (await noteContentHash(
+          existing.getNote(),
+          binding.nativeContentHashVersion === 1,
+        )) !== expectedHash ||
         binding.finalized === false
       ) {
         throw new Error(
@@ -222,6 +263,7 @@ async function saveDocumentNote(
     documentVersion: document.documentVersion,
     contentHash: document.contentHash,
     nativeContentHash: await noteContentHash(document.visibleHtml),
+    nativeContentHashVersion: 1,
     finalized: document.assets.length === 0,
   };
   const persistPending = (
@@ -242,27 +284,10 @@ async function saveDocumentNote(
     initialHtml: document.visibleHtml,
     finalize: document.assets.length
       ? async ({ noteId, saveOptions }) => {
-          const blocks: string[] = [];
-          const warnings: string[] = [];
-          for (const asset of document.assets) {
-            const bytes = await readVerifiedAssetBytes(asset);
-            const imported = await importNoteImageAsset({
-              noteItemId: noteId,
-              bytes,
-              mimeType: asset.mimeType,
-              saveOptions,
-            });
-            if (!imported?.key) {
-              warnings.push(`Figure ${asset.assetId} could not be embedded`);
-              continue;
-            }
-            blocks.push(
-              `<figure><img data-attachment-key="${escapeNoteHtml(imported.key)}" alt="${escapeNoteHtml(asset.caption)}" /><figcaption>${escapeNoteHtml(asset.caption)}</figcaption></figure>`,
-            );
-          }
-          const html = blocks.length
-            ? `${document.visibleHtml}<h2>Figures</h2>${blocks.join("")}`
-            : document.visibleHtml;
+          const { html, warnings } = await finalizeDocumentNoteHtml(document, {
+            noteId,
+            saveOptions,
+          });
           const candidate = {
             ...pendingNote,
             nativeContentHash: await noteContentHash(html),

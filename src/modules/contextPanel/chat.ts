@@ -372,10 +372,7 @@ import {
   mergeToolActivityPayload,
 } from "./agentTrace/toolActivityDedupe";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
-import {
-  renderStreamingMarkdownInto,
-  disposeStreamingMarkdown,
-} from "./streamingMarkdown";
+import { disposeStreamingMarkdown } from "./streamingMarkdown";
 import { getWebSourceAnchorsFromTrace } from "../../webAccess/attribution";
 import type { WebSourceAnchor } from "../../webAccess/types";
 import { decorateWebSourceIndicators } from "./webSourceIndicators";
@@ -386,6 +383,7 @@ import { getWebChatTargetByModelName } from "../../webchat/types";
 import {
   buildAssistantDisplayMarkdownForRender,
   decorateCompletedAssistantCitationLinks,
+  renderAssistantRichText,
 } from "./assistantRichText";
 export { buildAssistantDisplayMarkdownForRender } from "./assistantRichText";
 import {
@@ -12682,22 +12680,21 @@ function updateMountedAssistantViews(
         view.answer.className = "llm-assistant-answer";
         view.bubble.appendChild(view.answer);
       }
-      const source = buildAssistantDisplayMarkdownForRender(message);
-      if (message.streaming) {
-        renderStreamingMarkdownInto(
-          view.answer,
-          source,
-          box.ownerDocument,
-          () =>
-            stabilizeFollowBottomAfterAsyncChatContent(
-              body,
-              getConversationKey(item),
-              box,
-            ),
-        );
-      } else {
-        renderRenderedMarkdownInto(view.answer, source, box.ownerDocument);
-      }
+      renderAssistantRichText({
+        body,
+        panelItem: item,
+        bubble: view.answer as HTMLDivElement,
+        assistantMessage: message,
+        pairedUserMessage: view.user,
+        webSourceAnchors: getWebSourceAnchorsFromTrace(events),
+        incremental: true,
+        onContentRendered: () =>
+          stabilizeFollowBottomAfterAsyncChatContent(
+            body,
+            getConversationKey(item),
+            box,
+          ),
+      });
       view.text = message.text;
       view.quoteCitations = message.quoteCitations;
       view.quoteOverride = message.quoteDisplayOverride;
@@ -13812,8 +13809,14 @@ export function refreshChat(
           );
         } else
           try {
-            renderRenderedMarkdownInto(answerHost, safeText, doc, {
-              onAsyncContentRendered: () => {
+            renderAssistantRichText({
+              body,
+              panelItem: item,
+              bubble: answerHost as HTMLDivElement,
+              assistantMessage: msg,
+              pairedUserMessage: previousUserMessage,
+              webSourceAnchors,
+              onContentRendered: () => {
                 stabilizeFollowBottomAfterAsyncChatContent(
                   body,
                   conversationKey,

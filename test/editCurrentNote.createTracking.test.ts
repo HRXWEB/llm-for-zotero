@@ -1,3 +1,4 @@
+import { canonicalNoteHtml } from "../src/utils/noteHtml";
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
@@ -156,6 +157,8 @@ describe("editCurrentNote create tracking", function () {
       return "";
     }
 
+    async loadPrimaryData() {}
+
     async saveTx(options: { notifierQueue?: unknown } = {}) {
       this.saveOptionsHistory.push(options);
       if (!this.id) {
@@ -232,7 +235,12 @@ describe("editCurrentNote create tracking", function () {
           prefStore.set(key, value);
         },
       },
+      Utilities: { generateObjectKey: () => `KEY${nextNoteId}` },
       Items: {
+        getByLibraryAndKey: (libraryID: number, key: string) =>
+          [...savedItems.values()].find(
+            (item) => item.libraryID === libraryID && item.key === key,
+          ) || null,
         get: (id: number) =>
           savedItems.get(id) || (id === 9 ? parentItem : null),
       },
@@ -375,7 +383,7 @@ describe("editCurrentNote create tracking", function () {
         baseContext,
       )
     ).content;
-    assert.deepEqual(result, {
+    assert.deepInclude(result, {
       status: "created",
       noteId: 100,
       title: "",
@@ -389,7 +397,7 @@ describe("editCurrentNote create tracking", function () {
         note: {
           itemId: 100,
           libraryID: 1,
-          key: "NOTEKEY",
+          key: "KEY100",
           noteKind: "item",
           parentItemId: 9,
           dateAdded: "2026-08-28 10:00:00",
@@ -688,14 +696,14 @@ describe("editCurrentNote create tracking", function () {
       before: "<p>First paragraph</p><p>Second paragraph</p><p>Keep me.</p>",
       find: `First paragraph${separator}Second paragraph`,
       replacement: "Replacement",
-      after: "<p>Replacement</p><p></p><p>Keep me.</p>",
+      after: "<p>Replacement</p><p>Keep me.</p>",
     })),
     {
       name: "line breaks and nested blocks",
       before: "<div><h2>Heading</h2><p>First<br/>Second</p></div><p>After</p>",
       find: "Heading\nFirst\nSecond\nAfter",
       replacement: "Combined",
-      after: "<div><h2>Combined</h2><p><br/></p></div><p></p>",
+      after: "<div><h2>Combined</h2></div>",
     },
     {
       name: "list items and inline formatting around a multiline match",
@@ -713,21 +721,21 @@ describe("editCurrentNote create tracking", function () {
       find: "Start\nEnd",
       replacement: "Changed",
       after:
-        '<p>Changed<img data-attachment-key="IMAGE001"/></p><p></p><p><img data-attachment-key="IMAGE002"/>Keep</p>',
+        '<p>Changed<img data-attachment-key="IMAGE001"/></p><p><img data-attachment-key="IMAGE002"/>Keep</p>',
     },
     {
       name: "multiline Unicode entities and first-occurrence selection",
       before: "<p>&#x1F9E0; A &amp; B</p><p>C</p><p>🧠 A &amp; B</p><p>C</p>",
       find: "🧠 A & B\nC",
       replacement: "Result",
-      after: "<p>Result</p><p></p><p>🧠 A &amp; B</p><p>C</p>",
+      after: "<p>Result</p><p>🧠 A &amp; B</p><p>C</p>",
     },
     {
       name: "serialized newlines alongside paragraph boundaries",
       before: "<p>First</p>\r\n<p>Second</p>",
       find: "First\n\nSecond",
       replacement: "Result",
-      after: "<p>Result</p><p></p>",
+      after: "<p>Result</p>",
     },
     {
       name: "visible text rather than an attribute",
@@ -840,10 +848,7 @@ describe("editCurrentNote create tracking", function () {
     assert.isTrue(approved.ok);
     if (!approved.ok) return;
     await tool.execute(approved.value, baseContext);
-    assert.equal(
-      existing.getNote(),
-      "<h2>Revised summary.</h2><p><strong></strong></p><p></p>",
-    );
+    assert.equal(existing.getNote(), "<h2>Revised summary.</h2>");
   });
 
   it("does not match across a paragraph boundary that is missing from the selection", async function () {
@@ -911,7 +916,7 @@ describe("editCurrentNote create tracking", function () {
     } catch (caught) {
       error = caught;
     }
-    assert.match(String(error), /changed before this edit/);
+    assert.match(String(error), /changed after preparation/);
     assert.equal(existing.getNote(), "<p>Concurrent user revision</p>");
   });
 
@@ -988,7 +993,7 @@ describe("editCurrentNote create tracking", function () {
       )
     ).content;
 
-    assert.equal((result as any).result.status, "created");
+    assert.equal((result as any).status, "created");
     assert.equal(trackedNote.getNote(), "<p>Tracked response save</p>");
     assert.equal(getTrackedAssistantNoteForParent(9)?.id, 50);
     assert.lengthOf(childNotes(9), 2);
@@ -1022,7 +1027,7 @@ describe("editCurrentNote create tracking", function () {
       )
     ).content;
 
-    assert.equal((result as any).result.status, "created");
+    assert.equal((result as any).status, "created");
     assert.lengthOf(childNotes(9), 1);
     assert.include(childNotes(9)[0].getNote(), "Selected-paper note");
   });
@@ -1075,7 +1080,10 @@ describe("editCurrentNote create tracking", function () {
       action.steps[0].expectedPostconditionJson || "{}",
     ) as { checksum?: string };
 
-    assert.equal(postcondition.checksum, await sha256Text(persistedHtml));
+    assert.equal(
+      postcondition.canonicalChecksum,
+      await sha256Text(canonicalNoteHtml(persistedHtml)),
+    );
     const reverted = await revertActions({
       actions: [action],
       zoteroGateway: gateway,

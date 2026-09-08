@@ -156,6 +156,7 @@ export async function resolveWorkflowNoteDocument(
   request: AgentRuntimeRequest,
   documentId: string,
   targetItemId?: number,
+  mode: "create" | "edit" | "append" = "create",
 ): Promise<PlanDocument> {
   const progress = request.actionProgress;
   const receipt = progress?.materialOutputs?.find(
@@ -163,7 +164,7 @@ export async function resolveWorkflowNoteDocument(
   );
   const obligation = request.actionContract?.obligations.find(
     (entry) =>
-      entry.operation === "note_create" &&
+      entry.operation === `note_${mode}` &&
       entry.contentFrom === receipt?.outputId &&
       entry.targetBoundary?.frozenTargetIds.includes(targetItemId || 0),
   );
@@ -173,7 +174,7 @@ export async function resolveWorkflowNoteDocument(
     progress?.contractId !== request.actionContract?.id
   )
     throw new Error(
-      "The note must use the finalized workflow document and its exact authorized parent paper.",
+      "The note must use the finalized workflow document and its exact authorized destination.",
     );
   const document = await loadPlanDocument(documentId);
   if (

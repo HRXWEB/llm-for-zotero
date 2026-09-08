@@ -115,12 +115,18 @@ export async function listCurrentLibraryTargetIds(
   return uniqueNumbers(result.items.map((item) => item.itemId));
 }
 
-type ItemRequirement = "attachment" | "regular" | "top_level" | "concrete";
+type ItemRequirement =
+  | "attachment"
+  | "regular"
+  | "top_level"
+  | "concrete"
+  | "note";
 
 function itemSatisfiesRequirement(
   item: Zotero.Item,
   requirement: ItemRequirement,
 ): boolean {
+  if (requirement === "note") return item.isNote?.() === true;
   if (requirement === "attachment") return item.isAttachment?.() === true;
   if (requirement === "regular") return item.isRegularItem?.() === true;
   if (requirement === "top_level") {
@@ -229,15 +235,16 @@ async function resolveExplicitTargets(
   libraryID: number,
 ): Promise<number[] | undefined> {
   if (!intent.targetSelectors?.length) return undefined;
-  if (
-    !isLibraryMutationOperationType(intent.operation) ||
-    !libraryMutationTargetsItems(intent.operation)
-  )
-    return undefined;
-  const requirement =
-    intent.targetKind === "papers"
-      ? "regular"
-      : operationRequirement(intent.operation);
+  const requirement: ItemRequirement | undefined =
+    intent.operation === "note_edit" || intent.operation === "note_append"
+      ? "note"
+      : isLibraryMutationOperationType(intent.operation) &&
+          libraryMutationTargetsItems(intent.operation)
+        ? intent.targetKind === "papers"
+          ? "regular"
+          : operationRequirement(intent.operation)
+        : undefined;
+  if (!requirement) return undefined;
   let libraryItems: Zotero.Item[] | undefined;
   const ids: number[] = [];
   for (const selector of intent.targetSelectors) {
@@ -261,8 +268,9 @@ async function resolveExplicitTargets(
         .filter((entry): entry is Zotero.Item => Boolean(entry));
       const matches = libraryItems.filter(
         (entry) =>
+          itemSatisfiesRequirement(entry, requirement) &&
           String(entry.getField("title") || "").trim() ===
-          selector.value.trim(),
+            selector.value.trim(),
       );
       if (matches.length > 1)
         throw new ActionReferenceResolutionError(
@@ -289,6 +297,39 @@ async function resolveUnscopedBoundary(
   request: AgentRuntimeRequest,
   intent: AgentActionIntent,
 ): Promise<AgentActionObligation["targetBoundary"]> {
+  if (intent.operation === "note_edit" || intent.operation === "note_append") {
+    const libraryID = Number(request.libraryID);
+    const ids = intent.targetSelectors?.length
+      ? await resolveExplicitTargets(gateway, request, intent, libraryID)
+      : [intent.parameters?.targetNoteId || request.activeNoteContext?.noteId];
+    const frozenTargetIds = uniqueNumbers(
+      (ids || []).filter((id): id is number => Boolean(id)),
+    );
+    if (!frozenTargetIds.length) return undefined;
+    for (const id of frozenTargetIds) {
+      const note = gateway.getItem(id);
+      if (
+        !note ||
+        note.deleted ||
+        note.libraryID !== libraryID ||
+        !note.isNote?.()
+      )
+        throw new ActionReferenceResolutionError(
+          `The destination ${id} is not a live note in library ${libraryID}.`,
+        );
+    }
+    return {
+      kind: "selection",
+      libraryID,
+      frozenTargetIds,
+      scopeDigest: [
+        "v1",
+        "selection",
+        libraryID,
+        ...frozenTargetIds.slice().sort((a, b) => a - b),
+      ].join(":"),
+    };
+  }
   if (
     intent.operation === "note_create" &&
     (intent.parameters?.targetItemId ||

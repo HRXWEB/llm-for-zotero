@@ -1,3 +1,4 @@
+import { isSelfContainedSelectionEdit } from "../model/noteEditingPolicy";
 import { defaultInvocationPlan } from "../authorization/invocationPlan";
 import type { ActionContractService } from "../contracts/actionContract";
 import type { PlanAmendmentService } from "../plans/amendments";
@@ -135,9 +136,17 @@ export class AgentToolRegistry {
   private filterToolsForRequest(
     request: AgentRuntimeRequest,
   ): AgentToolDefinition<any, any>[] {
+    const selectionEdit = isSelfContainedSelectionEdit(request);
+    const noteTools = new Set([
+      "note_write",
+      "library_read",
+      "request_user_input",
+    ]);
     return Array.from(this.tools.values()).filter(
       (tool) =>
-        this.isModelVisibleTool(tool) && tool.isAvailable?.(request) !== false,
+        this.isModelVisibleTool(tool) &&
+        tool.isAvailable?.(request) !== false &&
+        (!selectionEdit || noteTools.has(tool.spec.name)),
     );
   }
 

@@ -4,7 +4,9 @@ import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { actionFixture, classifiedFixture } from "./helpers/semanticIntent";
 
 describe("semantic note editing contracts", function () {
-  const service = new ActionContractService({} as never);
+  const service = new ActionContractService({
+    getItem: (id: number) => ({ id, libraryID: 1, isNote: () => id === 3975 }),
+  } as never);
   for (const userText of [
     "help me rewrite this sentence",
     "Please shorten this paragraph",

@@ -503,6 +503,8 @@ function decodeDocumentNoteBinding(
       note.contentHash === undefined
         ? undefined
         : string(note.contentHash, "note.contentHash"),
+    nativeContentHashVersion:
+      note.nativeContentHashVersion === 1 ? 1 : undefined,
     nativeContentHash:
       note.nativeContentHash === undefined
         ? undefined

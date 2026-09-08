@@ -149,6 +149,10 @@ describe("menu action controller note routing", function () {
       return "";
     }
 
+    async reload() {
+      this.noteHtml = this.persistedNoteHtml.at(-1) || "";
+    }
+
     async saveTx() {
       this.persistedNoteHtml.push(this.noteHtml);
       if (!this.id) {

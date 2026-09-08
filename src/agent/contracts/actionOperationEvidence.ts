@@ -1,3 +1,4 @@
+import { noteHtmlMatches } from "../../utils/noteHtml";
 import type {
   AgentActionProposal,
   AgentToolActionDescriptor,
@@ -256,6 +257,31 @@ export function verifyNoteWriteTarget(
       targets: null,
       reason: `Created note ${noteId} is missing one or more requested collection memberships.`,
     };
+  }
+  const verification = result?.noteVerification as
+    | {
+        noteId?: number;
+        matches?: boolean;
+        html?: string;
+        expectedHtml?: string;
+      }
+    | undefined;
+  if (verification) {
+    if (
+      verification.noteId !== note.id ||
+      verification.matches !== true ||
+      typeof verification.html !== "string" ||
+      typeof verification.expectedHtml !== "string" ||
+      !noteHtmlMatches(String(note.getNote() || ""), verification.html) ||
+      !noteHtmlMatches(verification.html, verification.expectedHtml)
+    ) {
+      return {
+        targets: null,
+        reason:
+          "The native note evidence does not prove the prepared change on the bound note.",
+      };
+    }
+    return { targets: [itemTarget(noteId)] };
   }
   if (proposal.parameters?.expectedText?.trim()) {
     const actual = normalizeNotePlainText(

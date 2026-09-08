@@ -20,7 +20,7 @@ import {
 } from "../../../modules/contextPanel/paperAttribution";
 import { ok, fail, validateObject } from "../shared";
 import { getLocalParentPath } from "../../../utils/localPath";
-import { executeExternalMutation } from "../../services/mutationCoordinator";
+import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import {
   sha256Bytes,
   storeRecoveryBytes,

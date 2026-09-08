@@ -39,6 +39,8 @@ export function buildSavedNoteResultCards(
   return [
     {
       kind: "saved_note",
+      actionId:
+        typeof result.actionId === "string" ? result.actionId : undefined,
       title: note.getNoteTitle?.() || note.getDisplayTitle?.() || "Saved note",
       destination: `${library} › ${location}`,
       bodyHtml: note.getNote(),

@@ -68,7 +68,7 @@ describe("completed note changes", function () {
       42,
     );
     const [card] = buildNoteChangeResultCards(result)!;
-    assert.equal(card.state, "failed");
+    assert.equal(card.state, "mismatch");
     assert.equal(card.actionId, "failed-exact");
     assert.equal(
       await readRecoveryText(card.after),

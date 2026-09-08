@@ -7,7 +7,7 @@ import {
   resolveHighlightColor,
   type PdfRect,
 } from "../../services/pdfAnnotationGeometry";
-import { executeExternalMutation } from "../../services/mutationCoordinator";
+import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { LibraryMutationService } from "../../services/libraryMutationService";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 
