@@ -6,7 +6,10 @@ import type {
 } from "../../contracts/actionContract";
 import { createFallbackToolReceipts } from "../../contracts/actionEvaluation";
 import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
-import type { PlanAmendmentService } from "../../plans/amendments";
+import type {
+  ActionScopeDecision,
+  PlanAmendmentService,
+} from "../../plans/amendments";
 import type { PlanAmendmentGrant } from "../../plans/planAmendmentTypes";
 import { canonicalJson } from "../../services/libraryMutation/canonicalJson";
 import type {
@@ -48,6 +51,8 @@ export class InvocationController {
   private readonly assessor: InvocationAssessor;
   private readonly frozenContract: string;
   private amendment?: AuthorizedAmendment;
+  /** Exact proposal the host authorized on the agent's judgment (yolo only). */
+  private judgment?: { proposalDigest: string };
   private readonly childResults = new Map<
     string,
     import("../../types").AgentToolResult
@@ -207,7 +212,7 @@ export class InvocationController {
     };
   }
 
-  private amendmentDecision(assessed: AssessedInvocation) {
+  private amendmentDecision(assessed: AssessedInvocation): ActionScopeDecision {
     return (
       this.amendments?.decideActionScopeAmendment({
         planContext: this.context.request.planContext,
@@ -266,6 +271,16 @@ export class InvocationController {
     );
   }
 
+  private judgmentAccepts(assessed: AssessedInvocation): boolean {
+    if (!assessed.scopeFailure || !this.judgment) return false;
+    if (assessed.proposal.payloadDigest !== this.judgment.proposalDigest)
+      return false;
+    const decision = this.amendmentDecision(assessed);
+    return (
+      decision.kind === "execute" && decision.authority === "yolo_judgment"
+    );
+  }
+
   private async failAmendment(reason: unknown) {
     if (this.amendment && this.amendments)
       this.amendment = {
@@ -311,8 +326,11 @@ export class InvocationController {
           : createProposalConfirmationAction(assessed.proposal);
       return this.review(assessed, action);
     }
-    if (scopeDecision?.kind === "execute")
-      await this.authorizeAmendment(assessed, scopeDecision.authority);
+    if (scopeDecision?.kind === "execute") {
+      if (scopeDecision.authority === "yolo_judgment")
+        this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
+      else await this.authorizeAmendment(assessed, scopeDecision.authority);
+    }
     return this.execute(assessed);
   }
 
@@ -430,6 +448,7 @@ export class InvocationController {
       | "safe_confirmation"
       | "auto_policy"
       | "yolo"
+      | "yolo_judgment"
       | "plan_approval" = userApproval
       ? "safe_confirmation"
       : this.amendment?.grant.authority === "user"
@@ -439,9 +458,12 @@ export class InvocationController {
           assessed.authorization.authority === "plan_approval"
             ? "plan_approval"
             : assessed.authorization.kind === "execute" &&
-                assessed.authorization.authority === "yolo"
-              ? "yolo"
-              : "auto_policy");
+                assessed.authorization.authority === "yolo_judgment"
+              ? "yolo_judgment"
+              : assessed.authorization.kind === "execute" &&
+                  assessed.authorization.authority === "yolo"
+                ? "yolo"
+                : "auto_policy");
     const grant = {
       version: 2 as const,
       interaction: assessed.interaction,
@@ -512,7 +534,11 @@ export class InvocationController {
             "Conversation lifecycle changed before this tool could execute.",
           );
         assessed = await this.assessor.assess(prepared.input);
-        if (assessed.scopeFailure && !(await this.amendmentMatches(assessed))) {
+        if (
+          assessed.scopeFailure &&
+          !this.judgmentAccepts(assessed) &&
+          !(await this.amendmentMatches(assessed))
+        ) {
           await this.failAmendment(
             "The action targets or payload changed after amendment authorization.",
           );
@@ -601,6 +627,11 @@ export class InvocationController {
             name: this.call.name,
             ok: true,
             effect,
+            authority:
+              assessed.authorization.kind === "execute" &&
+              assessed.authorization.authority === "yolo_judgment"
+                ? "yolo_judgment"
+                : undefined,
             actionReceipts: this.receipts(
               {
                 ok: true,

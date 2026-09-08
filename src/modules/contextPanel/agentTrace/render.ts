@@ -4105,13 +4105,24 @@ function appendLegacyAgentTraceEvent(
       ) {
         return true;
       }
-      const row = summarizeAgentTraceToolResult(
+      let row = summarizeAgentTraceToolResult(
         entry.payload.name,
         entry.payload.ok,
         entry.payload.content,
         entry.payload.effect,
         ctx.requestSummary,
       );
+      if (entry.payload.authority === "yolo_judgment") {
+        // A write the agent chose on its own must always be visible, even
+        // when the tool has no presentation summary.
+        row = row
+          ? { ...row, text: `${row.text} (agent's own call)` }
+          : {
+              kind: "ok",
+              icon: "✓",
+              text: `${toolLabelFromName(entry.payload.name)} completed (agent's own call)`,
+            };
+      }
       if (row) {
         ctx.items.push({
           type: "action",

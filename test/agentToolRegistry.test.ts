@@ -6,6 +6,8 @@ import {
 } from "../src/agent/authorization/invocationPlan";
 import { buildActionCallDigest } from "../src/agent/authorization/proposal";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { evaluateActionContract } from "../src/agent/contracts/actionEvaluation";
+import { PlanAmendmentService } from "../src/agent/plans/amendments";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -1711,5 +1713,146 @@ describe("AgentToolRegistry", function () {
       JSON.stringify(prepared.execution.result.content),
       "no configured Action Contract verifier",
     );
+  });
+
+  const describeUnrequestedTagWrite = () => [
+    {
+      id: "tags:judgment",
+      proofDomain: "zotero_state" as const,
+      capability: "zotero.tags" as const,
+      operation: "apply_tags" as const,
+      source: "zotero_native" as const,
+      parameters: { tags: ["follow-up"] },
+      requestedTargets: ["item:41"],
+      destinationCollectionIds: [],
+    },
+  ];
+
+  function registerUnrequestedTagTool(
+    registry: AgentToolRegistry,
+    onWrite: () => void,
+  ) {
+    registry.register({
+      spec: {
+        name: "judgment_tags",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      describeAction: describeUnrequestedTagWrite,
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          targets: ["item:41"],
+          reason: "Tag a related paper on the agent's own initiative",
+        }),
+      execute: async () => {
+        onWrite();
+        return { content: { tagged: 1 }, effect: "applied" };
+      },
+    });
+  }
+
+  it("yolo executes an unrequested typed write under a persisted judgment grant", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+      new PlanAmendmentService(),
+    );
+    let writes = 0;
+    let checkpoints = 0;
+    registerUnrequestedTagTool(registry, () => writes++);
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const prepared = await registry.prepareExecution(
+      { id: "judgment", name: "judgment_tags", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "yolo-turn",
+        checkpointActionProgress: async () => {
+          checkpoints++;
+        },
+      },
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isTrue(prepared.execution.result.ok);
+    assert.equal(prepared.execution.result.authority, "yolo_judgment");
+    assert.equal(writes, 1);
+    assert.equal(checkpoints, 1);
+    assert.deepEqual(
+      request.actionProgress.authorizationGrants.map(
+        (grant: { authority: string; status: string }) => [
+          grant.authority,
+          grant.status,
+        ],
+      ),
+      [["yolo_judgment", "executed"]],
+    );
+    const receipts = prepared.execution.result.actionReceipts;
+    assert.lengthOf(receipts, 1);
+    assert.isUndefined(receipts[0].obligationId);
+    assert.equal(receipts[0].operation, "apply_tags");
+    assert.deepEqual(
+      evaluateActionContract(
+        request.actionContract,
+        receipts,
+        request.actionProgress,
+      ),
+      evaluateActionContract(
+        request.actionContract,
+        [],
+        request.actionProgress,
+      ),
+      "a judgment write neither satisfies nor fails the requested obligations",
+    );
+  });
+
+  it("auto still refuses the same unrequested write with a scope failure", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "auto" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+      new PlanAmendmentService(),
+    );
+    let writes = 0;
+    registerUnrequestedTagTool(registry, () => writes++);
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const prepared = await registry.prepareExecution(
+      { id: "refused", name: "judgment_tags", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "auto-turn",
+        checkpointActionProgress: async () => undefined,
+      },
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
+    assert.equal(
+      (prepared.execution.result.content as { code?: string }).code,
+      "different_operation",
+    );
+    assert.equal(writes, 0);
+    assert.isEmpty(request.actionProgress.authorizationGrants || []);
   });
 });

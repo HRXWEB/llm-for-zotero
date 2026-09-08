@@ -2390,6 +2390,7 @@ export class AgentRuntime {
           name: toolResult.name,
           ok: toolResult.ok,
           effect: toolResult.effect,
+          authority: toolResult.authority,
           actionReceipts: toolResult.actionReceipts,
           content: toolResult.content,
           artifacts: toolResult.artifacts,

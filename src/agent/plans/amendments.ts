@@ -55,6 +55,27 @@ export type PlanAmendmentDecision =
   | Readonly<{ kind: "review"; authority: "user" }>
   | Readonly<{ kind: "block"; reason: string }>;
 
+/** Scope-failure decisions include the yolo judgment grant, which has no plan ledger. */
+export type ActionScopeDecision =
+  | PlanAmendmentDecision
+  | Readonly<{ kind: "execute"; authority: "yolo_judgment" }>;
+
+const JUDGMENT_AMENDABLE_CODES: ReadonlySet<ScopeValidationFailure["code"]> =
+  new Set([
+    "different_operation",
+    "different_parameters",
+    "scope_mismatch",
+    "fixed_selection",
+    "added_target",
+    "incomplete_batch",
+  ]);
+
+const RAIL_RISK_SIGNALS = [
+  "protected_target",
+  "authorization_tampering",
+  "privilege_escalation",
+];
+
 export function classifyPlanAmendmentAuthority(params: {
   mode: OriginalAgentPermissionMode;
   goalImpact: PlanAmendmentGoalImpact;
@@ -132,39 +153,48 @@ export class PlanAmendmentService {
     actionImpact: "read_only" | "state_change" | "ambiguous" | "prohibited";
     riskSignals: readonly string[];
     hasHardConstraints: boolean;
-  }): PlanAmendmentDecision {
+  }): ActionScopeDecision {
     const plan = params.planContext;
     const details = params.failure.amendableObligation;
+    const railSignal = params.riskSignals.some((signal) =>
+      RAIL_RISK_SIGNALS.includes(signal),
+    );
     const hardBlocked =
       params.actionImpact === "prohibited" ||
       params.hasHardConstraints ||
-      params.riskSignals.some((signal) =>
-        [
-          "protected_target",
-          "authorization_tampering",
-          "privilege_escalation",
-        ].includes(signal),
-      );
-    if (
-      !plan ||
-      plan.phase !== "executing" ||
-      params.failure.code !== "added_target" ||
-      !details ||
-      !details.addedTargetIds.length ||
-      details.boundaryKind === undefined
-    ) {
-      return {
-        kind: "block",
-        reason:
-          "Only a host-validated addition inside an approved source can amend an executing Plan.",
-      };
+      railSignal;
+    const planAmendable = Boolean(
+      plan &&
+      plan.phase === "executing" &&
+      params.failure.code === "added_target" &&
+      details &&
+      details.addedTargetIds.length &&
+      details.boundaryKind !== undefined,
+    );
+    if (planAmendable) {
+      return this.decideAuthority({
+        provider: plan!.provider,
+        originalMode: params.originalMode,
+        goalImpact: "within_goal",
+        hardBlocked,
+      });
     }
-    return this.decideAuthority({
-      provider: plan.provider,
-      originalMode: params.originalMode,
-      goalImpact: "within_goal",
-      hardBlocked,
-    });
+    // Yolo judgment: the user delegated decisions. Violating proposals were
+    // already blocked by authorizeOriginalAction; here only the impact and
+    // integrity signals remain as rails.
+    if (
+      params.originalMode === "yolo" &&
+      params.actionImpact !== "prohibited" &&
+      !railSignal &&
+      JUDGMENT_AMENDABLE_CODES.has(params.failure.code)
+    ) {
+      return { kind: "execute", authority: "yolo_judgment" };
+    }
+    return {
+      kind: "block",
+      reason:
+        "Only a host-validated addition inside an approved source can amend an executing Plan.",
+    };
   }
 
   async digest(value: unknown): Promise<string> {

@@ -1175,6 +1175,95 @@ describe("autonomous Plan scope amendments", function () {
     );
   });
 
+  it("grants yolo judgment for unmatched conversation writes and keeps the rails", function () {
+    const service = new PlanAmendmentService();
+    const failure = {
+      code: "different_operation" as const,
+      message: "Action apply_tags does not match any authorized obligation.",
+      expectedCount: 1,
+      proposedCount: 1,
+      rejectedTargets: [],
+      missingTargets: [],
+    };
+    const base = {
+      planContext: undefined,
+      failure,
+      actionImpact: "state_change" as const,
+      riskSignals: [] as string[],
+      hasHardConstraints: false,
+    };
+    for (const code of [
+      "different_operation",
+      "different_parameters",
+      "scope_mismatch",
+      "fixed_selection",
+      "added_target",
+      "incomplete_batch",
+    ] as const) {
+      assert.deepEqual(
+        service.decideActionScopeAmendment({
+          ...base,
+          originalMode: "yolo",
+          failure: { ...failure, code },
+        }),
+        { kind: "execute", authority: "yolo_judgment" },
+        code,
+      );
+    }
+    for (const code of [
+      "hard_constraint",
+      "protected_target",
+      "closed_obligation",
+      "stale_scope",
+      "workflow_dependency",
+      "missing_typed_proposal",
+    ] as const) {
+      assert.equal(
+        service.decideActionScopeAmendment({
+          ...base,
+          originalMode: "yolo",
+          failure: { ...failure, code },
+        }).kind,
+        "block",
+        code,
+      );
+    }
+    assert.equal(
+      service.decideActionScopeAmendment({
+        ...base,
+        originalMode: "yolo",
+        riskSignals: ["protected_target"],
+      }).kind,
+      "block",
+    );
+    assert.equal(
+      service.decideActionScopeAmendment({
+        ...base,
+        originalMode: "yolo",
+        actionImpact: "prohibited",
+      }).kind,
+      "block",
+    );
+    // A present-but-unviolated hard constraint does not block judgment; the
+    // policy blocks violating proposals before this decision is consulted.
+    assert.equal(
+      service.decideActionScopeAmendment({
+        ...base,
+        originalMode: "yolo",
+        hasHardConstraints: true,
+      }).kind,
+      "execute",
+    );
+    for (const mode of ["safe", "auto"] as const) {
+      assert.equal(
+        service.decideActionScopeAmendment({ ...base, originalMode: mode })
+          .kind,
+        "block",
+        mode,
+      );
+    }
+  });
+
   it("requires review for semantic revision in Safe and Auto but not YOLO", function () {
     for (const mode of ["safe", "auto"] as const) {
       assert.deepEqual(

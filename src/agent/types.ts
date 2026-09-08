@@ -418,6 +418,7 @@ export type AgentEvent =
       name: string;
       ok: boolean;
       effect?: AgentToolEffect;
+      authority?: "yolo_judgment";
       actionReceipts: AgentActionReceipt[];
       content: unknown;
       artifacts?: AgentToolArtifact[];
@@ -857,6 +858,8 @@ export type AgentToolResult = {
   name: string;
   ok: boolean;
   effect?: AgentToolEffect;
+  /** Set when the host granted this effect on the agent's own judgment (yolo). */
+  authority?: "yolo_judgment";
   actionReceipts: AgentActionReceipt[];
   content: unknown;
   artifacts?: AgentToolArtifact[];
