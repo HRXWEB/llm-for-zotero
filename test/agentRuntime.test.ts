@@ -43,6 +43,7 @@ import {
   upsertAgentToolResultHandles,
 } from "../src/agent/store/toolResultHandles";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { PlanAmendmentService } from "../src/agent/plans/amendments";
 import {
   ActionContractService,
   describeLibraryMutationActions,
@@ -7138,6 +7139,109 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
+
+  for (const mode of ["yolo", "auto"] as const) {
+    it(`${mode}: an unrequested typed write is ${mode === "yolo" ? "applied on judgment" : "refused"}`, async function () {
+      const restoreDb = installMockDb();
+      try {
+        await initAgentChangeJournal();
+        globalThis.Zotero.Prefs.set(
+          "extensions.zotero.llmforzotero.originalAgentPermissionMode",
+          mode,
+        );
+        const registry = new AgentToolRegistry(
+          createTestActionContractService(),
+          new PlanAmendmentService(),
+        );
+        let writes = 0;
+        registry.register({
+          spec: {
+            name: "tag_related",
+            description: "tag a related paper",
+            inputSchema: { type: "object" },
+            executionClass: "external_effect",
+            requiresConfirmation: false,
+          },
+          validate: () => ({ ok: true, value: {} }),
+          describeAction: () => [
+            {
+              id: "apply_tags:judgment",
+              proofDomain: "zotero_state",
+              capability: "zotero.tags",
+              operation: "apply_tags",
+              source: "zotero_native",
+              parameters: { tags: ["follow-up"] },
+              requestedTargets: ["item:41"],
+              destinationCollectionIds: [],
+            },
+          ],
+          execute: async () => {
+            writes++;
+            return { content: { tagged: 1 }, effect: "applied" };
+          },
+        });
+        const call = { id: "call-1", name: "tag_related", arguments: {} };
+        const runtime = new AgentRuntime({
+          semanticInterpreter: declaredSemanticInterpreter,
+          registry,
+          adapterFactory: () =>
+            new MockAdapter(
+              [
+                {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: "",
+                    tool_calls: [call],
+                  },
+                },
+                {
+                  kind: "final",
+                  text: "Done.",
+                  assistantMessage: { role: "assistant", content: "Done." },
+                },
+              ],
+              { streaming: false, toolCalls: true, multimodal: false },
+            ),
+        });
+        const events: AgentEvent[] = [];
+        const outcome = await runtime.runTurn({
+          request: {
+            classifiedIntent: classifiedFixture(),
+            conversationKey: 1,
+            mode: "agent",
+            userText: "tidy up this folder",
+            model: "gpt-4o-mini",
+            apiBase: "https://api.openai.com/v1/chat/completions",
+            apiKey: "test",
+          },
+          onEvent: async (event) => {
+            events.push(event);
+          },
+        });
+        const toolResult = events.find((event) => event.type === "tool_result");
+        assert.exists(toolResult);
+        if (!toolResult || toolResult.type !== "tool_result") return;
+        assert.isFalse(
+          events.some((event) => event.type === "confirmation_required"),
+          "no card in either mode",
+        );
+        if (mode === "yolo") {
+          assert.equal(writes, 1);
+          assert.isTrue(toolResult.ok);
+          assert.equal(toolResult.authority, "yolo_judgment");
+          assert.equal(outcome.kind, "completed");
+        } else {
+          assert.equal(writes, 0);
+          assert.isFalse(toolResult.ok);
+          assert.isUndefined(toolResult.authority);
+        }
+      } finally {
+        restoreDb();
+      }
+    });
+  }
 });
 
 describe("web attribution runtime guard", function () {
