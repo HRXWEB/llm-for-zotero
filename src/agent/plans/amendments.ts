@@ -70,11 +70,11 @@ const JUDGMENT_AMENDABLE_CODES: ReadonlySet<ScopeValidationFailure["code"]> =
     "incomplete_batch",
   ]);
 
-const RAIL_RISK_SIGNALS = [
+const RAIL_RISK_SIGNALS: ReadonlySet<string> = new Set([
   "protected_target",
   "authorization_tampering",
   "privilege_escalation",
-];
+]);
 
 export function classifyPlanAmendmentAuthority(params: {
   mode: OriginalAgentPermissionMode;
@@ -157,7 +157,7 @@ export class PlanAmendmentService {
     const plan = params.planContext;
     const details = params.failure.amendableObligation;
     const railSignal = params.riskSignals.some((signal) =>
-      RAIL_RISK_SIGNALS.includes(signal),
+      RAIL_RISK_SIGNALS.has(signal),
     );
     const hardBlocked =
       params.actionImpact === "prohibited" ||

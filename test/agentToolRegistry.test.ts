@@ -1731,6 +1731,7 @@ describe("AgentToolRegistry", function () {
   function registerUnrequestedTagTool(
     registry: AgentToolRegistry,
     onWrite: () => void,
+    options: { withPendingAction?: boolean } = {},
   ) {
     registry.register({
       spec: {
@@ -1742,6 +1743,17 @@ describe("AgentToolRegistry", function () {
       },
       validate: (args) => ({ ok: true, value: args }),
       describeAction: describeUnrequestedTagWrite,
+      ...(options.withPendingAction
+        ? {
+            createPendingAction: () => ({
+              toolName: "judgment_tags",
+              title: "Tag a related paper",
+              confirmLabel: "Allow once",
+              cancelLabel: "Cancel",
+              fields: [],
+            }),
+          }
+        : {}),
       planInvocation: () =>
         stateChangeInvocationPlan({
           domains: ["zotero_library"],
@@ -1854,5 +1866,114 @@ describe("AgentToolRegistry", function () {
     );
     assert.equal(writes, 0);
     assert.isEmpty(request.actionProgress.authorizationGrants || []);
+  });
+
+  it("yolo executes a reviewed judgment write after the user approves it", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+      new PlanAmendmentService(),
+    );
+    let writes = 0;
+    registerUnrequestedTagTool(registry, () => writes++, {
+      withPendingAction: true,
+    });
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const prepared = await registry.prepareExecution(
+      { id: "reviewed-judgment", name: "judgment_tags", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "yolo-review-turn",
+        checkpointActionProgress: async () => undefined,
+      },
+      { forceConfirmation: true },
+    );
+    assert.equal(prepared.kind, "confirmation");
+    if (prepared.kind !== "confirmation") return;
+    const executed = await prepared.execute({ approved: true });
+    assert.equal(executed.kind, "result");
+    if (executed.kind !== "result") return;
+    assert.isTrue(
+      executed.execution.result.ok,
+      JSON.stringify(executed.execution.result.content),
+    );
+    assert.equal(writes, 1);
+    assert.deepEqual(
+      request.actionProgress.authorizationGrants.map(
+        (grant: { authority: string; status: string }) => [
+          grant.authority,
+          grant.status,
+        ],
+      ),
+      [["safe_confirmation", "executed"]],
+      "user approval takes precedence over the agent's judgment",
+    );
+    assert.isUndefined(
+      executed.execution.result.authority,
+      "a write the user reviewed is not labelled as the agent's own call",
+    );
+  });
+
+  it("yolo ledgers an off-plan judgment write as yolo_judgment inside an executing plan", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+      new PlanAmendmentService(),
+    );
+    let writes = 0;
+    registerUnrequestedTagTool(registry, () => writes++);
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    request.planContext = {
+      phase: "executing",
+      provider: "original",
+      planId: "plan-1",
+      revision: 1,
+      executionId: "exec-1",
+      approvedDigest: "sha256:test",
+    };
+    const prepared = await registry.prepareExecution(
+      { id: "off-plan-judgment", name: "judgment_tags", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "yolo-plan-turn",
+        checkpointActionProgress: async () => undefined,
+      },
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isTrue(
+      prepared.execution.result.ok,
+      JSON.stringify(prepared.execution.result.content),
+    );
+    assert.equal(writes, 1);
+    assert.deepEqual(
+      request.actionProgress.authorizationGrants.map(
+        (grant: { authority: string; status: string }) => [
+          grant.authority,
+          grant.status,
+        ],
+      ),
+      [["yolo_judgment", "executed"]],
+      "the judgment marker, not the plan-approval policy, decides the authority",
+    );
+    assert.equal(prepared.execution.result.authority, "yolo_judgment");
   });
 });

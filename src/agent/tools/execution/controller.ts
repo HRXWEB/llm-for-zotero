@@ -45,6 +45,13 @@ type AuthorizedAmendment = {
   grant: PlanAmendmentGrant;
   failure: ScopeValidationFailure;
 };
+/** Authority recorded on the persisted authorization grant for one invocation. */
+type GrantAuthority =
+  | "safe_confirmation"
+  | "auto_policy"
+  | "yolo"
+  | "yolo_judgment"
+  | "plan_approval";
 
 /** Owns the lifetime of one invocation; authority is bound to exact assessed payloads. */
 export class InvocationController {
@@ -271,14 +278,25 @@ export class InvocationController {
     );
   }
 
-  private judgmentAccepts(assessed: AssessedInvocation): boolean {
-    if (!assessed.scopeFailure || !this.judgment) return false;
-    if (assessed.proposal.payloadDigest !== this.judgment.proposalDigest)
-      return false;
+  /** The scope decision grants judgment for this exact scope failure. */
+  private grantsJudgment(assessed: AssessedInvocation): boolean {
+    if (!assessed.scopeFailure) return false;
     const decision = this.amendmentDecision(assessed);
     return (
       decision.kind === "execute" && decision.authority === "yolo_judgment"
     );
+  }
+
+  /** True when this exact payload is the one the host granted on judgment. */
+  private judgmentGranted(assessed: AssessedInvocation): boolean {
+    return (
+      this.judgment !== undefined &&
+      this.judgment.proposalDigest === assessed.proposal.payloadDigest
+    );
+  }
+
+  private judgmentAccepts(assessed: AssessedInvocation): boolean {
+    return this.judgmentGranted(assessed) && this.grantsJudgment(assessed);
   }
 
   private async failAmendment(reason: unknown) {
@@ -406,8 +424,13 @@ export class InvocationController {
           }),
           false,
         );
-      if (assessed.scopeFailure)
-        await this.authorizeAmendment(assessed, "user");
+      if (assessed.scopeFailure) {
+        // A judgment write has no plan ledger to amend; the review only adds
+        // the user's approval on top of the host's judgment grant.
+        if (this.grantsJudgment(assessed))
+          this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
+        else await this.authorizeAmendment(assessed, "user");
+      }
       // This digest exists only after a validated, real review resolution.
       return this.execute(assessed, assessed.proposal.payloadDigest);
     } catch (error) {
@@ -424,6 +447,36 @@ export class InvocationController {
         canonicalJson(this.context.request.actionContract || null) ===
           this.frozenContract)
     );
+  }
+
+  /**
+   * The one authority this invocation executes under, most specific first:
+   * a real user review, then a plan amendment grant, then the judgment marker
+   * (the single source of truth for judgment, in or out of a Plan), and
+   * finally the policy's own verdict.
+   */
+  private grantAuthority(
+    assessed: AssessedInvocation,
+    userApproval?: string,
+  ): GrantAuthority {
+    if (userApproval) return "safe_confirmation";
+    const amended = this.amendment?.grant.authority;
+    if (amended) return amended === "user" ? "safe_confirmation" : amended;
+    if (this.judgmentGranted(assessed)) return "yolo_judgment";
+    const policy =
+      assessed.authorization.kind === "execute"
+        ? assessed.authorization.authority
+        : undefined;
+    switch (policy) {
+      case "plan_approval":
+        return "plan_approval";
+      case "yolo_judgment":
+        return "yolo_judgment";
+      case "yolo":
+        return "yolo";
+      default:
+        return "auto_policy";
+    }
   }
 
   private async stageAuthority(
@@ -444,26 +497,7 @@ export class InvocationController {
       throw new Error(
         "Action authorization could not be persisted before execution.",
       );
-    const authority:
-      | "safe_confirmation"
-      | "auto_policy"
-      | "yolo"
-      | "yolo_judgment"
-      | "plan_approval" = userApproval
-      ? "safe_confirmation"
-      : this.amendment?.grant.authority === "user"
-        ? "safe_confirmation"
-        : this.amendment?.grant.authority ||
-          (assessed.authorization.kind === "execute" &&
-          assessed.authorization.authority === "plan_approval"
-            ? "plan_approval"
-            : assessed.authorization.kind === "execute" &&
-                assessed.authorization.authority === "yolo_judgment"
-              ? "yolo_judgment"
-              : assessed.authorization.kind === "execute" &&
-                  assessed.authorization.authority === "yolo"
-                ? "yolo"
-                : "auto_policy");
+    const authority = this.grantAuthority(assessed, userApproval);
     const grant = {
       version: 2 as const,
       interaction: assessed.interaction,
@@ -607,6 +641,11 @@ export class InvocationController {
             `${this.call.name} completed without the required explicit write effect. Its outcome is unknown; inspect current state before retrying.`,
           );
         await this.completeAmendment();
+        // The staged grant already resolved the one authority; a tool with no
+        // staged grant (not an external effect) resolves it the same way.
+        const authority = grant
+          ? grant.authority
+          : this.grantAuthority(assessed, userApproval);
         const effect =
           this.tool.spec.executionClass === "external_effect"
             ? output.effect
@@ -628,10 +667,7 @@ export class InvocationController {
             ok: true,
             effect,
             authority:
-              assessed.authorization.kind === "execute" &&
-              assessed.authorization.authority === "yolo_judgment"
-                ? "yolo_judgment"
-                : undefined,
+              authority === "yolo_judgment" ? "yolo_judgment" : undefined,
             actionReceipts: this.receipts(
               {
                 ok: true,

@@ -7287,6 +7287,36 @@ describe("agentTrace render", function () {
     assert.include(actionTexts, "Invoked Skill: evidence-based-qa");
     assert.notInclude(actionTexts, "Using Skill: evidence-based-qa");
   });
+
+  it("labels a judgment write as the agent's own call", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-judgment",
+        seq: 1,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-judgment",
+          name: "judgment_tags",
+          ok: true,
+          actionReceipts: [],
+          content: { tagged: 1 },
+          authority: "yolo_judgment",
+        },
+        createdAt: 1,
+      },
+    ];
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    const rows = items.flatMap((item) =>
+      item.type === "action" ? [item.row.text] : [],
+    );
+    // The trace always opens with the request row; the judgment write must add
+    // exactly one visible row after it.
+    assert.deepEqual(rows, [
+      "Request received",
+      "Judgment Tags completed (agent's own call)",
+    ]);
+  });
 });
 
 describe("new research progress presentation", function () {
@@ -7338,34 +7368,4 @@ describe("new research progress presentation", function () {
       assert.include(serialized, "(Smith, 2024)");
       assert.isTrue(result.items.some((item) => item.type === "inline_text"));
     });
-
-  it("labels a judgment write as the agent's own call", function () {
-    const events: AgentRunEventRecord[] = [
-      {
-        runId: "run-judgment",
-        seq: 1,
-        eventType: "tool_result",
-        payload: {
-          type: "tool_result",
-          callId: "call-judgment",
-          name: "judgment_tags",
-          ok: true,
-          actionReceipts: [],
-          content: { tagged: 1 },
-          authority: "yolo_judgment",
-        },
-        createdAt: 1,
-      },
-    ];
-    const { items } = buildAgentTraceDisplayItems(events, null);
-    const rows = items.flatMap((item) =>
-      item.type === "action" ? [item.row.text] : [],
-    );
-    // The trace always opens with the request row; the judgment write must add
-    // exactly one visible row after it.
-    assert.deepEqual(rows, [
-      "Request received",
-      "Judgment Tags completed (agent's own call)",
-    ]);
-  });
 });
