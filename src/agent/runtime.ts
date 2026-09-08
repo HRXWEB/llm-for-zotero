@@ -1,3 +1,5 @@
+import { buildPaperDisplayLabels } from "../shared/paperDisplayLabels";
+import { listScopeSnapshotItems } from "./research/store";
 import { resolvePreparedActionReview } from "./tools/execution/review";
 import { ensureModelCapabilities } from "../modelCapabilities";
 import { readAttachmentBytes } from "../modules/contextPanel/attachmentStorage";
@@ -1424,6 +1426,28 @@ export class AgentRuntime {
           screenshotCount: request.screenshots?.length || 0,
         },
       });
+      const displaySnapshot =
+        approvedPlanArtifact?.contract?.investigation?.scopeSnapshot;
+      if (displaySnapshot) {
+        const papers = await listScopeSnapshotItems(displaySnapshot.snapshotId);
+        const displayLabels = Object.fromEntries(
+          buildPaperDisplayLabels(
+            papers.map((paper) => ({
+              ...paper,
+              identity: `${paper.libraryID}:${paper.itemKey}`,
+            })),
+          ),
+        );
+        request.metadata = {
+          ...request.metadata,
+          paperDisplayLabels: displayLabels,
+        };
+        await emit({
+          type: "provider_event",
+          providerType: "paper_display_labels",
+          payload: { version: 1, displayLabels },
+        });
+      }
       const captureInstructionInventory =
         request.metadata?.instructionHarnessInventory === true;
       let renderedPrompt = await renderAgentPromptEnvelope(

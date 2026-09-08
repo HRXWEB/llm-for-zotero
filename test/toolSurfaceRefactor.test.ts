@@ -685,7 +685,8 @@ describe("semantic tool surface", function () {
     assert.isFalse(parsed.ok);
     if (parsed.ok) return;
     assert.include(parsed.error, "title");
-    assert.include(parsed.error, "paperContext, itemId, contextItemId");
+    assert.include(parsed.error, "itemId and optional contextItemId only");
+    assert.notInclude(parsed.error, "Use only paperContext");
   });
 
   it("paper_read advertises non-empty target shapes without root composition", function () {
@@ -700,7 +701,7 @@ describe("semantic tool surface", function () {
         target?: { anyOf?: unknown[]; description?: string };
         targets?: {
           minItems?: number;
-          items?: { anyOf?: unknown[] };
+          items?: { anyOf?: unknown[]; required?: string[] };
           description?: string;
         };
       };
@@ -709,7 +710,7 @@ describe("semantic tool surface", function () {
       assert.notProperty(schema, keyword);
     }
     assert.isNotEmpty(schema.properties?.target?.anyOf);
-    assert.isNotEmpty(schema.properties?.targets?.items?.anyOf);
+    assert.deepEqual(schema.properties?.targets?.items?.required, ["itemId"]);
     assert.equal(schema.properties?.targets?.minItems, 1);
     assert.match(tool.spec.description, /target or targets, never both/i);
     assert.match(tool.spec.description, /omit both/i);
@@ -2668,7 +2669,10 @@ describe("semantic tool surface", function () {
       assert.exists(tool);
       const validated = tool!.validate({
         mode: "full",
-        target: { paperContext },
+        target: {
+          itemId: paperContext.itemId,
+          contextItemId: paperContext.contextItemId,
+        },
         query: "Read the complete text.",
       });
       assert.equal(validated.ok, true);
@@ -2786,7 +2790,10 @@ describe("semantic tool surface", function () {
 
     const conflicting = tool.validate({
       mode: "full",
-      target: { paperContext: activePaper },
+      target: {
+        itemId: activePaper.itemId,
+        contextItemId: activePaper.contextItemId,
+      },
       query: "Read the complete paper.",
     });
     assert.equal(conflicting.ok, true);
@@ -2845,7 +2852,7 @@ describe("semantic tool surface", function () {
     }
     assert.deepEqual(prepared, []);
 
-    await tool.execute(validated.value, {
+    const activeOutput = await tool.execute(validated.value, {
       ...baseContext,
       request: {
         ...baseContext.request,
@@ -2861,6 +2868,12 @@ describe("semantic tool surface", function () {
       },
     });
     assert.deepEqual(prepared, [activePaper.title]);
+    assert.include(
+      tool.presentation!.summaries!.onSuccess!({
+        content: activeOutput,
+      } as never),
+      "(Active Selected Paper, n.d.)",
+    );
 
     prepared.length = 0;
     await tool.execute(validated.value, {
@@ -2905,9 +2918,16 @@ describe("semantic tool surface", function () {
           }),
         }),
       },
-    })) as { coverageReceipt: { paperCount: number } };
+    })) as {
+      coverageReceipt: { paperCount: number };
+      papers: Array<{ displayLabel: string }>;
+    };
     assert.deepEqual(prepared, [firstPaper.title, activePaper.title]);
     assert.equal(allSelectedOutput.coverageReceipt.paperCount, 2);
+    assert.equal(
+      allSelectedOutput.papers[0].displayLabel,
+      "(First Selected Paper, n.d.)",
+    );
   });
 
   it("paper_read targeted honors explicit pages even when a query is present", async function () {

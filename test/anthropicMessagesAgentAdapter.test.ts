@@ -282,7 +282,10 @@ describe("AnthropicMessagesAgentAdapter", function () {
       Record<string, unknown>
     >;
     assert.isArray(properties.target.anyOf);
-    assert.isArray((properties.targets.items as Record<string, unknown>).anyOf);
+    assert.deepEqual(
+      (properties.targets.items as Record<string, unknown>).required,
+      ["itemId"],
+    );
   });
 
   for (const provider of [

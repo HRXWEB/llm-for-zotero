@@ -1,3 +1,4 @@
+import { projectPaperReferences } from "../../../shared/paperDisplayLabels";
 import { getAgentRuntime } from "../../../agent";
 import {
   exportPlanDocumentMarkdown,
@@ -4332,6 +4333,32 @@ function appendSharedAgentTraceEvent(
   }
 }
 
+function researchDisplayLabels(
+  events: readonly AgentRunEventRecord[],
+): Map<string, string> | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index].payload;
+    const values =
+      event.type === "provider_event" &&
+      event.providerType === "paper_display_labels" &&
+      event.payload?.version === 1
+        ? event.payload.displayLabels
+        : event.type === "tool_result" &&
+            event.ok &&
+            ["research_update", "update_plan"].includes(event.name) &&
+            isAgentTraceRecord(event.content)
+          ? event.content.displayLabels
+          : undefined;
+    if (values && typeof values === "object")
+      return new Map(
+        Object.entries(values).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
+  }
+  return undefined;
+}
+
 type TraceProjection = ReturnType<typeof buildAgentTraceDisplayItemsCanonical>;
 const streamingProjections = new WeakMap<
   Message,
@@ -4342,6 +4369,7 @@ const streamingProjections = new WeakMap<
     text: string;
     user: Message | null | undefined;
     projection: TraceProjection;
+    labels?: Map<string, string>;
     tail?: Extract<AgentRunEventRecord["payload"], { type: "reasoning" }>;
   }
 >();
@@ -4388,6 +4416,11 @@ export function buildAgentTraceDisplayItems(
         readAgentTraceText(tail.details) ||
         readAgentTraceText(tail.summary) ||
         undefined;
+      if (cached.labels && lastItem.summary)
+        lastItem.summary = projectPaperReferences(
+          lastItem.summary,
+          cached.labels,
+        );
       cached.count = events.length;
       cached.last = events[events.length - 1];
       return cached.projection;
@@ -4402,11 +4435,14 @@ export function buildAgentTraceDisplayItems(
     const compacted = compactAgentTraceEvents(events);
     const tail = compacted[compacted.length - 1]?.payload;
     const lastItem = projection.items[projection.items.length - 1];
+    const labels = researchDisplayLabels(events);
     const canAppend =
       tail?.type === "reasoning" &&
       lastItem?.type === "reasoning" &&
-      lastItem.summary ===
-        (readAgentTraceText(tail.details) || readAgentTraceText(tail.summary));
+      (Boolean(labels) ||
+        lastItem.summary ===
+          (readAgentTraceText(tail.details) ||
+            readAgentTraceText(tail.summary)));
     streamingProjections.set(assistantMessage, {
       events,
       count: events.length,
@@ -4415,6 +4451,7 @@ export function buildAgentTraceDisplayItems(
       user: userMessage,
       projection,
       tail: canAppend ? { ...tail } : undefined,
+      labels,
     });
   } else if (assistantMessage) streamingProjections.delete(assistantMessage);
   return projection;
@@ -4545,8 +4582,36 @@ function buildAgentTraceDisplayItemsCanonical(
     !finalText &&
     (!hasTerminalInlineText || !hasCanonicalAssistantText);
 
+  const labels = researchDisplayLabels(events);
+  const presentedItems = labels
+    ? displayItems.map((item): AgentTraceDisplayItem => {
+        if (item.type === "inline_text")
+          return { ...item, text: projectPaperReferences(item.text, labels) };
+        if (item.type === "reasoning")
+          return {
+            ...item,
+            summary: item.summary
+              ? projectPaperReferences(item.summary, labels)
+              : undefined,
+            details: item.details
+              ? projectPaperReferences(item.details, labels)
+              : undefined,
+          };
+        if (item.type === "message")
+          return { ...item, text: projectPaperReferences(item.text, labels) };
+        if (item.type === "action")
+          return {
+            ...item,
+            row: {
+              ...item.row,
+              text: projectPaperReferences(item.row.text, labels),
+            },
+          };
+        return item;
+      })
+    : displayItems;
   return {
-    items: displayItems,
+    items: presentedItems,
     isInterleaved,
     inlineTextReplacesAssistantText,
   };
@@ -4818,7 +4883,7 @@ function renderPlanContainer(params: {
   const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
     const markdown = params.doc.createElement("div");
     markdown.className = "llm-plan-markdown";
-    const source =
+    const rawSource =
       artifact.nativePlanning?.proposal?.markdown ||
       [
         artifact.explanation?.trim() || "",
@@ -4826,6 +4891,10 @@ function renderPlanContainer(params: {
       ]
         .filter(Boolean)
         .join("\n\n");
+    const labels = researchDisplayLabels(params.events);
+    const source = labels
+      ? projectPaperReferences(rawSource, labels)
+      : rawSource;
     try {
       renderRenderedMarkdownInto(markdown, source, params.doc);
     } catch {
@@ -5854,7 +5923,10 @@ export function renderAgentTrace({
     // second copy below the card. Execution turns still render their final
     // answer normally; the live request owns execution progress separately.
     if (visiblePlanProjection.artifact) onInterleavedText?.();
-    const planSignature = JSON.stringify(visiblePlanProjection);
+    const planSignature = JSON.stringify([
+      visiblePlanProjection,
+      [...(researchDisplayLabels(events) || [])],
+    ]);
     if (view.plan?.signature !== planSignature) {
       if (view.plan) disposePlanCard(view.plan.node);
       view.plan = {

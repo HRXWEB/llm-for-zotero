@@ -274,7 +274,7 @@ describe("multiContextPlanner", function () {
     assert.include(full.contextText, "Full Paper Contexts:");
     assert.include(full.contextText, "Paper 1");
     assert.include(full.contextText, "Citation data for this paper:");
-    assert.include(full.contextText, "sourceLabel: (Paper 3)");
+    assert.include(full.contextText, "sourceLabel: (Paper C, n.d.)");
     assert.isAbove(full.estimatedTokens, 0);
   });
 

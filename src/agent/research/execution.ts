@@ -1,3 +1,4 @@
+import { buildPaperDisplayLabels } from "../../shared/paperDisplayLabels";
 import { inspectResearch } from "./inspection";
 import { recordResearchReductions } from "./recordReductions";
 import { planExecutionCoordinator } from "../plans/coordinator";
@@ -86,6 +87,12 @@ export async function executeResearchUpdate(
   const snapshot = await listScopeSnapshotItems(job.snapshotId);
   const snapshotByKey = new Map(
     snapshot.map((entry) => [`${entry.libraryID}:${entry.itemKey}`, entry]),
+  );
+  const displayLabels = buildPaperDisplayLabels(
+    snapshot.map((entry) => ({
+      ...entry,
+      identity: `${entry.libraryID}:${entry.itemKey}`,
+    })),
   );
   const taskEvidence = await listExecutionTaskEvidence(plan.executionId);
   const verifiedReads = new Map(
@@ -290,6 +297,7 @@ export async function executeResearchUpdate(
         ),
         gateway,
         requiredEvidenceDepth: investigation.requiredEvidenceDepth,
+        displayLabels,
       });
     }
   }
@@ -334,6 +342,7 @@ export async function executeResearchUpdate(
   });
   const content = {
     progress: progress(next),
+    displayLabels: Object.fromEntries(displayLabels),
     inventoriedItems,
     ...(readingManifest
       ? {
@@ -356,6 +365,7 @@ export async function executeResearchUpdate(
     const compactRemainingManifest = remainingReadingManifest.map((entry) => ({
       identity: entry.identity,
       title: entry.title,
+      displayLabel: displayLabels.get(entry.identity),
       readable: entry.readable,
       evidenceDepthTarget: entry.evidenceDepthTarget,
       target: entry.target,

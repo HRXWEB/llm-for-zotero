@@ -1,3 +1,7 @@
+import {
+  formatPaperDisplayLabel,
+  type PaperDisplayMetadata,
+} from "../../../shared/paperDisplayLabels";
 import type {
   AgentToolContext,
   AgentToolDefinition,
@@ -21,14 +25,10 @@ import {
   buildQuoteCitation,
   mergeQuoteCitations,
 } from "../../../modules/contextPanel/quoteCitations";
+import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
-  fail,
-  normalizePositiveInt,
-  ok,
-  PAPER_CONTEXT_REF_SCHEMA,
-  validateObject,
-} from "../shared";
-import {
+  PAPER_TARGET_SELECTOR_SCHEMA,
+  paperTargetInputIssues,
   buildCaptureFollowupMessage,
   semanticPdfMode,
   normalizeExplicitTargetSyntax,
@@ -91,7 +91,7 @@ export type PaperReadFigureExtractionResult = {
 export type PaperReadFullResult = {
   mode: "full";
   status: "complete" | "partial" | "unreadable";
-  papers: FullReadPaperResult[];
+  papers: (FullReadPaperResult & { displayLabel: string })[];
   coverageReceipt: FullReadCoverageReceipt;
   synthesisContext: string;
   warnings: string[];
@@ -699,7 +699,9 @@ function getUniqueSourceLabels(entries: unknown[]): string[] {
     const record = validateObject<Record<string, unknown>>(entry)
       ? entry
       : null;
-    const sourceLabel = normalizeString(record?.sourceLabel);
+    const sourceLabel =
+      normalizeString(record?.displayLabel) ||
+      normalizeString(record?.sourceLabel);
     if (!sourceLabel || seen.has(sourceLabel)) continue;
     seen.add(sourceLabel);
     out.push(sourceLabel);
@@ -880,17 +882,13 @@ export function createPaperReadTool(
             description:
               "Optional explicit paper or visual target. Provide target or targets, never both; omit both to use the current turn's paper scope.",
             properties: {
-              contextItemId: { type: "number" },
-              itemId: { type: "number" },
-              paperContext: PAPER_CONTEXT_REF_SCHEMA,
+              ...PAPER_TARGET_SELECTOR_SCHEMA.properties,
               attachmentId: { type: "string" },
               name: { type: "string" },
             },
             additionalProperties: false,
             anyOf: [
-              { required: ["contextItemId"] },
               { required: ["itemId"] },
-              { required: ["paperContext"] },
               { required: ["attachmentId"] },
               { required: ["name"] },
             ],
@@ -900,20 +898,7 @@ export function createPaperReadTool(
             minItems: 1,
             description:
               "Optional explicit paper targets. Provide target or targets, never both; omit both to use the current turn's paper scope.",
-            items: {
-              type: "object",
-              properties: {
-                contextItemId: { type: "number" },
-                itemId: { type: "number" },
-                paperContext: PAPER_CONTEXT_REF_SCHEMA,
-              },
-              additionalProperties: false,
-              anyOf: [
-                { required: ["contextItemId"] },
-                { required: ["itemId"] },
-                { required: ["paperContext"] },
-              ],
-            },
+            items: PAPER_TARGET_SELECTOR_SCHEMA,
           },
           query: { type: "string" },
           queryVariants: {
@@ -984,7 +969,10 @@ export function createPaperReadTool(
             const receipt = c?.coverageReceipt as
               | { processedChunks?: number; totalChunks?: number }
               | undefined;
-            return `Read ${receipt?.processedChunks || 0}/${receipt?.totalChunks || 0} full-text chunks`;
+            const sources = formatSourcePhrase(
+              getUniqueSourceLabels(papers || []),
+            );
+            return `Read ${receipt?.processedChunks || 0}/${receipt?.totalChunks || 0} full-text chunks${sources ? ` from ${sources}` : ""}`;
           }
           if (mode === "overview" && results?.length) {
             const sourcePhrase = formatSourcePhrase(
@@ -1035,7 +1023,18 @@ export function createPaperReadTool(
         maxCount: maxTargets,
       });
       if (targetSyntax.kind === "invalid") {
-        return fail(`${targetSyntax.code}: ${targetSyntax.message}`);
+        const issues =
+          mode !== "visual" && mode !== "capture"
+            ? paperTargetInputIssues(args)
+            : [];
+        return fail(
+          `${targetSyntax.code}: ${issues.length ? issues.join("\n") : targetSyntax.message}`,
+        );
+      }
+      if (targetSyntax.kind === "paper_selectors") {
+        const issues = paperTargetInputIssues(args);
+        if (issues.length)
+          return fail(`unsupported_target_selector: ${issues.join("\n")}`);
       }
       const explicitTarget =
         targetSyntax.kind === "visual_selector"
@@ -1142,6 +1141,23 @@ export function createPaperReadTool(
                 ? MAX_FULL_TARGETS
                 : MAX_TARGETED_TARGETS,
             );
+      const displayLabels = context.request.metadata?.paperDisplayLabels as
+        | Record<string, string>
+        | undefined;
+      const displayLabelFor = (
+        paper: PaperDisplayMetadata & {
+          libraryID?: number;
+          itemKey?: string;
+          itemId?: number;
+        },
+      ) => {
+        const native =
+          displayLabels && paper.itemId
+            ? zoteroGateway.getItem(paper.itemId)
+            : undefined;
+        const identity = `${paper.libraryID || native?.libraryID}:${paper.itemKey || native?.key}`;
+        return displayLabels?.[identity] || formatPaperDisplayLabel(paper);
+      };
       if (!targets.length) {
         throw new Error(describeNoDefaultPaperTarget(context.request));
       }
@@ -1248,7 +1264,10 @@ export function createPaperReadTool(
         const output: PaperReadFullResult = {
           mode: "full",
           status: result.status,
-          papers: result.papers,
+          papers: result.papers.map((paper) => ({
+            ...paper,
+            displayLabel: displayLabelFor(paper.paperContext),
+          })),
           coverageReceipt: result.receipt,
           synthesisContext: result.contextText,
           warnings: result.warnings,
@@ -1326,7 +1345,21 @@ export function createPaperReadTool(
         );
         return {
           mode: input.mode,
-          results: overviewQuotePack.results,
+          results: overviewQuotePack.results.map((result) => {
+            const paper = (result as Record<string, unknown>).paperContext as
+              | (PaperDisplayMetadata & {
+                  libraryID?: number;
+                  itemKey?: string;
+                  itemId?: number;
+                })
+              | undefined;
+            return {
+              ...result,
+              displayLabel: paper
+                ? displayLabelFor(paper)
+                : (result as Record<string, unknown>).sourceLabel,
+            };
+          }),
           quoteCitations: overviewQuotePack.quoteCitations,
           readingReceipt: {
             strategy: adaptiveBudget ? "capacity_adaptive" : "default",

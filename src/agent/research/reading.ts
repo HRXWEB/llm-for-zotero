@@ -1,3 +1,4 @@
+import { buildPaperDisplayLabels } from "../../shared/paperDisplayLabels";
 import type {
   TaskEvidence,
   TrustedReadObservation,
@@ -43,6 +44,9 @@ export type ReadingManifestEntry = {
   itemKey: string;
   ordinal: number;
   title: string;
+  firstCreator?: string;
+  year?: string;
+  displayLabel?: string;
   hasAbstract: boolean;
   readable: boolean;
   indexed: boolean;
@@ -54,6 +58,7 @@ export async function buildReadingManifest(params: {
   gateway: ZoteroGateway;
   requiredEvidenceDepth: "metadata" | "abstract" | "body";
   preferredContextItemIds?: ReadonlyMap<string, number>;
+  displayLabels?: ReadonlyMap<string, string>;
 }): Promise<ReadingManifestEntry[]> {
   const manifest: ReadingManifestEntry[] = [];
   for (const entry of [...params.corpus].sort(
@@ -83,6 +88,9 @@ export async function buildReadingManifest(params: {
         String(
           item?.getField?.("title") || item?.getDisplayTitle?.() || "",
         ).trim() || "Untitled item",
+      firstCreator:
+        String(item?.getField?.("firstCreator") || "").trim() || undefined,
+      year: String(item?.getField?.("date") || "").match(/\b\d{4}\b/)?.[0],
       hasAbstract: entry.hasAbstract,
       readable: entry.readable,
       indexed: entry.indexed,
@@ -101,7 +109,11 @@ export async function buildReadingManifest(params: {
         : {}),
     });
   }
-  return manifest;
+  const labels = params.displayLabels || buildPaperDisplayLabels(manifest);
+  return manifest.map((entry) => ({
+    ...entry,
+    displayLabel: labels.get(entry.identity),
+  }));
 }
 export function verifiedReadDepth(
   observations: readonly TrustedReadObservation[],

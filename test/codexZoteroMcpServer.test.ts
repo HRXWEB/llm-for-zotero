@@ -1780,8 +1780,9 @@ describe("Zotero MCP server", function () {
         Record<string, unknown>
       >;
       assert.isArray(listedProperties.target.anyOf);
-      assert.isArray(
-        (listedProperties.targets.items as Record<string, unknown>).anyOf,
+      assert.deepEqual(
+        (listedProperties.targets.items as Record<string, unknown>).required,
+        ["itemId"],
       );
 
       const response = await invokeMcpEndpoint({

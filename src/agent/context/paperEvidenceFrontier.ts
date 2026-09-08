@@ -15,6 +15,7 @@ export type PaperEvidenceProgress = {
 };
 
 export type PaperEvidenceReference = {
+  displayLabel?: string;
   sourceToolCallId: string;
   occurrenceId?: string;
   contentHash?: string;
@@ -24,6 +25,7 @@ export type PaperEvidenceReference = {
 };
 
 type Occurrence = {
+  displayLabel?: string;
   occurrenceId?: string;
   contentHash?: string;
   quoteCitationIds: string[];
@@ -237,7 +239,12 @@ async function buildOccurrence(params: {
       sectionLabel: normalizedString(params.entry.sectionLabel),
     }),
   )}`;
-  return { occurrenceId, contentHash, quoteCitationIds };
+  return {
+    occurrenceId,
+    contentHash,
+    quoteCitationIds,
+    displayLabel: normalizedString(params.entry.displayLabel),
+  };
 }
 
 async function collectOccurrences(params: {
@@ -563,6 +570,7 @@ export class PaperEvidenceFrontier {
           : [];
         return {
           sourceToolCallId: params.toolCallId,
+          displayLabel: occurrence.displayLabel,
           occurrenceId,
           contentHash: occurrence.contentHash,
           quoteCitationIds: occurrence.quoteCitationIds,

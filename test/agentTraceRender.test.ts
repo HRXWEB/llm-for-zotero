@@ -7288,3 +7288,54 @@ describe("agentTrace render", function () {
     assert.notInclude(actionTexts, "Using Skill: evidence-based-qa");
   });
 });
+
+describe("new research progress presentation", function () {
+  for (const fromToolResult of [false, true])
+    it("maps known paper references without altering the progress layout", function () {
+      const events = [
+        fromToolResult
+          ? {
+              type: "tool_result",
+              name: "update_plan",
+              callId: "plan",
+              ok: true,
+              content: { displayLabels: { "1:AAAA1111": "(Smith, 2024)" } },
+            }
+          : {
+              type: "provider_event",
+              providerType: "paper_display_labels",
+              payload: {
+                version: 1,
+                displayLabels: { "1:AAAA1111": "(Smith, 2024)" },
+              },
+            },
+        { type: "message_delta", text: "Inspecting AAAA1111 after recovery." },
+        {
+          type: "message_rollback",
+          text: "Inspecting AAAA1111 after recovery.",
+          length: 39,
+        },
+        {
+          type: "reasoning",
+          round: 1,
+          details: "Evidence for 1:AAAA1111 is retained.",
+        },
+      ].map((payload, index) => ({
+        runId: "new-research",
+        seq: index,
+        eventType: payload.type,
+        payload,
+        createdAt: index,
+      })) as AgentRunEventRecord[];
+      const result = buildAgentTraceDisplayItems(events, null, {
+        role: "assistant",
+        text: "",
+        timestamp: 1,
+        runMode: "agent",
+      });
+      const serialized = JSON.stringify(result.items);
+      assert.notInclude(serialized, "AAAA1111");
+      assert.include(serialized, "(Smith, 2024)");
+      assert.isTrue(result.items.some((item) => item.type === "inline_text"));
+    });
+});

@@ -1,3 +1,4 @@
+import { buildPaperDisplayLabels } from "../../shared/paperDisplayLabels";
 import type { TaskEvidence } from "../plans/types";
 import type { ResearchUpdateInput } from "./commands";
 import { selectPreferredVerifiedReads } from "./reading";
@@ -103,7 +104,14 @@ export async function inspectResearch(params: {
     );
     const cursor = input.cursor || 0;
     const limit = input.limit || 20;
+    const labels = buildPaperDisplayLabels(
+      [...snapshotByKey.values()].map((entry) => ({
+        ...entry,
+        identity: `${entry.libraryID}:${entry.itemKey}`,
+      })),
+    );
     const page = findings.slice(cursor, cursor + limit).map((finding) => ({
+      displayLabel: labels.get(`${finding.libraryID}:${finding.itemKey}`),
       findingId: finding.findingId,
       identity: `${finding.libraryID}:${finding.itemKey}`,
       title: snapshotByKey.get(`${finding.libraryID}:${finding.itemKey}`)

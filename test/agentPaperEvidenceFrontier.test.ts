@@ -47,6 +47,22 @@ function progress(content: unknown) {
 }
 
 describe("PaperEvidenceFrontier", function () {
+  it("retains readable labels in references for a reused paper read", async function () {
+    const frontier = new PaperEvidenceFrontier();
+    const input = { mode: "overview" };
+    await frontier.processResult({
+      input,
+      toolCallId: "first",
+      content: {
+        results: [{ ...passage({}), displayLabel: "(Smith, 2024)" }],
+      },
+    });
+    const reused = await frontier.readCached({ input, toolCallId: "second" });
+    assert.equal(
+      (reused?.content as any).paperEvidenceReferences[0].displayLabel,
+      "(Smith, 2024)",
+    );
+  });
   it("keeps occurrence identities stable across result ordering", async function () {
     const first = new PaperEvidenceFrontier();
     const second = new PaperEvidenceFrontier();

@@ -1,3 +1,5 @@
+import { buildPaperDisplayLabels } from "../../../shared/paperDisplayLabels";
+import { listScopeSnapshotItems } from "../../research/store";
 import type { PlanArtifact } from "../../plans/types";
 import type { AgentToolDefinition } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
@@ -388,7 +390,21 @@ export function createUpdatePlanTool(
         type: input.ready ? "plan_ready" : "plan_updated",
         artifact,
       });
-      return { artifact };
+      const snapshot = artifact.contract?.investigation?.scopeSnapshot;
+      const papers = snapshot
+        ? await listScopeSnapshotItems(snapshot.snapshotId)
+        : [];
+      return {
+        artifact,
+        displayLabels: Object.fromEntries(
+          buildPaperDisplayLabels(
+            papers.map((paper) => ({
+              ...paper,
+              identity: `${paper.libraryID}:${paper.itemKey}`,
+            })),
+          ),
+        ),
+      };
     },
   };
 }
