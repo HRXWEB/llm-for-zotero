@@ -7317,6 +7317,36 @@ describe("agentTrace render", function () {
       "Judgment Tags completed (agent's own call)",
     ]);
   });
+
+  it("keeps the judgment label ahead of the merged-result shortcut", function () {
+    // A tool whose result merges into the call row returns before any row is
+    // built. Only a live agent runtime resolves tool presentation, which this
+    // renderer harness has no way to provide, so the ordering is pinned at the
+    // source instead of through a rendered event.
+    const source = readFileSync(
+      "src/modules/contextPanel/agentTrace/render.ts",
+      "utf8",
+    );
+    const caseStart = source.indexOf('case "tool_result": {');
+    assert.isAtLeast(caseStart, 0);
+    const judgmentAt = source.indexOf(
+      'const judgment = entry.payload.authority === "yolo_judgment";',
+      caseStart,
+    );
+    const mergeAt = source.indexOf("mergeResultIntoCallTrace", caseStart);
+    assert.isAtLeast(judgmentAt, 0, "the judgment check must exist");
+    assert.isAtLeast(mergeAt, 0);
+    assert.isBelow(
+      judgmentAt,
+      mergeAt,
+      "a judgment write must be labelled before the merge shortcut returns",
+    );
+    assert.include(
+      source.slice(judgmentAt, mergeAt),
+      "!judgment &&",
+      "the merge shortcut must not swallow a judgment write",
+    );
+  });
 });
 
 describe("new research progress presentation", function () {

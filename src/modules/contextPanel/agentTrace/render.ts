@@ -4098,7 +4098,12 @@ function appendLegacyAgentTraceEvent(
       return true;
     case "tool_result": {
       if (INTERNAL_PLAN_TOOL_NAMES.has(entry.payload.name)) return true;
+      // A write the agent chose on its own must always be visible, ahead of
+      // every presentation shortcut: neither a missing summary nor a tool that
+      // folds its result into the call row may hide it.
+      const judgment = entry.payload.authority === "yolo_judgment";
       if (
+        !judgment &&
         entry.payload.ok &&
         getToolDefinition(entry.payload.name)?.presentation
           ?.mergeResultIntoCallTrace
@@ -4112,9 +4117,7 @@ function appendLegacyAgentTraceEvent(
         entry.payload.effect,
         ctx.requestSummary,
       );
-      if (entry.payload.authority === "yolo_judgment") {
-        // A write the agent chose on its own must always be visible, even
-        // when the tool has no presentation summary.
+      if (judgment) {
         row = row
           ? { ...row, text: `${row.text} (agent's own call)` }
           : {
