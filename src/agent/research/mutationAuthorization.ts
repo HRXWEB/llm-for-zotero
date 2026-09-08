@@ -47,9 +47,7 @@ export function researchMutationAuthorization(params: {
     operations.some((operation) => operation.operation === intent.operation),
   );
   const review = applicable.some(
-    (intent) =>
-      intent.reviewPreference === "review" ||
-      intent.reviewPreference === undefined,
+    (intent) => intent.reviewPreference === "review",
   );
   const plan = stateChangeInvocationPlan({
     domains: ["zotero_library"],
