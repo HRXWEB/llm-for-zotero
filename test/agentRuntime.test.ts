@@ -7242,6 +7242,170 @@ describe("AgentRuntime", function () {
       }
     });
   }
+
+  it("yolo applies a requested write and an unrequested one in the same turn", async function () {
+    const restoreDb = installMockDb();
+    try {
+      await initAgentChangeJournal();
+      globalThis.Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.originalAgentPermissionMode",
+        "yolo",
+      );
+      const registry = new AgentToolRegistry(
+        createTestActionContractService((itemId) =>
+          itemId === 500
+            ? ({
+                id: 500,
+                parentID: false,
+                deleted: false,
+                isNote: () => true,
+                getNote: () => "hello",
+                getCollections: () => [],
+              } as unknown as Zotero.Item)
+            : null,
+        ),
+        new PlanAmendmentService(),
+      );
+      let requestedWrites = 0;
+      let judgmentWrites = 0;
+      registry.register({
+        spec: {
+          name: "mutate_library",
+          description: "mutate",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: true,
+        },
+        validate: () => ({ ok: true, value: { content: "hello" } }),
+        describeAction: (input) => [
+          {
+            id: "note_create:requested",
+            proofDomain: "zotero_state",
+            capability: "zotero.notes",
+            operation: "note_create",
+            source: "zotero_native",
+            parameters: { noteMode: "create", expectedText: input.content },
+            requestedTargets: [],
+            destinationCollectionIds: [],
+          },
+        ],
+        execute: async () => {
+          requestedWrites++;
+          return {
+            content: { status: "created", noteId: 500, saved: "hello" },
+            effect: "applied",
+          };
+        },
+      });
+      registry.register({
+        spec: {
+          name: "tag_related",
+          description: "tag a related paper",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        describeAction: () => [
+          {
+            id: "apply_tags:judgment",
+            proofDomain: "zotero_state",
+            capability: "zotero.tags",
+            operation: "apply_tags",
+            source: "zotero_native",
+            parameters: { tags: ["follow-up"] },
+            requestedTargets: ["item:41"],
+            destinationCollectionIds: [],
+          },
+        ],
+        execute: async () => {
+          judgmentWrites++;
+          return { content: { tagged: 1 }, effect: "applied" };
+        },
+      });
+      const requested = {
+        id: "call-1",
+        name: "mutate_library",
+        arguments: { content: "hello" },
+      };
+      const unrequested = { id: "call-2", name: "tag_related", arguments: {} };
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry,
+        adapterFactory: () =>
+          new MockAdapter(
+            [
+              {
+                kind: "tool_calls",
+                calls: [requested],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [requested],
+                },
+              },
+              {
+                kind: "tool_calls",
+                calls: [unrequested],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [unrequested],
+                },
+              },
+              {
+                kind: "final",
+                text: "Saved the note and tagged the related paper.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Saved the note and tagged the related paper.",
+                },
+              },
+            ],
+            { streaming: false, toolCalls: true, multimodal: false },
+          ),
+      });
+      const events: AgentEvent[] = [];
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: actionFixture("note_create", undefined, {
+            noteDestination: "zotero",
+          }),
+          conversationKey: 1,
+          mode: "agent",
+          userText: "create a note with hello",
+          model: "gpt-4o-mini",
+          apiBase: "https://api.openai.com/v1/chat/completions",
+          apiKey: "test",
+        },
+        onEvent: async (event) => {
+          events.push(event);
+          // Never leave a card unanswered: an unexpected one would hang the
+          // turn instead of failing the assertion below.
+          if (event.type === "confirmation_required")
+            runtime.resolveConfirmation(event.requestId, false);
+        },
+      });
+
+      assert.isFalse(
+        events.some((event) => event.type === "confirmation_required"),
+        "yolo reviews neither the requested nor the unrequested write",
+      );
+      const results = events.filter((event) => event.type === "tool_result");
+      assert.lengthOf(results, 2);
+      assert.equal(requestedWrites, 1);
+      assert.equal(judgmentWrites, 1);
+      assert.isTrue(results[0].ok);
+      assert.isTrue(results[1].ok);
+      // The requested write runs on the contract's own authority; only the
+      // action the user never asked for carries the judgment grant.
+      assert.isUndefined(results[0].authority);
+      assert.equal(results[1].authority, "yolo_judgment");
+      assert.equal(outcome.kind, "completed");
+    } finally {
+      restoreDb();
+    }
+  });
 });
 
 describe("web attribution runtime guard", function () {

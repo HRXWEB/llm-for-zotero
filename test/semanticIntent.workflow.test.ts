@@ -594,6 +594,10 @@ describe("permission mode in semantic prompts", function () {
     const safe = await interpreterPrompt("safe");
     assert.include(safe, "- Permission mode: safe");
     assert.notInclude(safe, "Do not emit decisions.questions");
+    // The literal response envelope is what the model copies. Leaving
+    // assumptions out of it contradicts the instruction to fill it in.
+    for (const prompt of [yolo, safe])
+      assert.include(prompt, '"questions":[],"assumptions":[]');
   });
 
   it("tells the reference resolver to pick the best-supported candidate in yolo", async function () {

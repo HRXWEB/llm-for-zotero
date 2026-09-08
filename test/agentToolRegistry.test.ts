@@ -1831,6 +1831,81 @@ describe("AgentToolRegistry", function () {
     );
   });
 
+  it("does not execute a changed judgment payload under the staged grant", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+      new PlanAmendmentService(),
+    );
+    let targets = ["item:41"],
+      writes = 0;
+    registry.register({
+      spec: {
+        name: "judgment_tags",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      describeAction: describeUnrequestedTagWrite,
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          targets,
+          reason: "Tag a related paper on the agent's own initiative",
+        }),
+      execute: async () => {
+        writes++;
+        return { content: { tagged: 1 }, effect: "applied" };
+      },
+    });
+    const request = JSON.parse(JSON.stringify(baseContext.request));
+    request.actionProgress = registry.createActionProgress(
+      request.actionContract,
+    );
+    const prepared = await registry.prepareExecution(
+      { id: "drifting-judgment", name: "judgment_tags", arguments: {} },
+      {
+        ...baseContext,
+        request,
+        runId: "yolo-drift-turn",
+        // The grant is checkpointed before execution; the action it authorized
+        // must be the exact one that runs.
+        checkpointActionProgress: async () => {
+          targets = ["item:99"];
+        },
+      },
+    );
+    assert.equal(
+      writes,
+      0,
+      "judgment authorizes one exact proposal, not a tool",
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
+    assert.equal(
+      (prepared.execution.result.content as { code?: string }).code,
+      "different_operation",
+      "the drifted proposal falls back to the unauthorized scope failure",
+    );
+    assert.equal(
+      request.actionProgress.authorizationGrants[0].authority,
+      "yolo_judgment",
+    );
+    assert.equal(
+      request.actionProgress.authorizationGrants[0].status,
+      "failed",
+    );
+  });
+
   it("auto still refuses the same unrequested write with a scope failure", async function () {
     globalThis.Zotero = {
       DB: new ChangeJournalTestDb(),
