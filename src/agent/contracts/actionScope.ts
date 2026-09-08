@@ -24,12 +24,22 @@ import {
 } from "../context/turnPaperScope";
 
 export class ActionReferenceResolutionError extends Error {
+  /**
+   * "hard_constraint" marks a resolution failure caused by the user's own
+   * explicit prohibition rather than by an ambiguous reference. Judgment
+   * authority may resolve ambiguity; it may never resolve a prohibition, so
+   * this cause must keep raising the pre-turn card in every permission mode.
+   */
+  readonly cause?: "hard_constraint";
+
   constructor(
     message: string,
     readonly sourceSelection?: import("./actionPreparation").ActionPreparation["sourceSelection"],
+    cause?: "hard_constraint",
   ) {
     super(message);
     this.name = "ActionReferenceResolutionError";
+    this.cause = cause;
   }
 }
 
@@ -1050,7 +1060,11 @@ export async function resolveDescriptiveTargets(
     request.classifiedIntent?.semantic?.constraints || [],
   );
   if (violation)
-    throw new ActionReferenceResolutionError(violation.description);
+    throw new ActionReferenceResolutionError(
+      violation.description,
+      undefined,
+      "hard_constraint",
+    );
   let sourceIds: number[];
   if (discovery.source === "library")
     sourceIds = await listCurrentLibraryTargetIds(gateway, {
@@ -1173,7 +1187,11 @@ async function resolveCollectionReference(
     request.classifiedIntent?.semantic?.constraints || [],
   );
   if (violation)
-    throw new ActionReferenceResolutionError(violation.description);
+    throw new ActionReferenceResolutionError(
+      violation.description,
+      undefined,
+      "hard_constraint",
+    );
   const result = await resolver.resolve({
     request,
     entity: "collection",

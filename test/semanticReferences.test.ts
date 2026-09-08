@@ -73,6 +73,34 @@ describe("semantic reference discovery", function () {
     }
     assert.equal(calls, 0);
   });
+  it("yolo still refuses a discovery read the user's own prohibition blocks", async function () {
+    let calls = 0;
+    const { request, service } = setup(async () => {
+      calls++;
+      return { state: "resolved", ids: [17], reason: "metadata" };
+    });
+    request.classifiedIntent!.semantic!.constraints = [
+      {
+        kind: "deny_effects",
+        domains: ["network"],
+        effects: ["egress"],
+        description: "Keep library evidence local",
+      },
+    ];
+    let contract: unknown;
+    try {
+      contract = await service.createContract(request, { mode: "yolo" });
+    } catch (error) {
+      assert.include(String(error), "Keep library evidence local");
+      assert.equal(calls, 0);
+      return;
+    }
+    assert.fail(
+      `a hard constraint is not ambiguity the agent may assume away: ${JSON.stringify(
+        (contract as { assumptions?: string[] }).assumptions || [],
+      )}`,
+    );
+  });
   it("freezes the source boundary before selecting descriptive targets", async function () {
     let candidates: number[] = [];
     const { request, service } = setup(async (input) => {

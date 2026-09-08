@@ -406,6 +406,9 @@ export class ActionContractService {
       } catch (error) {
         if (!judgment || !(error instanceof ActionReferenceResolutionError))
           throw error;
+        // Judgment authority resolves ambiguity, never the user's own
+        // prohibitions: a constraint violation stays a pre-turn refusal.
+        if (error.cause === "hard_constraint") throw error;
         skipped.add(index);
         assumptions.push(
           `The requested ${operation.replace(/_/g, " ")} could not be resolved (${error.message}) so the agent will choose its target.`,
