@@ -112,7 +112,8 @@ import {
 import {
   getModelCapabilities,
   type ModelProfileOverride,
-  getRuntimeReasoningOptions as getCatalogReasoningOptions,
+  getModelReasoningChoices,
+  resolveModelReasoningSelection,
   inferProviderFromModelName,
 } from "../../modelCapabilities";
 import {
@@ -2719,13 +2720,15 @@ export function getReasoningOptions(
   }
   // The user's override is part of the identity: the menu must offer exactly
   // the levels the request builder will encode, custom ones included.
-  return getCatalogReasoningOptions({
-    provider: provider === "unsupported" ? undefined : provider,
-    model: modelName,
-    apiBase,
-    protocol: providerProtocol,
-    profileOverride,
-  }).map((option) => ({
+  return getModelReasoningChoices(
+    getModelCapabilities({
+      provider: provider === "unsupported" ? undefined : provider,
+      model: modelName,
+      apiBase,
+      protocol: providerProtocol,
+      profileOverride,
+    }),
+  ).map((option) => ({
     level: option.level as LLMReasoningLevel,
     enabled: option.enabled,
     label: option.label,
@@ -2829,61 +2832,30 @@ export function getSelectedReasoningForItem(
   profileOverride?: ModelProfileOverride,
 ): LLMReasoningConfig | undefined {
   const detectedProvider = detectReasoningProvider(modelName, apiBase);
-  const resolvedCapabilityProvider = getModelCapabilities({
+  const capabilities = getModelCapabilities({
     provider: detectedProvider === "unsupported" ? undefined : detectedProvider,
     model: modelName,
     apiBase,
     protocol: providerProtocol,
     profileOverride,
-  }).provider;
-  const provider: ReasoningProviderKind = [
-    "openai",
-    "gemini",
-    "deepseek",
-    "kimi",
-    "mimo",
-    "qwen",
-    "grok",
-    "anthropic",
-    "local",
-  ].includes(resolvedCapabilityProvider as ReasoningProviderKind)
-    ? (resolvedCapabilityProvider as ReasoningProviderKind)
-    : detectedProvider;
-  const enabledLevels = getReasoningOptions(
-    provider,
-    modelName,
-    apiBase,
-    providerProtocol,
-    profileOverride,
-  )
-    .filter((option) => option.enabled)
-    .map((option) => option.level);
-  if (!enabledLevels.length) return undefined;
-
-  const cachedProvider = selectedReasoningProviderCache.get(itemId);
-  const cachedLevel =
-    cachedProvider === provider ? selectedReasoningCache.get(itemId) : null;
-  let selectedLevel =
-    cachedLevel ||
+  });
+  const provider =
+    detectedProvider === "unsupported" ? "customized" : detectedProvider;
+  const cached =
+    selectedReasoningProviderCache.get(itemId) === provider
+      ? selectedReasoningCache.get(itemId)
+      : undefined;
+  const saved =
+    cached ||
     getLastUsedReasoningLevelForProvider(provider) ||
-    (provider === "anthropic" ? "none" : getLastUsedReasoningLevel() || "none");
-  if (provider === "anthropic") {
-    if (!enabledLevels.includes(selectedLevel as LLMReasoningLevel)) {
-      selectedLevel = "none";
-    }
-  } else if (
-    selectedLevel === "none" ||
-    !enabledLevels.includes(selectedLevel as LLMReasoningLevel)
-  ) {
-    selectedLevel = enabledLevels[0];
-  }
-  selectedReasoningCache.set(itemId, selectedLevel);
+    getLastUsedReasoningLevel();
+  const selected = resolveModelReasoningSelection(capabilities, {
+    level: saved || "auto",
+  });
+  const level = selected.kind === "option" ? selected.option.id : "auto";
+  selectedReasoningCache.set(itemId, level);
   selectedReasoningProviderCache.set(itemId, provider);
-  setLastUsedReasoningLevelForProvider(provider, selectedLevel);
-  if (selectedLevel === "none") return undefined;
-
-  if (provider === "unsupported") return undefined;
-  return { provider, level: selectedLevel as LLMReasoningLevel };
+  return { provider, level };
 }
 
 export type PanelRequestUI = {

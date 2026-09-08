@@ -110,6 +110,7 @@ import {
   compileReasoningControls,
   ensureModelCapabilities,
   getModelCapabilities,
+  resolveModelReasoningSelection,
   isRecord,
   isReservedRequestKey,
   profileOverrideAppliesTo,
@@ -2168,12 +2169,11 @@ function buildReasoningControlPayload(
   providerProtocol?: ProviderProtocol,
   options?: ReasoningPayloadOptions,
 ): { extra: Record<string, unknown>; omitTemperature: boolean } {
-  if (!reasoning) {
-    return emptyReasoningPayload();
-  }
-  const exactEffort = reasoning.effort?.trim();
+  const exactEffort = reasoning?.effort?.trim();
   if (
     exactEffort &&
+    reasoning &&
+    providerProtocol === "codex_responses" &&
     (reasoning.provider === "openai" || reasoning.provider === "grok")
   ) {
     return {
@@ -2184,12 +2184,24 @@ function buildReasoningControlPayload(
     };
   }
   const capabilities = getModelCapabilities({
-    provider: reasoning.provider,
+    provider: reasoning?.provider,
     model: modelName || "",
     apiBase,
-    protocol: providerProtocol,
+    protocol:
+      providerProtocol ||
+      (useResponses ? "responses_api" : "openai_chat_compat"),
     profileOverride: options?.profileOverride,
   });
+  const selected = resolveModelReasoningSelection(capabilities, reasoning);
+  const omitDefaultTemperature =
+    capabilities.sampling.temperature !== "configurable" ||
+    (capabilities.provider === "openai" &&
+      capabilities.reasoning.kind !== "none" &&
+      capabilities.reasoning.kind !== "unknown");
+  if (!reasoning || selected.kind === "auto") {
+    return { extra: {}, omitTemperature: omitDefaultTemperature };
+  }
+  reasoning = { provider: reasoning.provider, level: selected.option.id };
   const declarativeControls = compileReasoningControls(capabilities, reasoning);
   if (declarativeControls) return declarativeControls;
   if (
@@ -2692,14 +2704,19 @@ function buildGeminiNativePayload(params: {
     },
   };
   if (params.reasoning?.provider === "gemini") {
+    const capabilities = getModelCapabilities({
+      provider: "gemini",
+      model: params.model,
+      apiBase: params.apiBase,
+      protocol: "gemini_native",
+      profileOverride: params.profileOverride,
+    });
+    const selection = resolveModelReasoningSelection(
+      capabilities,
+      params.reasoning,
+    );
     const declarative = compileReasoningControls(
-      getModelCapabilities({
-        provider: "gemini",
-        model: params.model,
-        apiBase: params.apiBase,
-        protocol: "gemini_native",
-        profileOverride: params.profileOverride,
-      }),
+      capabilities,
       params.reasoning,
     );
     const generationConfig = payload.generationConfig as Record<
@@ -2723,10 +2740,10 @@ function buildGeminiNativePayload(params: {
     if (isRecord(declarativeConfig)) {
       generationConfig.thinkingConfig =
         withGeminiThoughtSummaries(declarativeConfig);
-    } else {
+    } else if (selection.kind === "option") {
       const profile = getGeminiReasoningProfile(params.model);
       const value =
-        profile.levelToValue[params.reasoning.level] ??
+        profile.levelToValue[selection.option.id] ??
         profile.levelToValue[profile.defaultLevel] ??
         profile.defaultValue;
       (payload.generationConfig as Record<string, unknown>).thinkingConfig =

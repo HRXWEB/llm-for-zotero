@@ -810,20 +810,25 @@ PR.
 
 ### Model capability registry
 
-Model context limits and provider-defined reasoning options are maintained in
-[`registry/model-capabilities.v1.json`](./registry/model-capabilities.v1.json).
+Model context limits and provider-defined reasoning options are maintained in [`registry/model-capabilities.v1.json`](./registry/model-capabilities.v1.json).
+The plugin refreshes this schema-validated registry and configured provider catalogs in the background, with a bounded first-use refresh when needed.
 
-The plugin refreshes this schema-validated registry and each configured
-provider's model catalog in the background, and performs a bounded first-use
-refresh when needed.
+**Auto — provider default** leaves reasoning controls to the endpoint.
+An unfamiliar model offers Auto until capability information is available; missing metadata never means reasoning is off.
+Explicit levels, including Off, come from the applicable profile or endpoint capabilities.
+Saved choices are checked again when the model or endpoint changes, and unavailable choices resolve to Auto.
+Explicit advanced request-body parameters retain their existing precedence.
 
-Adding a model to the registry does not require a plugin release; increment the
-registry revision, run `npm run validate:model-registry`, and publish the JSON
-change.
+User profile overrides take priority over endpoint metadata, followed by the remote/bundled registry and established model profiles.
+A catalog's `supports_reasoning` boolean does not establish an effort list.
+The standard OpenAI `/models` API does not publish supported efforts.
+Custom endpoints may opt into the plugin's structured catalog extension: a model row's `reasoning` object uses the registry's validated `kind`, `options`, and optional `defaultOptionId` contract.
+An option can declare a portable `effort` string for OpenAI-compatible protocols or an existing declarative `controls` patch for its endpoint.
+Capability data is cached per endpoint, protocol, authentication mode, and runtime scope.
 
-When a provider does not expose reasoning controls or context metadata through
-its model catalog, the registry remains the authoritative provider-maintained
-fallback.
+Adding a verified model or effort to the remote registry does not require another plugin release once the client supports its encoding.
+Increment the registry revision, run `npm run validate:model-registry`, and publish the JSON change through the normal reviewed update process.
+This does not infer undocumented future API contracts or automatically publish model settings.
 
 ### External MCP write access
 

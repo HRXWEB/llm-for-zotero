@@ -6,6 +6,7 @@ import {
 import type { ModelTurnCompletion } from "../../shared/llm";
 import {
   compileReasoningControls,
+  resolveModelReasoningSelection,
   isRecord,
   normalizeProfileOverride,
   getModelCapabilities,
@@ -241,16 +242,19 @@ function resolveGeminiReasoningConfig(request: AgentRuntimeRequest) {
   if (!request.reasoning || request.reasoning.provider !== "gemini") {
     return undefined;
   }
-  const declarative = compileReasoningControls(
-    getModelCapabilities({
-      provider: "gemini",
-      model: request.model || "",
-      apiBase: request.apiBase,
-      protocol: "gemini_native",
-      profileOverride: request.advanced?.profileOverride,
-    }),
+  const capabilities = getModelCapabilities({
+    provider: "gemini",
+    model: request.model || "",
+    apiBase: request.apiBase,
+    protocol: "gemini_native",
+    profileOverride: request.advanced?.profileOverride,
+  });
+  const selection = resolveModelReasoningSelection(
+    capabilities,
     request.reasoning,
   );
+  if (selection.kind === "auto") return undefined;
+  const declarative = compileReasoningControls(capabilities, request.reasoning);
   const declarativeConfig =
     declarative?.extra.thinkingConfig || declarative?.extra.thinking_config;
   if (isRecord(declarativeConfig)) {
@@ -258,7 +262,7 @@ function resolveGeminiReasoningConfig(request: AgentRuntimeRequest) {
   }
   const profile = getGeminiReasoningProfile(request.model);
   const value =
-    profile.levelToValue[request.reasoning.level] ??
+    profile.levelToValue[selection.option.id] ??
     profile.levelToValue[profile.defaultLevel] ??
     profile.defaultValue;
   if (profile.param === "thinking_budget") {

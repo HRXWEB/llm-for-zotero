@@ -153,6 +153,7 @@ export type ReasoningProviderKind =
   | "qwen"
   | "grok"
   | "anthropic"
+  | "customized"
   | "local"
   | "unsupported";
 export type ReasoningLevelSelection = "none" | LLMReasoningLevel;

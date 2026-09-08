@@ -300,6 +300,12 @@ function buildReasoningPlan(params: {
 
   // Anthropic's bounded utility requests deliberately never inherit manual or
   // adaptive thinking. A profile-authored disabled control is still honored.
+  if (
+    capabilities.provider === "anthropic" &&
+    capabilities.provenance.reasoning === "legacy"
+  ) {
+    return { reasoning: undefined, reserveTokens: 0 };
+  }
   const disabled = findDisabledOption(reasoning, provider);
   if (disabled) {
     return {
@@ -324,21 +330,8 @@ function buildReasoningPlan(params: {
     return planForOption(option, provider);
   }
 
-  // A live catalog can say that reasoning is enabled without publishing its
-  // option list. Use the provider's conservative lowest selector where the
-  // adapter knows how to encode it; otherwise let the feature degrade.
-  if (
-    reasoning.kind === "server_default" &&
-    (capabilities.provider === "openai" ||
-      capabilities.provider === "gemini") &&
-    provider
-  ) {
-    return {
-      reasoning: { provider, level: "low" },
-      reserveTokens: REASONING_RESERVE_BY_LEVEL.low,
-    };
-  }
-  return null;
+  // Unknown controls must not manufacture a low effort. The server owns Auto.
+  return { reasoning: undefined, reserveTokens: 1024 };
 }
 
 function isTimeoutError(error: unknown): boolean {

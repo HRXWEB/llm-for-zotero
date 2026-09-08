@@ -5818,31 +5818,28 @@ export function setupHandlers(
     const enabledLevels = options
       .filter((option) => option.enabled)
       .map((option) => option.level);
-    const cachedProvider = selectedReasoningProviderCache.get(item.id);
-    const cachedLevel =
-      cachedProvider === provider ? selectedReasoningCache.get(item.id) : null;
-    let selectedLevel =
-      cachedLevel ||
+    const previousLevel =
+      selectedReasoningCache.get(item.id) ||
       getLastUsedReasoningLevelForProvider(provider) ||
-      (provider === "anthropic"
-        ? "none"
-        : getLastUsedReasoningLevel() || "none");
-    if (provider === "anthropic") {
-      if (!enabledLevels.includes(selectedLevel as LLMReasoningLevel)) {
-        selectedLevel = "none";
-      }
-    } else if (enabledLevels.length > 0) {
-      if (
-        selectedLevel === "none" ||
-        !enabledLevels.includes(selectedLevel as LLMReasoningLevel)
-      ) {
-        selectedLevel = enabledLevels[0];
-      }
-    } else {
-      selectedLevel = "none";
+      getLastUsedReasoningLevel();
+    const resolved = getSelectedReasoningForItem(
+      item.id,
+      currentModel,
+      selectedProfile?.apiBase,
+      selectedProfile?.providerProtocol,
+      selectedProfile?.advanced?.profileOverride,
+    );
+    const selectedLevel = resolved?.level || "auto";
+    if (
+      reasoningBtn &&
+      previousLevel &&
+      previousLevel !== "auto" &&
+      previousLevel !== "default" &&
+      selectedLevel === "auto"
+    ) {
+      reasoningBtn.dataset.reasoningAdjustment =
+        "The previous reasoning level is unavailable for this model. Using the provider default.";
     }
-    selectedReasoningCache.set(item.id, selectedLevel);
-    selectedReasoningProviderCache.set(item.id, provider);
     return { provider, currentModel, options, enabledLevels, selectedLevel };
   };
 
@@ -6038,16 +6035,14 @@ export function setupHandlers(
                   choice.value.toLowerCase() ===
                   directSelection.mode.toLowerCase(),
               )?.label || "Auto"
-            : selectedLevel === "none"
-              ? "off"
-              : available
-                ? getReasoningLevelDisplayLabel(
-                    selectedLevel as LLMReasoningLevel,
-                    provider,
-                    currentModel,
-                    options,
-                  )
-                : "off";
+            : available
+              ? getReasoningLevelDisplayLabel(
+                  selectedLevel as LLMReasoningLevel,
+                  provider,
+                  currentModel,
+                  options,
+                )
+              : "Not supported";
       const active =
         available && isReasoningDisplayLabelActive(resolvedReasoningLabel);
       const reasoningLabel = resolvedReasoningLabel;
@@ -6060,7 +6055,9 @@ export function setupHandlers(
       reasoningBtn.style.background = "";
       reasoningBtn.style.borderColor = "";
       reasoningBtn.style.color = "";
-      const reasoningHint = "Click to adjust reasoning level";
+      const reasoningHint =
+        reasoningBtn.dataset.reasoningAdjustment ||
+        "Click to adjust reasoning level";
       reasoningBtn.dataset.reasoningLabel = reasoningLabel;
       reasoningBtn.dataset.reasoningHint = reasoningHint;
       scheduleResponsiveLayoutSync();
@@ -6229,65 +6226,18 @@ export function setupHandlers(
       return;
     }
     if (!enabledLevels.length) {
-      const offOption = createElement(
+      const unavailable = createElement(
         body.ownerDocument as Document,
         "button",
         "llm-response-menu-item llm-reasoning-option",
         {
           type: "button",
-          textContent: "\u2713 off",
+          textContent: "Not supported",
         },
       );
-      const applyOffSelection = (e: Event) => {
-        if (!isPrimaryPointerEvent(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (!item) return;
-        if (isClaudeConversationSystem()) {
-          clearClaudeReasoningDisplayOverride();
-          setClaudeReasoningModePref("auto");
-        } else {
-          selectedReasoningCache.clear();
-          selectedReasoningCache.set(item.id, "none");
-          selectedReasoningProviderCache.set(item.id, provider);
-          setLastUsedReasoningLevelForProvider(provider, "none");
-          if (provider !== "anthropic") {
-            setLastUsedReasoningLevel("none");
-          }
-        }
-        setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
-        updateReasoningButton();
-      };
-      offOption.addEventListener("pointerdown", applyOffSelection);
-      offOption.addEventListener("click", applyOffSelection);
-      reasoningMenu.appendChild(offOption);
+      unavailable.disabled = true;
+      reasoningMenu.appendChild(unavailable);
       return;
-    }
-    if (provider === "anthropic") {
-      const isSelected = selectedLevel === "none";
-      const offOption = createElement(
-        body.ownerDocument as Document,
-        "button",
-        "llm-response-menu-item llm-reasoning-option",
-        {
-          type: "button",
-          textContent: isSelected ? "\u2713 Off" : "Off",
-        },
-      );
-      const applyAnthropicOffSelection = (e: Event) => {
-        if (!isPrimaryPointerEvent(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (!item) return;
-        selectedReasoningCache.set(item.id, "none");
-        selectedReasoningProviderCache.set(item.id, provider);
-        setLastUsedReasoningLevelForProvider(provider, "none");
-        setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
-        updateReasoningButton();
-      };
-      offOption.addEventListener("pointerdown", applyAnthropicOffSelection);
-      offOption.addEventListener("click", applyAnthropicOffSelection);
-      reasoningMenu.appendChild(offOption);
     }
     for (const optionState of options) {
       const level = optionState.level;
@@ -6319,9 +6269,13 @@ export function setupHandlers(
             clearClaudeReasoningDisplayOverride();
             setClaudeReasoningModePref(nextMode as any);
           } else {
+            if (reasoningBtn) delete reasoningBtn.dataset.reasoningAdjustment;
             selectedReasoningCache.clear();
             selectedReasoningCache.set(item.id, level);
-            selectedReasoningProviderCache.set(item.id, provider);
+            selectedReasoningProviderCache.set(
+              item.id,
+              provider === "unsupported" ? "customized" : provider,
+            );
             setLastUsedReasoningLevelForProvider(provider, level);
             if (provider !== "anthropic") {
               setLastUsedReasoningLevel(level);
@@ -6715,12 +6669,14 @@ export function setupHandlers(
       return codexDirectController?.getSendReasoning();
     }
     const { provider, enabledLevels, selectedLevel } = getReasoningState();
-    if (provider === "unsupported" || selectedLevel === "none")
-      return undefined;
+    if (!enabledLevels.length) return undefined;
     if (!enabledLevels.includes(selectedLevel as LLMReasoningLevel)) {
       return undefined;
     }
-    return { provider, level: selectedLevel as LLMReasoningLevel };
+    return {
+      provider: provider === "unsupported" ? "customized" : provider,
+      level: selectedLevel as LLMReasoningLevel,
+    };
   };
 
   const { processIncomingFiles } = createFileIntakeController({
