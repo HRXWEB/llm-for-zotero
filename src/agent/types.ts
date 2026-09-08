@@ -960,6 +960,7 @@ export type AgentToolContext = {
     | "requested_note"
     | "auto_policy"
     | "yolo"
+    | "yolo_judgment"
     | "plan_approval";
   signal?: AbortSignal;
   /**

@@ -245,12 +245,68 @@ describe("central authorization from semantic authority", function () {
         "block",
       );
     });
-    it(`${mode}: refuses effects without an exact semantic or approved-plan match`, function () {
-      assert.equal(authorizeOriginalAction(action(), { mode }).kind, "block");
+    it(`${mode}: effects without an exact semantic or approved-plan match`, function () {
+      const expected =
+        mode === "yolo"
+          ? { kind: "execute", authority: "yolo_judgment" }
+          : {
+              kind: "block",
+              reason:
+                "The proposed effect has no matching semantic action authority.",
+            };
+      assert.deepEqual(authorizeOriginalAction(action(), { mode }), expected);
+      assert.deepEqual(
+        authorizeOriginalAction(
+          action("command_execute", {
+            assurance: "unknown",
+            mechanism: "shell",
+            domain: "filesystem",
+          }),
+          { mode },
+        ),
+        expected,
+      );
+    });
+    it(`${mode}: judgment never bypasses hard rails`, function () {
+      assert.equal(
+        authorizeOriginalAction(action(), { mode, constraints: [noZotero] })
+          .kind,
+        "block",
+      );
       assert.equal(
         authorizeOriginalAction(
-          action("command_execute", { assurance: "unknown" }),
+          action("apply_tags", { riskSignals: ["protected_target"] }),
           { mode },
+        ).kind,
+        "block",
+      );
+      assert.equal(
+        authorizeOriginalAction(
+          action("command_execute", {
+            mechanism: "shell",
+            assurance: "unknown",
+          }),
+          { mode, constraints: [noShell] },
+        ).kind,
+        "block",
+      );
+      assert.equal(
+        authorizeOriginalAction(
+          action("note_create", {
+            effect: "create",
+            capability: "zotero.notes",
+          }),
+          { mode, semantic: semanticFixture({ conversationOnly: true }) },
+        ).kind,
+        "block",
+      );
+      assert.equal(
+        authorizeOriginalAction(
+          action("import_identifiers", {
+            effect: "create",
+            capability: "zotero.import",
+          }),
+          { mode, semantic: semanticFixture({ literature: "discover" }) },
         ).kind,
         "block",
       );

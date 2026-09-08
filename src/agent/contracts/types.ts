@@ -190,7 +190,12 @@ export type AgentActionProgressLedger = {
     interaction?: import("../authorization/types").ActionInteraction;
     proposalDigest: string;
     toolName: string;
-    authority: "safe_confirmation" | "auto_policy" | "yolo" | "plan_approval";
+    authority:
+      | "safe_confirmation"
+      | "auto_policy"
+      | "yolo"
+      | "yolo_judgment"
+      | "plan_approval";
     status: "staged" | "executed" | "failed" | "uncertain";
     createdAt: number;
   }>;

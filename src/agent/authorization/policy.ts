@@ -138,7 +138,13 @@ export function authorizeOriginalAction(
   if (trustedRead) {
     return { kind: "execute", authority: "safe_read" };
   }
-  if (!context.hasMatchingActionIntent && !context.hasApprovedPlanAuthority) {
+  const requested = Boolean(
+    context.hasMatchingActionIntent || context.hasApprovedPlanAuthority,
+  );
+  // Yolo delegates judgment: an effect the interpreter did not predict may
+  // still run once every hard rail above has passed. Safe and auto require
+  // the exact requested authority.
+  if (!requested && context.mode !== "yolo") {
     return {
       kind: "block",
       reason: "The proposed effect has no matching semantic action authority.",
@@ -194,7 +200,10 @@ export function authorizeOriginalAction(
     };
   }
   if (context.mode === "yolo") {
-    return { kind: "execute", authority: "yolo" };
+    return {
+      kind: "execute",
+      authority: requested ? "yolo" : "yolo_judgment",
+    };
   }
   const exceptionalDanger = proposal.riskSignals.some((signal) =>
     [

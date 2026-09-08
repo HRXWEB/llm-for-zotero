@@ -77,6 +77,7 @@ export type AuthorizationDecision =
         | "requested_note"
         | "auto_policy"
         | "yolo"
+        | "yolo_judgment"
         | "plan_approval";
     }
   | { kind: "confirm"; reason: string }
