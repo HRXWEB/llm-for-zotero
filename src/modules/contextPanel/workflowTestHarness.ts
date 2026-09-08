@@ -24,6 +24,7 @@ import {
   chatHistory,
   selectedRuntimeModeCache,
   loadedConversationKeys,
+  webChatIsolatedConversationKeys,
   paperContextModeOverrides,
   paperContentSourceOverrides,
   selectedPaperContextCache,
@@ -129,6 +130,7 @@ import { config } from "./constants";
 import {
   getModelProviderGroups,
   setModelProviderGroups,
+  getModelEntryById,
 } from "../../utils/modelProviders";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import { collectReaderSelectionDocuments } from "./readerSelection";
@@ -1762,6 +1764,58 @@ async function exercisePanelDraftStateRefresh(
     inputBeforeRefresh,
     inputAfterRefresh: input.value,
   };
+}
+
+/**
+ * Pick a model entry from the panel's model menu the way a user does: open
+ * the menu, click the entry's option, then wait until the panel has finished
+ * entering or leaving WebChat for that entry (the WebChat session anchoring
+ * and the return to the remembered paper conversation are both async).
+ */
+async function selectPanelModelEntry(
+  panelId: string,
+  entryId: string,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const toggle = panel.body.querySelector(
+    "#llm-model-toggle",
+  ) as HTMLButtonElement | null;
+  if (!toggle) throw new Error(`Panel ${panelId} has no model toggle`);
+  if (toggle.disabled) {
+    throw new Error(`Panel ${panelId} model toggle is disabled`);
+  }
+  toggle.click();
+  const option = panel.body.querySelector(
+    `#llm-model-menu .llm-model-option[data-entry-id="${entryId}"]`,
+  ) as HTMLButtonElement | null;
+  if (!option) {
+    throw new Error(`Panel ${panelId} model menu has no entry ${entryId}`);
+  }
+  const expectWebChat = getModelEntryById(entryId)?.authMode === "webchat";
+  option.click();
+  const deadline = Date.now() + 15000;
+  let diagnostics = await getDiagnostics(panelId);
+  while (Date.now() < deadline) {
+    const key = diagnostics.conversationKey || 0;
+    const settled = expectWebChat
+      ? diagnostics.webChatMode === true &&
+        webChatIsolatedConversationKeys.has(key)
+      : diagnostics.webChatMode === false &&
+        !webChatIsolatedConversationKeys.has(key) &&
+        loadedConversationKeys.has(key);
+    if (settled) return diagnostics;
+    await Zotero.Promise.delay(25);
+    diagnostics = await getDiagnostics(panelId);
+  }
+  throw new Error(
+    `Timed out waiting for panel model entry ${entryId} to settle: ${JSON.stringify(
+      {
+        webChatMode: diagnostics.webChatMode,
+        conversationKey: diagnostics.conversationKey,
+      },
+    )}`,
+  );
 }
 
 async function seedPanelStoredUserMessage(
@@ -3612,6 +3666,10 @@ async function getDiagnostics(
       body,
       ".llm-panel-runtime-system-controls",
     ),
+    webChatMode: panelRoot?.dataset.webchatMode === "true",
+    modelButtonDisabled: (
+      body?.querySelector("#llm-model-toggle") as HTMLButtonElement | null
+    )?.disabled,
     inputValue: (
       body?.querySelector("#llm-input") as HTMLTextAreaElement | null
     )?.value,
@@ -4842,6 +4900,7 @@ export function installWorkflowTestHarness(targetAddon: {
     exerciseDuplicatePanelSetup,
     exerciseRebuiltPanelPlanApproval,
     exercisePanelDraftStateRefresh,
+    selectPanelModelEntry,
     exerciseWebChatPdfToggleWorkflow,
     toggleWebChatPdfChip: toggleWebChatPdfChipForWorkflow,
     sendLiveWebChatTurn,

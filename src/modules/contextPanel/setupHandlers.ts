@@ -97,7 +97,6 @@ import {
   markWebChatConversationForceNewChat,
   clearWebChatConversationForceNewChat,
   consumeWebChatConversationForceNewChat,
-  resetWebChatConversationSessionState,
   currentRequestId,
   activeConversationModeByLibrary,
   activeGlobalConversationByLibrary,
@@ -413,6 +412,10 @@ import {
   type HistorySearchResult,
 } from "./setupHandlers/controllers/historySearchController";
 import {
+  createWebChatModeController,
+  type LeaveWebChatModeOptions,
+} from "./setupHandlers/controllers/webChatModeController";
+import {
   formatPaperContextCardAttachmentLine,
   formatPaperContextChipLabel,
   formatPaperContextChipTitle,
@@ -620,6 +623,12 @@ export type SetupHandlersHooks = {
     | void;
   /** Called by standalone to clear force-new-chat intent before loading a session. */
   clearWebChatNewChatIntent?: () => void;
+  /**
+   * Called by standalone before it switches the conversation runtime while the
+   * mounted panel is in WebChat, so a non-webchat model entry is restored
+   * before the remount. Resolves false when the panel was not in WebChat.
+   */
+  leaveWebChatMode?: () => Promise<boolean>;
   /** Called by standalone to resolve the currently selected model consistently. */
   getCurrentModelName?: () => string | null;
 };
@@ -843,6 +852,9 @@ export function setupHandlers(
     body.addEventListener(eventType, enforcePanelOwnershipForEvent, true);
   }
   let isWebChatModeActive = () => panelRoot.dataset.webchatMode === "true";
+  let leaveWebChatMode: (
+    options?: LeaveWebChatModeOptions,
+  ) => Promise<boolean> = async () => false;
   const getQueuedFollowUpThreadKey = (): string | null =>
     buildQueuedFollowUpThreadKey({
       conversationSystem: currentConversationSystem,
@@ -1334,7 +1346,6 @@ export function setupHandlers(
       activeSystem: getConversationSystem(),
       codexEnabled: isCodexModeAvailable(),
       claudeEnabled: isClaudeModeAvailable(),
-      hidden: isWebChatModeActive(),
       busy: runtimeSystemSwitchInFlight,
     });
   };
@@ -1433,6 +1444,14 @@ export function setupHandlers(
     }
     const ownershipLease = capturePanelOperationLease(body);
     if (!ownershipLease) return;
+    // WebChat is an upstream-only provider mode. Restore a non-webchat model
+    // entry before the runtime changes so a later return to upstream (or the
+    // next Zotero start) cannot silently re-enter webchat. The runtime switch
+    // below replaces the conversation, so no paper conversation restore here.
+    if (isWebChatModeActive()) {
+      await leaveWebChatMode({ restoreConversation: false });
+      if (!isPanelOperationLeaseCurrent(ownershipLease)) return;
+    }
     const noteSession = resolveCurrentNoteSession();
     if (noteSession) {
       const resolvedNextSystem = resolveNoteFocusSystemSwitch({
@@ -5011,7 +5030,6 @@ export function setupHandlers(
     if (
       runtimeSystemSwitchInFlight ||
       !item ||
-      isWebChatModeActive() ||
       (clickedSystem === "codex"
         ? !isCodexModeAvailable()
         : !isClaudeModeAvailable())
@@ -5344,6 +5362,7 @@ export function setupHandlers(
             title: getModelOptionTitle(entry),
           },
         );
+        option.dataset.entryId = entry.entryId;
         if (entry.catalogAvailability === "saved-unavailable") {
           option.disabled = true;
           option.classList.add("llm-model-option-disabled");
@@ -5383,16 +5402,22 @@ export function setupHandlers(
             updateReasoningButton();
             return;
           }
-          // [webchat] Remember current model before switching to webchat
           const wasWebChat = isWebChatMode();
+          setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
+          setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
+          // [webchat] Picking an API model from inside webchat is a mode exit:
+          // the shared owner restores the entry, drops the hidden session
+          // row, and returns to the paper's remembered conversation.
+          if (wasWebChat && entry.authMode !== "webchat") {
+            void leaveWebChatMode({ targetEntryId: entry.entryId });
+            return;
+          }
+          // [webchat] Remember current model before switching to webchat
           if (!wasWebChat && entry.authMode === "webchat") {
-            const { selectedEntryId } = getSelectedModelInfo();
-            previousNonWebchatModelId = selectedEntryId || null;
+            webChatModeController.rememberModelBeforeEnteringWebChat();
           }
 
           setSelectedModelEntry(entry.entryId);
-          setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
-          setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
 
           // Keep the relay target synchronized when switching between webchat
           // providers as well as when entering webchat from a local/API model.
@@ -5875,8 +5900,6 @@ export function setupHandlers(
     }
   };
 
-  // [webchat] Remember the previous model so "Exit" can restore it
-  let previousNonWebchatModelId: string | null = null;
   let webchatConnectionTimer: ReturnType<typeof setInterval> | null = null;
   // Simple abort token — Zotero's Gecko context lacks AbortController.
   let webchatPreloadAbort: { aborted: boolean } | null = null;
@@ -5959,12 +5982,44 @@ export function setupHandlers(
 
   // Expose webchat intent clearing via hooks so standalone can call it
   // when loading a conversation from its own sidebar/popup.
+  const webChatModeController = createWebChatModeController({
+    getItem: () => item,
+    isWebChatMode: () => isWebChatMode(),
+    getConversationKey,
+    getAvailableModelEntries,
+    getSelectedModelEntryId: () =>
+      getSelectedModelInfo().selectedEntryId || null,
+    setSelectedModelEntry,
+    abortPreload: abortWebChatPreload,
+    removePreloadOverlay: () => {
+      body.querySelector(".llm-webchat-preload")?.remove();
+    },
+    stopConnectionCheck: () => stopWebChatConnectionCheck(),
+    clearNewChatIntent: clearNextWebChatNewChatIntent,
+    applyWebChatModeUI: () => applyWebChatModeUI(),
+    updateModelButton: () => updateModelButton(),
+    updateReasoningButton: () => updateReasoningButton(),
+    readComposerText: () => inputBox?.value || "",
+    writeComposerText: (text) => {
+      if (!inputBox) return;
+      inputBox.value = text;
+      resizeTextareaToContent(inputBox);
+    },
+    switchPaperConversation: async () =>
+      (await switchPaperConversation()) === true,
+    refreshChatPreservingScroll: () => refreshChatPreservingScroll(),
+    resetComposePreviewUI: () => resetComposePreviewUI(),
+    log: (message, ...args) => ztoolkit.log(message, ...args),
+  });
+  leaveWebChatMode = webChatModeController.leaveWebChatMode;
   if (hooks) {
     hooks.clearWebChatNewChatIntent = () => {
       clearNextWebChatNewChatIntent();
     };
     hooks.getCurrentModelName = () =>
       getSelectedModelInfo().currentModel || null;
+    hooks.leaveWebChatMode = () =>
+      leaveWebChatMode({ restoreConversation: false });
   }
 
   const startWebChatConnectionCheck = (dot: HTMLElement) => {
@@ -6443,14 +6498,6 @@ export function setupHandlers(
         delete modeChipBtn.dataset.webchatStatic;
         modeChipBtn.style.cursor = "";
       }
-    }
-
-    // Model dropdown: fully disabled in webchat (model is ChatGPT, use Exit to change)
-    if (modelBtn) {
-      (modelBtn as HTMLButtonElement).disabled = isWebChat;
-      modelBtn.style.opacity = isWebChat ? "0.5" : "";
-      modelBtn.style.cursor = isWebChat ? "default" : "";
-      modelBtn.style.pointerEvents = isWebChat ? "none" : "";
     }
 
     // [webchat] Pre-fetch history in background so it's ready when user clicks
@@ -8316,46 +8363,7 @@ export function setupHandlers(
 
       // [webchat] "Exit" button → restore previous model and leave webchat mode
       if (isWebChatMode()) {
-        abortWebChatPreload();
-        // Immediately remove preload overlay for instant visual feedback
-        body.querySelector(".llm-webchat-preload")?.remove();
-        stopWebChatConnectionCheck();
-        clearNextWebChatNewChatIntent();
-        // Restore previous model, or fall back to first non-webchat model
-        const restoreId =
-          previousNonWebchatModelId ||
-          getAvailableModelEntries().find((e) => e.authMode !== "webchat")
-            ?.entryId ||
-          null;
-        if (restoreId) {
-          setSelectedModelEntry(restoreId);
-        }
-        previousNonWebchatModelId = null;
-        // Refresh UI back to normal mode
-        updateModelButton();
-        updateReasoningButton();
-        applyWebChatModeUI();
-        // Drop only transient WebChat state. WebChat shares the normal paper
-        // key, so deleting persisted conversation rows here would erase the
-        // user's regular paper chat.
-        const key = getConversationKey(item);
-        resetWebChatConversationSessionState(key);
-        webChatIsolatedConversationKeys.delete(key);
-        chatHistory.delete(key);
-        loadedConversationKeys.delete(key);
-        void (async () => {
-          try {
-            await ensureConversationLoaded(item as Zotero.Item);
-          } catch (err) {
-            ztoolkit.log(
-              "LLM: Failed to reload conversation after webchat exit",
-              err,
-            );
-          }
-          restoreDraftInputForCurrentConversation();
-          refreshChatPreservingScroll();
-          resetComposePreviewUI();
-        })();
+        void leaveWebChatMode();
         return;
       }
 

@@ -198,6 +198,8 @@ export type WorkflowTestDiagnostics = {
   historyNewVisible?: boolean;
   historyToggleVisible?: boolean;
   runtimeSystemToggles: WorkflowTestRuntimeSystemToggle[];
+  webChatMode?: boolean;
+  modelButtonDisabled?: boolean;
   inputValue?: string;
   statusText?: string;
   startPageActive?: boolean;
@@ -506,6 +508,10 @@ export type WorkflowTestApi = {
     panelId: string,
     text: string,
   ) => Promise<WorkflowTestDraftRefreshDiagnostics>;
+  selectPanelModelEntry: (
+    panelId: string,
+    entryId: string,
+  ) => Promise<WorkflowTestDiagnostics>;
   exerciseWebChatPdfToggleWorkflow: (
     panelId: string,
     mirrorPanelId?: string,

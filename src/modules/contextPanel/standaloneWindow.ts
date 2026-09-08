@@ -961,7 +961,6 @@ export function openStandaloneChat(options?: {
           activeSystem: currentConversationSystem,
           codexEnabled: isCodexAppServerModeEnabled(),
           claudeEnabled: getClaudeCodeModeEnabled(),
-          hidden: isInWebChatMode,
         });
       };
 
@@ -3670,6 +3669,15 @@ export function openStandaloneChat(options?: {
         options?: { forceFresh?: boolean },
       ) => {
         const switchSeq = ++systemSwitchSeq;
+        // WebChat is an upstream-only provider mode. Leaving it here restores
+        // a non-webchat model entry before the runtime changes, so the
+        // remounted panel (and a later return to upstream) cannot silently
+        // re-enter webchat; the remount replaces the conversation itself.
+        if (isInWebChatMode) {
+          await currentChatHooks?.leaveWebChatMode?.();
+          if (switchSeq !== systemSwitchSeq || cancelled || newWin.closed)
+            return;
+        }
         const activeNoteSession = resolveActiveNoteSession(activeItem);
         const activeNoteItem = activeNoteSession ? activeItem : null;
         if (activeNoteSession && activeNoteItem) {
@@ -3868,7 +3876,7 @@ export function openStandaloneChat(options?: {
             // A rebuilt standalone shell must never let duplicate listeners
             // turn one physical click into two runtime toggles.
             event.stopImmediatePropagation();
-            if (cancelled || newWin.closed || isInWebChatMode) return;
+            if (cancelled || newWin.closed) return;
             void switchConversationSystem(
               resolveRuntimeSystemToggleTarget(
                 currentConversationSystem,
