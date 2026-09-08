@@ -384,3 +384,82 @@ describe("PaperEvidenceFrontier", function () {
     }
   });
 });
+
+describe("PaperEvidenceFrontier stop guidance by requested coverage", function () {
+  it("tells a targeted question to answer now when a repeated read adds nothing", async function () {
+    const frontier = new PaperEvidenceFrontier({
+      evidencePolicy: { coverage: "targeted", readBudget: 2 },
+    });
+    const input = { mode: "targeted", query: "cross-day decoding" };
+    const first = await frontier.processResult({
+      input,
+      toolCallId: "first",
+      content: { results: [passage({ chunkIndex: 4 })] },
+    });
+    assert.equal(
+      (first.content as any).paperEvidenceProgress.recommendation,
+      "answer_or_self_check",
+    );
+    assert.equal((first.content as any).paperEvidenceProgress.readsThisTurn, 1);
+    const reused = await frontier.readCached({ input, toolCallId: "second" });
+    assert.equal(reused?.frontier, "unchanged");
+    assert.equal(
+      (reused?.content as any).paperEvidenceProgress.recommendation,
+      "answer_now",
+    );
+    assert.include(
+      (reused?.content as any).paperEvidenceProgress.reason,
+      "do not retrieve again",
+    );
+  });
+
+  it("tells a targeted question to answer once the read budget is used even when text is new", async function () {
+    const frontier = new PaperEvidenceFrontier({
+      evidencePolicy: { coverage: "targeted", readBudget: 2 },
+    });
+    await frontier.processResult({
+      input: { mode: "targeted", query: "one" },
+      toolCallId: "first",
+      content: { results: [passage({ chunkIndex: 1 })] },
+    });
+    const second = await frontier.processResult({
+      input: { mode: "targeted", query: "two" },
+      toolCallId: "second",
+      content: { results: [passage({ chunkIndex: 2 })] },
+    });
+    assert.equal(second.frontier, "advanced");
+    assert.equal(
+      (second.content as any).paperEvidenceProgress.recommendation,
+      "answer_now",
+    );
+    assert.equal(
+      (second.content as any).paperEvidenceProgress.readsThisTurn,
+      2,
+    );
+    assert.equal((second.content as any).paperEvidenceProgress.readBudget, 2);
+  });
+
+  it("keeps missing-dimension guidance for exhaustive coverage and by default", async function () {
+    for (const frontier of [
+      new PaperEvidenceFrontier(),
+      new PaperEvidenceFrontier({
+        evidencePolicy: {
+          coverage: "exhaustive",
+          readBudget: Number.POSITIVE_INFINITY,
+        },
+      }),
+    ]) {
+      const input = { mode: "targeted", query: "method" };
+      await frontier.processResult({
+        input,
+        toolCallId: "first",
+        content: { results: [passage({ chunkIndex: 4 })] },
+      });
+      const reused = await frontier.readCached({ input, toolCallId: "second" });
+      assert.equal(
+        (reused?.content as any).paperEvidenceProgress.recommendation,
+        "name_a_specific_missing_dimension",
+      );
+    }
+  });
+});

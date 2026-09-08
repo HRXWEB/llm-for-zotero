@@ -33,7 +33,14 @@ import {
   buildAgentStableResourceContextBlock,
   type AgentResourceContextPlan,
 } from "../context/resourceContextPlan";
-import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
+import {
+  buildAgentCoverageContextBlock,
+  listVisibleAgentCoverageEntries,
+} from "../context/coverageLedger";
+import {
+  renderTurnReadingRule,
+  resolveTurnEvidencePolicy,
+} from "../context/evidencePolicy";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
 import { buildApprovedPlanExecutionInstructions } from "../plans/executionInstructions";
@@ -602,26 +609,26 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
 }
 
 function buildReadingInstruction(request: AgentRuntimeRequest): string {
-  const reading = request.classifiedIntent?.semantic?.reading;
-  if (!reading || reading.source === "metadata") return "";
-  if (reading.source === "provided_context") {
+  const policy = resolveTurnEvidencePolicy(request, {
+    priorCoverage: listVisibleAgentCoverageEntries({
+      conversationKey: request.conversationKey,
+      request,
+    }),
+  });
+  if (!policy) return "";
+  const rule = renderTurnReadingRule(policy);
+  if (policy.source === "provided_context") {
     const noteEdit =
       request.classifiedIntent?.actionIntents.length === 1 &&
       request.classifiedIntent.actionIntents[0].operation === "note_edit";
     return (
-      "TURN RULE: Use the provided context for this task; no source-document retrieval is required." +
+      rule +
       (noteEdit
         ? " Generate the requested replacement, call note_write once, then report its verified result concisely. The host handles native range replacement, save, readback and diff; do not reconstruct HTML or perform a second cleanup edit after success."
         : "")
     );
   }
-  const mode =
-    reading.source === "rendered_pages"
-      ? "visual"
-      : reading.coverage === "exhaustive"
-        ? "full"
-        : reading.coverage;
-  return `TURN RULE: The shared reading intent requires ${reading.source} evidence at ${reading.coverage} coverage. Use paper_read mode '${mode}' on the resolved source boundary. Resource availability does not expand that boundary. Preserve coverage evidence and disclose partial or unreadable sources.`;
+  return rule;
 }
 
 function getInScopePaperContexts(request: AgentRuntimeRequest) {

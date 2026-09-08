@@ -8921,3 +8921,111 @@ describe("model continuation after host clarification", function () {
     }
   });
 });
+
+describe("AgentRuntime evidence stop policy", function () {
+  it("tells a targeted question to answer now after a repeated paper read", async function () {
+    const restoreDb = installMockDb();
+    const toolMessages: string[] = [];
+    let steps = 0;
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "Read paper evidence",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({
+          mode: "targeted",
+          results: [
+            {
+              paperContext: { itemId: 3928, contextItemId: 3931 },
+              chunkIndex: 7,
+              sourceFingerprint: "source-a",
+              sourceKind: "paper_text",
+              text: "Cross-scanning day decoding remained stable over time.",
+            },
+          ],
+        }),
+      });
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            steps += 1;
+            for (const message of params.messages) {
+              if (message.role === "tool") toolMessages.push(message.content);
+            }
+            if (steps <= 2) {
+              const call = {
+                id: `paper-read-${steps}`,
+                name: "paper_read",
+                arguments: { mode: "targeted", query: "cross-day decoding" },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "Decoding stayed stable across days.",
+              assistantMessage: {
+                role: "assistant",
+                content: "Decoding stayed stable across days.",
+              },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 939777,
+          mode: "agent",
+          conversationKind: "paper",
+          activeItemId: 3928,
+          libraryID: 1,
+          userText: "What happened to cross-day decoding?",
+          model: "test-model",
+          apiKey: "test",
+          apiBase: "",
+          classifiedIntent: classifiedFixture({
+            semantic: semanticFixture({
+              reading: { source: "document_text", coverage: "targeted" },
+            }),
+          }),
+        },
+        onEvent: () => {},
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(steps, 3);
+      const last = JSON.parse(
+        toolMessages[toolMessages.length - 1] || "{}",
+      ) as {
+        paperEvidenceProgress?: { recommendation?: string; reason?: string };
+      };
+      assert.equal(last.paperEvidenceProgress?.recommendation, "answer_now");
+      assert.include(
+        last.paperEvidenceProgress?.reason || "",
+        "do not retrieve again",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+});

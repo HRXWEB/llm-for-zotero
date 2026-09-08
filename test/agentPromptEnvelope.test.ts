@@ -7,6 +7,7 @@ import {
 import type { PlanExecutionLedger } from "../src/agent/plans/types";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 
 function messageText(message: AgentModelMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -352,5 +353,89 @@ describe("agent prompt envelope", function () {
     const third = composeAgentModelInput(rendered.envelope);
     assert.include(messageText(third.at(-1)!), "Inspect the supplied image");
     assert.notInclude(messageText(third.at(-1)!), "Mutated composed copy");
+  });
+});
+
+describe("agent prompt envelope evidence sufficiency", function () {
+  const paperContext = {
+    itemId: 3928,
+    contextItemId: 3931,
+    title: "Variability and stability in visual processing",
+  };
+  function request(withAnchor: boolean) {
+    return resolvedAgentRequest({
+      conversationKey: 4102,
+      mode: "agent",
+      conversationKind: "paper",
+      libraryID: 1,
+      activeItemId: paperContext.itemId,
+      selectedPaperContexts: [paperContext],
+      userText: "can you explain this part of result to me?",
+      model: "test-model",
+      ...(withAnchor
+        ? {
+            selectedTextContexts: [
+              {
+                text: "Consistency in categorization of object category over longer time scales",
+                source: "pdf" as const,
+                paperContext,
+                contextItemId: 3931,
+                pageIndex: 5,
+                pageLabel: "6",
+              },
+            ],
+            resolvedSelectedTextAnchors: [
+              {
+                contextIndex: 0,
+                contextItemId: 3931,
+                pageIndex: 5,
+                pageLabel: "6",
+                paperContext,
+                resolution: "chunks" as const,
+                primaryChunkIndex: 41,
+                preferredChunkIndexes: [40, 41, 42],
+                contextText:
+                  "Consistency in categorization of object category over longer time scales. We asked whether...",
+                injectedChars: 100,
+              },
+            ],
+          }
+        : {}),
+      classifiedIntent: classifiedFixture({
+        semantic: semanticFixture({
+          reading: { source: "document_text", coverage: "targeted" },
+        }),
+      }),
+    });
+  }
+
+  it("renders held selection context as satisfying targeted coverage instead of mandating a read", async function () {
+    const messages = await buildAgentInitialMessages(request(true), [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, "Already held");
+    assert.include(prompt, "selected text 1");
+    assert.include(prompt, "only for a specific claim in your draft");
+    assert.notInclude(prompt, "requires document_text evidence");
+  });
+
+  it("keeps the mandatory read rule when no evidence is held", async function () {
+    const messages = await buildAgentInitialMessages(request(false), [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(
+      prompt,
+      "requires document_text evidence at targeted coverage",
+    );
+    assert.notInclude(prompt, "Already held");
+  });
+
+  it("explains the answer_now retrieval state in the stable persona", async function () {
+    const messages = await buildAgentInitialMessages(request(false), [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, "answer_now");
+    assert.include(prompt, "answer_or_self_check");
+    assert.notInclude(
+      prompt,
+      "when unchanged, do not repeat the read and retrieve again only for a specifically named missing dimension",
+    );
   });
 });

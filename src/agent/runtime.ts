@@ -22,6 +22,7 @@ import {
   hydrateAgentCoverageLedger,
 } from "./context/coverageLedger";
 import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
+import { resolveTurnEvidencePolicy } from "./context/evidencePolicy";
 import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
 import {
   AgentPromptBudgetError,
@@ -1186,7 +1187,9 @@ export class AgentRuntime {
       const resourceContextPlan = buildAgentResourceContextPlan(request);
       context.resourceSignature = resourceContextPlan.resourceSignature;
       request.contextCache = resourceContextPlan.contextCache;
-      const paperEvidenceFrontier = new PaperEvidenceFrontier();
+      const paperEvidenceFrontier = new PaperEvidenceFrontier({
+        evidencePolicy: resolveTurnEvidencePolicy(request),
+      });
       const preservedTurnHandleRecords: AgentToolResultHandleRecord[] = [];
       const transcriptCompatibilityKey = buildAgentTranscriptCompatibilityKey({
         request,

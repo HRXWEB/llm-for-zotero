@@ -1,5 +1,10 @@
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
+import {
+  resolveReadStopGuidance,
+  type ReadStopPolicy,
+  type ReadStopRecommendation,
+} from "./evidencePolicy";
 
 export type PaperEvidenceProgress = {
   frontier: "advanced" | "unchanged" | "unavailable";
@@ -7,11 +12,18 @@ export type PaperEvidenceProgress = {
   newOccurrenceIds: string[];
   repeatedOccurrenceIds: string[];
   cumulativeOccurrenceCount: number;
-  recommendation:
-    | "answer_or_self_check"
-    | "name_a_specific_missing_dimension"
-    | "answer_with_source_limitation";
+  recommendation: ReadStopRecommendation;
   reason: string;
+  /** Eligible paper reads so far in this turn, including reused calls. */
+  readsThisTurn?: number;
+  /** Reads after which the requested coverage asks the model to answer. */
+  readBudget?: number;
+};
+
+/** Default when the turn declares no reading requirement: drain the source. */
+const EXHAUSTIVE_STOP_POLICY: ReadStopPolicy = {
+  coverage: "exhaustive",
+  readBudget: Number.POSITIVE_INFINITY,
 };
 
 export type PaperEvidenceReference = {
@@ -429,28 +441,21 @@ function progressFor(params: {
   newOccurrenceIds: string[];
   repeatedOccurrenceIds: string[];
   cumulativeOccurrenceCount: number;
+  stopPolicy: ReadStopPolicy;
+  readsThisTurn: number;
 }): PaperEvidenceProgress {
-  if (params.frontier === "advanced") {
-    return {
-      ...params,
-      recommendation: "answer_or_self_check",
-      reason:
-        "New source occurrences were delivered. Evaluate the accumulated evidence and either answer or identify one concrete missing dimension.",
-    };
-  }
-  if (params.frontier === "unchanged") {
-    return {
-      ...params,
-      recommendation: "name_a_specific_missing_dimension",
-      reason:
-        "This read added no new source occurrence. Do not repeat it; retrieve again only for a specifically named unresolved method, result, qualification, section, or comparison dimension.",
-    };
-  }
+  const { stopPolicy, ...progress } = params;
+  const guidance = resolveReadStopGuidance(stopPolicy, {
+    frontier: params.frontier,
+    readsThisTurn: params.readsThisTurn,
+  });
   return {
-    ...params,
-    recommendation: "answer_with_source_limitation",
-    reason:
-      "The requested textual source was unavailable. Give the best supported answer and disclose the source limitation.",
+    ...progress,
+    ...(Number.isFinite(stopPolicy.readBudget)
+      ? { readBudget: stopPolicy.readBudget }
+      : {}),
+    recommendation: guidance.recommendation,
+    reason: guidance.reason,
   };
 }
 
@@ -458,6 +463,12 @@ export class PaperEvidenceFrontier {
   private readonly seenOccurrences = new Map<string, StoredOccurrence>();
   private readonly occurrencesByContentHash = new Map<string, Set<string>>();
   private readonly cachedCalls = new Map<string, CachedCall>();
+  private readonly stopPolicy: ReadStopPolicy;
+  private readsThisTurn = 0;
+
+  constructor(options: { evidencePolicy?: ReadStopPolicy | null } = {}) {
+    this.stopPolicy = options.evidencePolicy || EXHAUSTIVE_STOP_POLICY;
+  }
 
   async readCached(
     params: CacheLookupParams,
@@ -467,6 +478,7 @@ export class PaperEvidenceFrontier {
       await callKey(params.input, params.resourceSignature),
     );
     if (!cached) return null;
+    this.readsThisTurn += 1;
     if (cached.failOpenContent) {
       return {
         frontier: "advanced",
@@ -479,6 +491,7 @@ export class PaperEvidenceFrontier {
             newOccurrenceIds: [],
             repeatedOccurrenceIds: [],
             cumulativeOccurrenceCount: this.seenOccurrences.size,
+            readsThisTurn: this.readsThisTurn,
             recommendation: "answer_or_self_check",
             reason:
               "The identical backend result was reused, but its provenance was insufficient for safe occurrence suppression, so the evidence was delivered again.",
@@ -497,6 +510,8 @@ export class PaperEvidenceFrontier {
       newOccurrenceIds: [],
       repeatedOccurrenceIds,
       cumulativeOccurrenceCount: this.seenOccurrences.size,
+      stopPolicy: this.stopPolicy,
+      readsThisTurn: this.readsThisTurn,
     });
     return {
       frontier,
@@ -518,6 +533,7 @@ export class PaperEvidenceFrontier {
     if (!content) {
       return { content: params.content, frontier: "unavailable" };
     }
+    this.readsThisTurn += 1;
     const mode = paperReadMode(params.input);
     const coverage = resolveCoverage(content, mode);
     const occurrences = await collectOccurrences({
@@ -620,6 +636,8 @@ export class PaperEvidenceFrontier {
         .filter((entry): entry is string => Boolean(entry)),
       repeatedOccurrenceIds,
       cumulativeOccurrenceCount: this.seenOccurrences.size,
+      stopPolicy: this.stopPolicy,
+      readsThisTurn: this.readsThisTurn,
     });
     const references = [...newReferences, ...repeatedReferences];
     const processedContent = {
