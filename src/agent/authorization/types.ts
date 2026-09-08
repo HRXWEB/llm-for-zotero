@@ -49,7 +49,7 @@ export type ActionRiskSignal =
 
 export type ActionProposal = {
   version: 2;
-  runtime: "original" | "claude" | "codex";
+  runtime: "original" | "claude" | "codex" | "external";
   toolName: string;
   operation: string;
   capabilities: string[];
@@ -74,6 +74,7 @@ export type AuthorizationDecision =
       kind: "execute";
       authority:
         | "safe_read"
+        | "external_runtime"
         | "requested_note"
         | "auto_policy"
         | "yolo"

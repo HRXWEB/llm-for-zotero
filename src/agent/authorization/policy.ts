@@ -121,17 +121,8 @@ export function authorizeOriginalAction(
         "Remember this within the conversation only. The user did not request a saved note or file; answer from the paper and retain the discussion in chat.",
     };
   }
-  if (
-    proposal.invocationPlan.impact === "prohibited" ||
-    proposal.riskSignals.includes("protected_target") ||
-    proposal.riskSignals.includes("raw_database") ||
-    proposal.riskSignals.includes("authorization_tampering")
-  ) {
-    return {
-      kind: "block",
-      reason: "The proposed action targets a protected integrity boundary.",
-    };
-  }
+  const integrityFailure = actionIntegrityFailure(proposal);
+  if (integrityFailure) return integrityFailure;
   const trustedRead =
     proposal.invocationPlan.impact === "read_only" &&
     proposal.invocationPlan.assurance !== "unknown";
@@ -230,4 +221,33 @@ export function authorizeOriginalAction(
     kind: "block",
     reason: "The proposed effect has no matching semantic action authority.",
   };
+}
+
+/** Execution integrity applies independently of which agent owns permission. */
+export function actionIntegrityFailure(
+  proposal: ActionProposal,
+): AuthorizationDecision | null {
+  if (
+    proposal.invocationPlan.impact === "prohibited" ||
+    proposal.riskSignals.includes("protected_target") ||
+    proposal.riskSignals.includes("raw_database") ||
+    proposal.riskSignals.includes("authorization_tampering")
+  ) {
+    return {
+      kind: "block",
+      reason: "The proposed action targets a protected integrity boundary.",
+    };
+  }
+  return null;
+}
+
+export function authorizeExternalAction(
+  proposal: ActionProposal,
+): AuthorizationDecision {
+  return (
+    actionIntegrityFailure(proposal) || {
+      kind: "execute",
+      authority: "external_runtime",
+    }
+  );
 }

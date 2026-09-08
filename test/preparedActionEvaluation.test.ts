@@ -113,6 +113,40 @@ describe("prepared action completion", function () {
     };
   }
 
+  it("reports delegated native receipts without rechecking Original Agent intent", function () {
+    const receipt = {
+      ...tagReceipt("applied"),
+      executionAuthority: "external_runtime" as const,
+    };
+    const request = {
+      actionPreparation: {
+        state: "needs_input" as const,
+        issues: ["Original semantic reference was not resolved"],
+      },
+    };
+    assert.equal(
+      evaluatePreparedActionContract(request, [receipt]).state,
+      "satisfied",
+    );
+    assert.equal(
+      evaluatePreparedActionContract(request, [tagReceipt("applied")]).state,
+      "failed",
+    );
+  });
+
+  for (const status of ["partial", "failed", "unverified"] as const) {
+    it(`reports delegated ${status} effects without automatically retrying`, function () {
+      const receipt = {
+        ...tagReceipt(status),
+        executionAuthority: "external_runtime" as const,
+      };
+      const decision = evaluatePreparedActionContract({}, [receipt]);
+      assert.equal(decision.state, status);
+      assert.include(decision.failure!, status);
+      assert.isUndefined(decision.correction);
+    });
+  }
+
   it("reports a dropped action as not performed instead of bare success", function () {
     const contract = semanticContractFixture({
       id: "dropped",

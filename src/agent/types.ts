@@ -931,6 +931,8 @@ export type AgentJournalActionScope = {
 };
 
 export type AgentToolContext = {
+  /** Host-owned authority; never decoded from model or MCP tool arguments. */
+  authorization?: { kind: "external_runtime"; standalone: boolean };
   /** Retain native-verified child results when a prepared workflow coordinates tools. */
   recordChildExecution?: (result: AgentToolResult) => void;
   /** Host-only execution lifetime carried into child action invocations. */
@@ -961,6 +963,7 @@ export type AgentToolContext = {
     | "user"
     | "safe_read"
     | "requested_note"
+    | "external_runtime"
     | "auto_policy"
     | "yolo"
     | "yolo_judgment"

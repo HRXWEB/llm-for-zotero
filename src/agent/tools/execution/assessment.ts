@@ -1,6 +1,9 @@
 import { resolveActionInteraction } from "../../authorization/interaction";
 import { defaultInvocationPlan } from "../../authorization/invocationPlan";
-import { authorizeOriginalAction } from "../../authorization/policy";
+import {
+  authorizeOriginalAction,
+  authorizeExternalAction,
+} from "../../authorization/policy";
 import { buildActionProposal } from "../../authorization/proposal";
 import type {
   ActionInteraction,
@@ -68,6 +71,7 @@ export class InvocationAssessor {
   ): Promise<AssessedInvocation> {
     const { tool, context, options, contracts } = this;
     const request = context.request;
+    const delegated = context.authorization?.kind === "external_runtime";
     const plan = await (
       tool.planInvocation ||
       (() => defaultInvocationPlan(tool.spec.executionClass))
@@ -101,10 +105,10 @@ export class InvocationAssessor {
       Boolean(options.inheritedApproval) ||
       (options.callerKind === "action" &&
         request.actionEntryPoint !== "conversation");
-    const enforceContract = !hostAction || Boolean(context.journalActionScope);
-    const preparationBlock = hostAction
-      ? null
-      : preparationEffectBlock(request, plan);
+    const enforceContract =
+      !delegated && (!hostAction || Boolean(context.journalActionScope));
+    const preparationBlock =
+      hostAction || delegated ? null : preparationEffectBlock(request, plan);
     if (preparationBlock) throw new Error(preparationBlock);
     if (
       effect &&
@@ -120,12 +124,19 @@ export class InvocationAssessor {
     if (
       effect &&
       request.planContext?.phase === "executing" &&
+      !delegated &&
       !request.actionContract
     )
       throw new Error(
         `Approved Plan execution blocked ${tool.spec.name}: the frozen action contract is unavailable.`,
       );
-    if (effect && !hostAction && contracts && !request.actionContract)
+    if (
+      effect &&
+      !delegated &&
+      !hostAction &&
+      contracts &&
+      !request.actionContract
+    )
       throw new Error(
         `Mutation blocked for ${tool.spec.name}: no validated action contract exists for this request.`,
       );
@@ -173,27 +184,30 @@ export class InvocationAssessor {
       preparedAction?.proposals || [],
       Boolean(options.forceConfirmation),
     );
-    const authorization = authorizeOriginalAction(proposal, {
-      mode: getOriginalAgentPermissionMode(),
-      interaction,
-      hasApprovedPlanAuthority: request.planContext?.phase === "executing",
-      semantic: options.inheritedApproval
-        ? undefined
-        : request.classifiedIntent?.semantic ||
-          request.actionContract?.intent?.semantic,
-      constraints:
-        request.actionContract?.intent?.semantic?.constraints ||
-        request.classifiedIntent?.semantic?.constraints ||
-        [],
-      hasMatchingActionIntent:
-        hostAction ||
-        Boolean(
-          scopeValidated &&
-          !scopeFailure &&
-          preparedAction?.proposals.length &&
-          request.actionContract?.obligations.length,
-        ),
-    });
+    if (delegated) proposal.runtime = "external";
+    const authorization = delegated
+      ? authorizeExternalAction(proposal)
+      : authorizeOriginalAction(proposal, {
+          mode: getOriginalAgentPermissionMode(),
+          interaction,
+          hasApprovedPlanAuthority: request.planContext?.phase === "executing",
+          semantic: options.inheritedApproval
+            ? undefined
+            : request.classifiedIntent?.semantic ||
+              request.actionContract?.intent?.semantic,
+          constraints:
+            request.actionContract?.intent?.semantic?.constraints ||
+            request.classifiedIntent?.semantic?.constraints ||
+            [],
+          hasMatchingActionIntent:
+            hostAction ||
+            Boolean(
+              scopeValidated &&
+              !scopeFailure &&
+              preparedAction?.proposals.length &&
+              request.actionContract?.obligations.length,
+            ),
+        });
     return {
       input,
       plan,

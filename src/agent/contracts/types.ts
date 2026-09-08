@@ -200,6 +200,7 @@ export type AgentActionProgressLedger = {
     proposalDigest: string;
     toolName: string;
     authority:
+      | "external_runtime"
       | "safe_confirmation"
       | "auto_policy"
       | "yolo"
@@ -238,6 +239,8 @@ export type AgentActionProposal = {
 
 export type AgentActionReceipt = {
   version: 2;
+  /** Stamped by the invocation controller, never supplied by tool arguments. */
+  executionAuthority?: "external_runtime";
   id: string;
   obligationId?: string;
   proposalId: string;

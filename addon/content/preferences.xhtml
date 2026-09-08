@@ -666,6 +666,52 @@
         style="display: none; flex-direction: column; gap: 18px"
       >
         <html:div
+          id="__addonRef__-external-mcp-settings"
+          style="
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px;
+            border: 1px solid var(--stroke-secondary, #c8c8c8);
+            border-radius: 8px;
+            background: Field;
+          "
+        >
+          <html:span
+            style="font-weight: 700; font-size: 13px"
+            data-l10n-id="pref-external-mcp-title"
+            >External MCP clients</html:span
+          >
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-size: 12px;
+              cursor: pointer;
+            "
+          >
+            <html:input type="checkbox" id="__addonRef__-external-mcp-writes" />
+            <html:span data-l10n-id="pref-external-mcp-writes"
+              >Allow writes from external MCP clients</html:span
+            >
+          </html:label>
+          <html:span
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #777);
+              line-height: 1.5;
+            "
+            data-l10n-id="pref-external-mcp-description"
+            >Trust clients holding the MCP connection credential to use all
+            exposed Zotero write tools, including deletion and scripts. The
+            connected agent controls approval; Original Agent permission modes
+            do not apply. Zotero validates and verifies changes. Integrated
+            Codex and Claude Code use their own MCP enablement
+            settings.</html:span
+          >
+        </html:div>
+        <html:div
           id="__addonRef__-original-agent-card"
           style="
             border: 1px solid var(--stroke-secondary, #c8c8c8);
@@ -1018,8 +1064,8 @@
               "
             >
               First-class Codex runtime integration. Run
-              <html:code>codex login</html:code> before enabling it; Zotero
-              keeps local tool approvals in its own confirmation cards.
+              <html:code>codex login</html:code> before enabling it. Codex
+              controls tool approval through its own permission profile.
             </html:span>
             <html:div
               style="
@@ -1368,9 +1414,11 @@
                     "
                   >
                     Lets native Codex and Claude Code use a curated local MCP
-                    server for Zotero library/PDF reading and guarded Zotero
-                    operations. Write and destructive tools still use Zotero
-                    confirmation or tool-specific safety checks.
+                    server for Zotero library/PDF reading and write operations.
+                    The calling runtime controls approval using its own
+                    permission settings. Zotero validates operations, records
+                    recovery data, and verifies changes without duplicate
+                    permission prompts.
                   </html:span>
                 </html:div>
                 <html:label

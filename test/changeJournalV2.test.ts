@@ -7,6 +7,7 @@ import { withActiveJournalAction } from "../src/agent/services/externalMutationC
 import {
   clearAgentChangeJournal,
   compactRevertedJournalAction,
+  finalizeRevertedJournalAction,
   deleteConversationJournal,
   initAgentChangeJournal,
   JOURNAL_BLOB_CLEANUP_TABLE,
@@ -51,6 +52,73 @@ describe("durable change journal v2", function () {
     await initAgentChangeJournal();
     return db;
   }
+
+  it("requires explicit recovery identities for standalone MCP callers", async function () {
+    const external = {
+      ...context,
+      authorization: { kind: "external_runtime", standalone: true },
+    } as AgentToolContext;
+    for (const [tool, args] of [
+      [createUndoLastActionTool({} as never), {}],
+      [createRevertChangesTool({} as never), { count: 1, dryRun: false }],
+    ] as const) {
+      let failure: unknown;
+      try {
+        await tool.planInvocation!(args as never, external);
+      } catch (error) {
+        failure = error;
+      }
+      assert.include(String(failure), "explicit action");
+    }
+  });
+
+  it("selects only explicit revert action IDs after a journal restart", async function () {
+    await prepareAction({ id: "chosen", createdAt: 1 });
+    await prepareAction({ id: "neighbor", createdAt: 2 });
+    await install(db);
+    const tool = createRevertChangesTool({} as never);
+    const validated = tool.validate({ actionIds: ["chosen"], dryRun: false });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    const plan = await tool.planInvocation!(validated.value, {
+      ...context,
+      authorization: { kind: "external_runtime", standalone: true },
+    });
+    assert.deepEqual(plan.targets, ["journal-action:chosen"]);
+    assert.isFalse(tool.validate({ actionIds: [], count: 1 }).ok);
+    assert.isFalse(tool.validate({ actionIds: ["chosen"], count: 1 }).ok);
+  });
+
+  it("finalizes standalone recovery without inventing a conversation", async function () {
+    const actionId = await prepareJournalAction({
+      runId: "mcp-run",
+      conversationKey: 0,
+      toolName: "note_write",
+      description: "Standalone note",
+      effect: "write",
+      reversibility: "full",
+    });
+    assert.isString(actionId);
+    await updateJournalAction({ actionId: actionId!, status: "reverting" });
+    assert.isTrue(await finalizeRevertedJournalAction({ actionId: actionId! }));
+    assert.equal(
+      (await listJournalActions({ actionId: actionId! }))[0].status,
+      "reverted",
+    );
+  });
+
+  it("orders explicit recovery by journal insertion when timestamps tie", async function () {
+    await prepareAction({ id: "z-older", createdAt: 10 });
+    await prepareAction({ id: "a-newer", createdAt: 10 });
+    const tool = createRevertChangesTool({} as never);
+    const input = tool.validate({ actionIds: ["z-older", "a-newer"] });
+    if (!input.ok) throw new Error(input.error);
+    const plan = await tool.planInvocation!(input.value, context);
+    assert.deepEqual(plan.targets, [
+      "journal-action:a-newer",
+      "journal-action:z-older",
+    ]);
+  });
 
   beforeEach(async function () {
     await install();

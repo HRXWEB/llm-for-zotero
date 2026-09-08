@@ -38,6 +38,7 @@ pref("codexAppServerReasoning", "auto");
 pref("codexAppServerPath", "");
 pref("codexAppServerConversationModeMap", "");
 pref("codexAppServerZoteroMcpToolsEnabled", true);
+pref("externalMcpWritesEnabled", false);
 pref("codexAppServerNativeApprovalsEnabled", false);
 pref("codexAppServerApprovalsReviewer", "user");
 pref("codexAppServerPermissionProfile", ":read-only");

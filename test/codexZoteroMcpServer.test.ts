@@ -170,6 +170,359 @@ describe("Zotero MCP server", function () {
       originalZotero;
   });
 
+  for (const mode of ["safe", "auto", "yolo"]) {
+    for (const integrated of [false, true]) {
+      for (const name of [
+        "collection_update",
+        "library_import",
+        "library_update",
+        "note_write",
+        "attachment_update",
+        "library_delete",
+        "zotero_script",
+      ]) {
+        it(`delegates ${name} approval in ${mode} (${integrated ? "integrated" : "standalone"})`, async function () {
+          prefStore.set(
+            "extensions.zotero.llmforzotero.originalAgentPermissionMode",
+            mode,
+          );
+          prefStore.set(
+            "extensions.zotero.llmforzotero.externalMcpWritesEnabled",
+            !integrated,
+          );
+          let executed = 0;
+          const registry = new AgentToolRegistry(
+            new ActionContractService({ getItem: () => null } as never),
+          );
+          const tool = createWriteTool(name);
+          tool.createPendingAction = async () => {
+            throw new Error("Duplicate permission review");
+          };
+          tool.execute = async (_input, context) => {
+            executed++;
+            assert.equal(context.executionAuthority, "external_runtime");
+            assert.isNotEmpty(context.runId);
+            assert.equal(context.request.libraryID, 1);
+            return { content: { applied: true }, effect: "applied" };
+          };
+          registry.register(tool);
+          registerMcpServer({
+            toolRegistry: registry,
+            zoteroGateway: {} as never,
+          });
+          const scope = integrated
+            ? registerScopedZoteroMcpScope({
+                conversationKey: 430,
+                libraryID: 1,
+                kind: "global",
+                runtimeAuthority: "codex",
+                requestInteraction: async () => {
+                  throw new Error("Duplicate host approval");
+                },
+              })
+            : undefined;
+          try {
+            const response = await invokeMcpEndpoint({
+              token: getOrCreateZoteroMcpBearerToken(),
+              headers: scope
+                ? { [ZOTERO_MCP_SCOPE_HEADER]: scope.token }
+                : undefined,
+              body: {
+                jsonrpc: "2.0",
+                id: 430,
+                method: "tools/call",
+                params: {
+                  name,
+                  arguments: {
+                    libraryID: 1,
+                    action: "create",
+                    name: "Issue 430",
+                  },
+                },
+              },
+            });
+            const payload = JSON.parse(response[2]);
+            assert.isUndefined(payload.result.isError, JSON.stringify(payload));
+            assert.equal(executed, 1);
+          } finally {
+            scope?.clear();
+          }
+        });
+      }
+    }
+  }
+
+  for (const scenario of [
+    "audit failure",
+    "changed payload",
+    "disabled while preparing",
+    "planning turn",
+    "aborted turn",
+    "partial effect",
+    "completion audit failure",
+    "native read-only error",
+  ]) {
+    it(`preserves delegated execution integrity: ${scenario}`, async function () {
+      prefStore.set(
+        "extensions.zotero.llmforzotero.externalMcpWritesEnabled",
+        true,
+      );
+      let executed = 0;
+      let assessments = 0;
+      const registry = new AgentToolRegistry(
+        new ActionContractService({ getItem: () => null } as never),
+      );
+      const tool = createWriteTool("collection_update");
+      tool.planInvocation = async () => {
+        assessments++;
+        if (scenario === "aborted turn") scoped?.clear();
+        if (scenario === "disabled while preparing")
+          prefStore.set(
+            "extensions.zotero.llmforzotero.externalMcpWritesEnabled",
+            false,
+          );
+        return stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["create"],
+          targets: [
+            scenario === "changed payload" && assessments > 1
+              ? "collection:2"
+              : "collection:1",
+          ],
+          reversibility: "full",
+          reason: "Concrete collection change",
+        });
+      };
+      tool.execute = async () => {
+        executed++;
+        if (scenario === "native read-only error")
+          throw new Error("Library is read-only");
+        return {
+          content: { applied: true },
+          effect: scenario === "partial effect" ? "partial" : "applied",
+        };
+      };
+      registry.register(tool);
+      registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+      const db = Zotero.DB as unknown as ChangeJournalTestDb;
+      db.failWhen = (_sql, params) =>
+        params.includes(
+          scenario === "completion audit failure"
+            ? "external_execution_completed"
+            : scenario === "audit failure"
+              ? "external_authorization_prepared"
+              : "never-fail",
+        )
+          ? new Error("Audit disk failure")
+          : null;
+      const controller = new AbortController();
+      const scoped =
+        scenario === "planning turn" || scenario === "aborted turn"
+          ? registerScopedZoteroMcpScope({
+              runtimeAuthority: "claude",
+              conversationKey: 430,
+              kind: "global",
+              libraryID: 1,
+              ...(scenario === "planning turn"
+                ? { planContext: { phase: "planning" } as never }
+                : {}),
+              signal: controller.signal,
+            })
+          : undefined;
+
+      try {
+        const response = await invokeMcpEndpoint({
+          token: getOrCreateZoteroMcpBearerToken(),
+          headers: scoped
+            ? { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token }
+            : undefined,
+          body: {
+            jsonrpc: "2.0",
+            id: 430,
+            method: "tools/call",
+            params: { name: "collection_update", arguments: { libraryID: 1 } },
+          },
+        });
+        const result = JSON.parse(response[2]).result;
+        const success =
+          scenario === "partial effect" ||
+          scenario === "completion audit failure";
+        assert.equal(Boolean(result.isError), !success, JSON.stringify(result));
+        assert.equal(
+          executed,
+          success || scenario === "native read-only error" ? 1 : 0,
+        );
+        if (scenario === "partial effect")
+          assert.equal(JSON.parse(result.content[0].text).effect, "partial");
+      } finally {
+        scoped?.clear();
+      }
+    });
+  }
+
+  it("retains delegated authority through nested registry execution", async function () {
+    prefStore.set(
+      "extensions.zotero.llmforzotero.externalMcpWritesEnabled",
+      true,
+    );
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
+    const child = createWriteTool("child_write");
+    child.createPendingAction = async () => {
+      throw new Error("Nested duplicate approval");
+    };
+    child.execute = async (_input, context) => {
+      assert.equal(context.executionAuthority, "external_runtime");
+      return { content: { childApplied: true }, effect: "applied" };
+    };
+    registry.register(child);
+    const outer = createWriteTool("collection_update");
+    outer.execute = async (_input, context) => {
+      const childResult = await registry.prepareExecution(
+        { id: "child", name: "child_write", arguments: {} },
+        context,
+        {
+          callerKind: "model",
+          forceConfirmation: true,
+          ...context.nestedExecutionOptions,
+        },
+      );
+      assert.equal(childResult.kind, "result");
+      if (childResult.kind !== "result")
+        throw new Error("Unexpected child review");
+      assert.isTrue(
+        childResult.execution.result.ok,
+        JSON.stringify(childResult),
+      );
+      return {
+        content: childResult.execution.result.content,
+        effect: "applied",
+      };
+    };
+    registry.register(outer);
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const response = await invokeMcpEndpoint({
+      token: getOrCreateZoteroMcpBearerToken(),
+      body: {
+        jsonrpc: "2.0",
+        id: 430,
+        method: "tools/call",
+        params: { name: "collection_update", arguments: {} },
+      },
+    });
+    const payload = JSON.parse(response[2]);
+    assert.isUndefined(payload.result.isError, JSON.stringify(payload));
+  });
+
+  it("isolates concurrent standalone writes and freezes each library", async function () {
+    prefStore.set(
+      "extensions.zotero.llmforzotero.externalMcpWritesEnabled",
+      true,
+    );
+    const contexts: Array<{
+      runId?: string;
+      libraryID: number;
+      conversationKey: number;
+      userText: string;
+    }> = [];
+    let entered!: () => void;
+    let release!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const writesMayFinish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
+    const tool = createWriteTool("collection_update");
+    tool.execute = async (_input, context) => {
+      contexts.push({
+        runId: context.runId,
+        libraryID: context.request.libraryID,
+        conversationKey: context.request.conversationKey,
+        userText: context.request.userText,
+      });
+      if (contexts.length === 1) entered();
+      else release();
+      await writesMayFinish;
+      return {
+        content: { libraryID: context.request.libraryID },
+        effect: "applied",
+      };
+    };
+    registry.register(tool);
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const unrelated = registerScopedZoteroMcpScope({
+      runtimeAuthority: "codex",
+      libraryID: 99,
+      conversationKey: 999,
+      kind: "global",
+      userText: "Unrelated private turn",
+    });
+    const call = () =>
+      invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        body: {
+          jsonrpc: "2.0",
+          id: 430,
+          method: "tools/call",
+          params: { name: "collection_update", arguments: {} },
+        },
+      });
+    try {
+      selectedLibraryID = 1;
+      const first = call();
+      await firstEntered;
+      selectedLibraryID = 2;
+      const second = call();
+      const results = await Promise.all([first, second]);
+      for (const response of results)
+        assert.isUndefined(JSON.parse(response[2]).result.isError);
+      assert.deepEqual(
+        contexts.map((value) => value.libraryID),
+        [1, 2],
+      );
+      assert.notEqual(contexts[0].runId, contexts[1].runId);
+      assert.isTrue(
+        contexts.every(
+          (value) => value.conversationKey === 0 && value.userText === "",
+        ),
+      );
+    } finally {
+      release();
+      unrelated.clear();
+    }
+  });
+
+  it("keeps standalone writes disabled until explicitly enabled", async function () {
+    const registry = new AgentToolRegistry();
+    const tool = createWriteTool("collection_update");
+    tool.execute = async () => {
+      throw new Error("Must not execute");
+    };
+    registry.register(tool);
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const response = await invokeMcpEndpoint({
+      token: getOrCreateZoteroMcpBearerToken(),
+      body: {
+        jsonrpc: "2.0",
+        id: 430,
+        method: "tools/call",
+        params: {
+          name: "collection_update",
+          arguments: { libraryID: 1, action: "create", name: "Denied" },
+        },
+      },
+    });
+    assert.include(
+      JSON.parse(response[2]).result.content[0].text,
+      "Allow writes from external MCP clients",
+    );
+  });
+
   it("uses Zotero's configured HTTP port and rejects unauthenticated calls", async function () {
     const registry = new AgentToolRegistry(
       new ActionContractService({ getItem: () => null } as never),
@@ -2605,6 +2958,11 @@ describe("Zotero MCP server", function () {
       assert.equal(content.ok, true, JSON.stringify(content));
       assert.deepEqual(content.result, { applied: true });
       assert.equal(executeCount, 1);
+      assert.isNotEmpty(content.actionReceipts);
+      assert.isString(
+        content.actionReceipts[0].obligationId,
+        "Integrated receipts must still update the host workflow progress",
+      );
     } finally {
       scoped.clear();
     }

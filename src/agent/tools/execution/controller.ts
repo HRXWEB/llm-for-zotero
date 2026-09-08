@@ -1,3 +1,4 @@
+import { recordJournalObservation } from "../../store/changeJournal";
 import { ToolExecutionFailure } from "./failure";
 import { buildActionCallDigest } from "../../authorization/proposal";
 import type {
@@ -47,6 +48,7 @@ type AuthorizedAmendment = {
 };
 /** Authority recorded on the persisted authorization grant for one invocation. */
 type GrantAuthority =
+  | "external_runtime"
   | "safe_confirmation"
   | "auto_policy"
   | "yolo"
@@ -147,12 +149,20 @@ export class InvocationController {
         this.context.request.actionProgress,
         receipts,
       );
-    return [
+    const allReceipts = [
       ...receipts,
       ...[...this.childResults.values()].flatMap(
         (result) => result.actionReceipts || [],
       ),
     ];
+    return this.context.authorization?.kind === "external_runtime" &&
+      this.tool.spec.executionClass === "external_effect" &&
+      assessed?.plan.impact !== "read_only"
+      ? allReceipts.map((receipt) => ({
+          ...receipt,
+          executionAuthority: "external_runtime" as const,
+        }))
+      : allReceipts;
   }
 
   private failure(
@@ -330,7 +340,8 @@ export class InvocationController {
       assessed.authorization.kind === "confirm" ||
       scopeDecision?.kind === "confirm" ||
       toolReview ||
-      (this.options.forceConfirmation &&
+      (this.context.authorization?.kind !== "external_runtime" &&
+        this.options.forceConfirmation &&
         this.options.callerKind !== "mcp" &&
         Boolean(this.tool.createPendingAction));
     if (needsReview) {
@@ -459,6 +470,8 @@ export class InvocationController {
     assessed: AssessedInvocation,
     userApproval?: string,
   ): GrantAuthority {
+    if (this.context.authorization?.kind === "external_runtime")
+      return "external_runtime";
     if (userApproval) return "safe_confirmation";
     const amended = this.amendment?.grant.authority;
     if (amended) return amended === "user" ? "safe_confirmation" : amended;
@@ -483,6 +496,32 @@ export class InvocationController {
     assessed: AssessedInvocation,
     userApproval?: string,
   ) {
+    if (
+      this.context.authorization?.kind === "external_runtime" &&
+      assessed.plan.impact !== "read_only"
+    ) {
+      const grant = {
+        version: 2 as const,
+        interaction: assessed.interaction,
+        proposalDigest: assessed.proposal.payloadDigest,
+        toolName: this.call.name,
+        authority: "external_runtime" as const,
+        status: "staged" as "staged" | "executed" | "failed",
+        createdAt: Date.now(),
+      };
+      await recordJournalObservation({
+        event: "external_authorization_prepared",
+        objectType: "tool_invocation",
+        objectIds: [this.context.runId!, this.call.id],
+        extra: {
+          grant,
+          libraryID: this.context.request.libraryID,
+          proposal: assessed.proposal,
+          input: this.call.arguments,
+        },
+      });
+      return grant;
+    }
     if (
       !(
         ["model", "mcp"].includes(this.options.callerKind || "model") &&
@@ -658,6 +697,25 @@ export class InvocationController {
                   )
                 ? "applied"
                 : undefined;
+        if (this.context.authorization?.kind === "external_runtime" && grant) {
+          await recordJournalObservation({
+            event: "external_execution_completed",
+            objectType: "tool_invocation",
+            objectIds: [this.context.runId!, this.call.id],
+            extra: {
+              authority: grant.authority,
+              effect,
+              actionEvidence: output.actionEvidence,
+              content: output.content,
+            },
+          }).catch((error) => {
+            // The mutation journal and native receipts remain authoritative.
+            // A supplementary audit failure must not invite replay of a saved write.
+            Zotero.debug?.(
+              `External execution audit could not be recorded: ${String(error)}`,
+            );
+          });
+        }
         return this.result({
           tool: this.tool,
           input: assessed.input,
@@ -684,6 +742,14 @@ export class InvocationController {
         });
       } catch (error) {
         if (grant) grant.status = "failed";
+        if (this.context.authorization && grant) {
+          await recordJournalObservation({
+            event: "external_execution_failed",
+            objectType: "tool_invocation",
+            objectIds: [this.context.runId!, this.call.id],
+            extra: { authority: "external_runtime", error: String(error) },
+          }).catch(() => undefined);
+        }
         await this.failAmendment(error);
         return this.result(this.failure(assessed.input, error, assessed));
       }

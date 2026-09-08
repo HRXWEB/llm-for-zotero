@@ -98,6 +98,10 @@ export function createUndoLastActionTool(
       approval.sourceActionId === input.actionId,
 
     planInvocation: async (input, context) => {
+      if (context.authorization?.standalone && !input.actionId)
+        throw new Error(
+          "Standalone MCP undo requires an explicit actionId from a write receipt.",
+        );
       const action = input.actionId
         ? (
             await listJournalActions({
@@ -114,6 +118,7 @@ export function createUndoLastActionTool(
           ).action;
       return action
         ? stateChangeInvocationPlan({
+            targets: [`journal-action:${action.actionId}`],
             reversibility: "none",
             reason:
               "Undo replays an inverse without creating a redo action, so the undo itself cannot be automatically undone.",
@@ -123,9 +128,11 @@ export function createUndoLastActionTool(
           });
     },
     createPendingAction: async (_input, context) => {
-      const selection = await selectUndoJournalAction({
-        conversationKey: context.request.conversationKey,
-      });
+      const selection = context.authorization?.standalone
+        ? { action: undefined, newerIrreversible: [] }
+        : await selectUndoJournalAction({
+            conversationKey: context.request.conversationKey,
+          });
       const { newerIrreversible } = selection;
       const action = _input.actionId
         ? (
@@ -202,9 +209,15 @@ export function createUndoLastActionTool(
       return ok({ ...input, actionId });
     },
     execute: async (_input, context) => {
-      const selection = await selectUndoJournalAction({
-        conversationKey: context.request.conversationKey,
-      });
+      if (context.authorization?.standalone && !_input.actionId)
+        throw new Error(
+          "Standalone MCP undo requires an explicit actionId from a write receipt.",
+        );
+      const selection = context.authorization?.standalone
+        ? { action: undefined, newerIrreversible: [] }
+        : await selectUndoJournalAction({
+            conversationKey: context.request.conversationKey,
+          });
       const action = _input.actionId
         ? (
             await listJournalActions({

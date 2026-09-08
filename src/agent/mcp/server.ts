@@ -1,3 +1,5 @@
+import { areExternalMcpWritesEnabled } from "./prefs";
+import { createJournalId } from "../store/changeJournal";
 import { createAbortController } from "../../utils/apiHelpers";
 /**
  * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
@@ -1523,11 +1525,18 @@ function decorateMcpToolDescription(
     "Zotero MCP scope: omit libraryID to use the exact turn-scoped chat library when a scope header is present, or the library currently selected in Zotero for a standalone MCP client. Omit activeItemId and activeContextItemId to use the current turn-scoped chat item when available. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'full' only for explicit exhaustive full-text requests with a coverage receipt, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
   const writeGuidance =
     toolName === "zotero_script"
-      ? "The native runtime permission profile authorizes zotero_script before Zotero applies its scope, facade, and recovery checks. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
+      ? "The calling agent owns approval for zotero_script. Zotero applies its facade, integrity, and recovery checks. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
       : mutability === "write"
-        ? "Write operations are authorized by the native runtime permission profile and checked against Zotero integrity rules before execution. For Zotero note requests, call note_write instead of returning note-ready text in chat."
+        ? "The calling agent owns write approval through its native runtime permission profile or external client settings; Original Agent permission modes do not apply. Standalone writes require the external MCP write setting. Zotero validates and verifies operations before reporting success. For Zotero note requests, call note_write instead of returning note-ready text in chat."
         : "";
-  return [description, scopeGuidance, writeGuidance]
+  return [
+    description,
+    scopeGuidance,
+    writeGuidance,
+    toolName === "undo_last_action" || toolName === "revert_changes"
+      ? "Standalone clients must supply explicit actionId/actionIds from write receipts; there is no shared external conversation history for relative undo."
+      : "",
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -1808,8 +1817,12 @@ function createToolContext(
       );
   return {
     request,
+    authorization: {
+      kind: "external_runtime",
+      standalone: !scope?.runtimeAuthority,
+    },
     signal: scope?.signal,
-    runId: scope?.runId,
+    runId: scope?.runId || createJournalId("mcp-run"),
     item,
     currentAnswerText: "",
     modelName: scope?.model || "external-mcp",
@@ -1867,6 +1880,10 @@ function formatToolResult(
           {
             ok: result.ok,
             result: result.content,
+            effect: result.effect,
+            ...(result.actionReceipts.length
+              ? { actionReceipts: result.actionReceipts }
+              : {}),
             artifacts: result.artifacts,
           },
           null,
@@ -2072,10 +2089,11 @@ async function handleToolsCall(
     : 0;
   if (
     tool.spec.executionClass === "external_effect" &&
-    !scope?.runtimeAuthority
+    !scope?.runtimeAuthority &&
+    !areExternalMcpWritesEnabled()
   ) {
     const error =
-      "Effectful Zotero MCP tools require a valid, turn-scoped runtime authorization token.";
+      'Standalone MCP writes are disabled. Enable "Allow writes from external MCP clients" in Zotero preferences to delegate approval to the connected client.';
     completeActivity({ ok: false, error });
     return {
       content: [{ type: "text", text: JSON.stringify({ ok: false, error }) }],
@@ -2232,12 +2250,15 @@ async function handleToolsCall(
         callerKind: "mcp",
         isExecutionAllowed: () => {
           return (
-            !scopeConversationKey ||
-            (!areConversationWritesFrozen(scopeConversationKey) &&
-              isConversationWriteGenerationCurrent(
-                scopeConversationKey,
-                scopeGeneration,
-              ))
+            (Boolean(scope?.runtimeAuthority) ||
+              tool.spec.executionClass !== "external_effect" ||
+              areExternalMcpWritesEnabled()) &&
+            (!scopeConversationKey ||
+              (!areConversationWritesFrozen(scopeConversationKey) &&
+                isConversationWriteGenerationCurrent(
+                  scopeConversationKey,
+                  scopeGeneration,
+                )))
           );
         },
         executeWithLock: (task) => {

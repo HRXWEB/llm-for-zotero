@@ -824,3 +824,19 @@ change.
 When a provider does not expose reasoning controls or context metadata through
 its model catalog, the registry remains the authoritative provider-maintained
 fallback.
+
+### External MCP write access
+
+Standalone MCP clients can use the existing bearer-authenticated `/llm-for-zotero/mcp` endpoint while Zotero is running.
+In **Settings → llm-for-zotero → Agent → External MCP clients**, enable **Allow writes from external MCP clients** to authorize write access.
+This setting is off by default and trusts any client holding the connection credential to use the exposed write tools, including deletion and Zotero scripts.
+The connected assistant owns approval through its own permission settings; the plugin does not apply Original Agent Safe/Auto/YOLO or display a second permission prompt.
+Integrated Codex and Claude Code use their existing MCP enablement controls and the same delegated approval rule.
+
+Use ordinary `tools/call` requests; no Zotero chat, private turn token, or additional session handshake is required for standalone clients.
+Specify `libraryID` for predictable targeting, or omit it to resolve the currently selected library once for that call.
+Invalid arguments, unavailable targets, native read-only restrictions, and execution or verification failures remain errors.
+Writes retain durable recovery records and native Zotero verification; preserve returned action IDs for recovery.
+Standalone `undo_last_action` requires `actionId`, and `revert_changes` requires `actionIds` (which cannot be combined with `count`).
+Do not blindly repeat a write after a timeout or uncertain outcome: inspect native state and the returned recovery information first.
+This interface does not promise exactly-once execution across repeated HTTP requests.

@@ -33,6 +33,28 @@ export function evaluatePreparedActionContract(
   >,
   receipts: AgentActionReceipt[],
 ): ContractEvaluation {
+  const delegated = receipts.filter(
+    (receipt) => receipt.executionAuthority === "external_runtime",
+  );
+  if (delegated.length) {
+    // The calling agent owns action intent. Report the actual effects without
+    // reinterpreting them through Original Agent obligations or inviting replay.
+    if (delegated.every(receiptVerified)) return { state: "satisfied" };
+    const state = delegated.some((receipt) => receipt.status === "failed")
+      ? "failed"
+      : delegated.every((receipt) => receipt.status === "cancelled")
+        ? "cancelled"
+        : delegated.some(
+              (receipt) =>
+                receipt.status === "partial" || receiptVerified(receipt),
+            )
+          ? "partial"
+          : "unverified";
+    return {
+      state,
+      failure: `Delegated action results:\n${formatReceiptStatus(delegated)}`,
+    };
+  }
   if (
     request.actionPreparation &&
     request.actionPreparation.state !== "ready"

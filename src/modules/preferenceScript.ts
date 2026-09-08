@@ -1,3 +1,7 @@
+import {
+  areExternalMcpWritesEnabled,
+  setExternalMcpWritesEnabled,
+} from "../agent/mcp/prefs";
 import { config } from "../../package.json";
 import { t } from "../utils/i18n";
 import { WEBCHAT_TARGETS } from "../webchat/types";
@@ -2905,6 +2909,16 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         applyMessageFontFamily("");
       });
     }
+  }
+
+  const externalMcpWritesInput = doc.querySelector(
+    `#${config.addonRef}-external-mcp-writes`,
+  ) as HTMLInputElement | null;
+  if (externalMcpWritesInput) {
+    externalMcpWritesInput.checked = areExternalMcpWritesEnabled();
+    externalMcpWritesInput.addEventListener("change", () => {
+      setExternalMcpWritesEnabled(externalMcpWritesInput.checked);
+    });
   }
 
   const agentBackendModeSelect = doc.querySelector(
