@@ -2335,7 +2335,7 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
+  padding: 1px;
   border-radius: 10px;
   background: color-mix(in srgb, var(--material-background) 80%, black 20%);
   border: 1px solid color-mix(in srgb, var(--stroke-secondary) 60%, transparent);
@@ -2349,8 +2349,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: calc(8px + var(--llm-standalone-ui-line-height));
-  padding: 0 14px;
+  min-height: calc(2px + var(--llm-standalone-ui-line-height));
+  padding: 0 10px;
   box-sizing: border-box;
   border: none;
   border-radius: 7px;

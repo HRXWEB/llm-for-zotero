@@ -334,7 +334,7 @@ describe("standalone window layout CSS", function () {
     assert.include(navRowRule, "padding: 0 8px");
     assert.include(tabRule, "appearance: none");
     assert.include(tabRule, "-moz-appearance: none");
-    assert.include(tabRule, "padding: 0 14px");
+    assert.include(tabRule, "padding: 0 10px");
     assert.include(titleRule, "padding: 0 10px 0 16px");
     assert.notInclude(titleRule, "border-bottom");
     assert.include(titleRule, "box-shadow: inset 0 -1px");
