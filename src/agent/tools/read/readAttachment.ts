@@ -74,7 +74,7 @@ export function createReadAttachmentTool(
         },
       },
       executionClass: "read",
-      requiresConfirmation: true,
+      requiresConfirmation: false,
     },
     presentation: {
       label: "Read Attachment",
@@ -85,8 +85,6 @@ export function createReadAttachmentTool(
             ? "Preparing file for model"
             : "Reading attachment content";
         },
-        onPending: "Waiting for your approval before sending document content",
-        onApproved: "Approval received - sending document content",
         onDenied: "Attachment reading cancelled",
         onSuccess: ({ content }) => {
           const c = content as Record<string, unknown> | null;
@@ -94,10 +92,6 @@ export function createReadAttachmentTool(
           return "Read attachment content";
         },
       },
-    },
-    shouldRequireConfirmation: async (input) => {
-      // Only require confirmation for attachFile mode (sending whole file)
-      return Boolean(input.attachFile);
     },
     validate: (args) => {
       if (!validateObject<Record<string, unknown>>(args)) {

@@ -26,6 +26,8 @@ import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadata";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
+import { createReadAttachmentTool } from "../src/agent/tools/read/readAttachment";
+import { createViewPdfPagesTool } from "../src/agent/tools/read/viewPdfPages";
 import { getNotesDirectoryConfig } from "../src/utils/notesDirectoryConfig";
 import type {
   AgentModelMessage,
@@ -4073,5 +4075,20 @@ await note.saveTx();
     assert.include(userText, "Current note content for this turn");
     assert.include(userText, "Current note body");
     assert.notInclude(userText, "Selected text 1");
+  });
+
+  it("does not promise an approval step that read tools never perform", function () {
+    const tools = [
+      createReadAttachmentTool({} as never, {} as never),
+      createViewPdfPagesTool({} as never, {} as never),
+    ];
+    for (const tool of tools) {
+      const name = tool.spec.name;
+      assert.isFalse(tool.spec.requiresConfirmation, `${name} flag`);
+      assert.isUndefined(tool.shouldRequireConfirmation, `${name} hook`);
+      const summaries = tool.presentation?.summaries || {};
+      assert.notProperty(summaries, "onPending", `${name} onPending`);
+      assert.notProperty(summaries, "onApproved", `${name} onApproved`);
+    }
   });
 });

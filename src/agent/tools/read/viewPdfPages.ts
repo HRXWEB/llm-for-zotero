@@ -101,7 +101,7 @@ export function createViewPdfPagesTool(
         },
       },
       executionClass: "read",
-      requiresConfirmation: true,
+      requiresConfirmation: false,
     },
     presentation: {
       label: "View PDF Pages",
@@ -112,8 +112,6 @@ export function createViewPdfPagesTool(
           if (a?.question) return "Searching for relevant pages";
           return "Preparing PDF pages";
         },
-        onPending: "Waiting for your approval before sending document content",
-        onApproved: "Approval received - sending document content",
         onDenied: "PDF page viewing cancelled",
         onSuccess: ({ content }) => {
           const c = content as Record<string, unknown> | null;
@@ -126,7 +124,6 @@ export function createViewPdfPagesTool(
         },
       },
     },
-    shouldRequireConfirmation: async () => false,
     validate: (args) => {
       if (!validateObject<Record<string, unknown>>(args)) {
         return fail("Expected an object");

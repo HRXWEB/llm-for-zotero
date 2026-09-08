@@ -222,7 +222,7 @@ describe("read_attachment tool", function () {
     modelName: "gpt-5.4",
   };
 
-  it("requires confirmation before sending an attached file to the model", async function () {
+  it("does not require confirmation before sending an attached file to the model", function () {
     const tool = createReadAttachmentTool({} as never, {} as never);
 
     const validated = tool.validate({
@@ -231,18 +231,8 @@ describe("read_attachment tool", function () {
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
 
-    const shouldConfirm = await tool.shouldRequireConfirmation?.(
-      validated.value,
-      baseContext,
-    );
-    assert.isTrue(shouldConfirm);
-    const pending = await tool.createPendingAction?.(
-      validated.value,
-      baseContext,
-    );
-    assert.exists(pending);
-    assert.equal(pending?.toolName, "read_attachment");
-    assert.equal(pending?.confirmLabel, "Send to model");
+    assert.isFalse(tool.spec.requiresConfirmation);
+    assert.isUndefined(tool.shouldRequireConfirmation);
   });
 
   it("reads markdown child attachments with parent-aware source metadata", async function () {
