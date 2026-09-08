@@ -88,7 +88,7 @@ describe("instruction harness inventory", function () {
     const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
     assert.include(
       prompt,
-      "literature_review for user selection in every permission mode",
+      "literature_review for user selection when the user asks to choose or in safe mode",
     );
     assert.include(prompt, "library_import for explicit import requests");
     assert.notInclude(prompt, "only for imports, note saving");

@@ -354,6 +354,72 @@ describe("agent prompt envelope", function () {
     assert.include(messageText(third.at(-1)!), "Inspect the supplied image");
     assert.notInclude(messageText(third.at(-1)!), "Mutated composed copy");
   });
+
+  describe("permission mode guidance", function () {
+    const originalZotero = globalThis.Zotero;
+    afterEach(function () {
+      globalThis.Zotero = originalZotero;
+    });
+
+    function contentText(
+      content: string | Array<{ type: string; text?: string }>,
+    ) {
+      return typeof content === "string"
+        ? content
+        : content
+            .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
+            .join("\n");
+    }
+
+    async function promptText(
+      mode: "safe" | "auto" | "yolo",
+      assumptions?: string[],
+    ) {
+      // Only the permission pref is stubbed; every other pref read stays undefined.
+      globalThis.Zotero = {
+        Prefs: {
+          get: (key: string) =>
+            key.endsWith("originalAgentPermissionMode") ? mode : undefined,
+        },
+      } as never;
+      const request = resolvedAgentRequest({
+        conversationKey: 9,
+        mode: "agent",
+        userText: "tidy this folder",
+        classifiedIntent: classifiedFixture(),
+        actionContract: {
+          version: 4,
+          id: "contract:mode",
+          writeDisposition: "none",
+          interpretationSource: "semantic",
+          intent: classifiedFixture(),
+          obligations: [],
+          ...(assumptions ? { assumptions } : {}),
+        },
+      });
+      const rendered = await renderAgentPromptEnvelope(request, [], []);
+      return [
+        ...rendered.envelope.systemMessages.map((message) =>
+          contentText(message.content),
+        ),
+        contentText(rendered.envelope.turnMessage.content),
+      ].join("\n");
+    }
+
+    it("tells the agent the current mode and how much to ask", async function () {
+      const yolo = await promptText("yolo", ["Assumed append."]);
+      assert.include(yolo, "Permission mode: yolo");
+      assert.include(yolo, "Do not ask for confirmation or clarification");
+      assert.include(yolo, "Interpretation assumptions: Assumed append.");
+      const auto = await promptText("auto");
+      assert.include(auto, "Permission mode: auto");
+      assert.include(auto, "only for genuine ambiguity");
+      const safe = await promptText("safe");
+      assert.include(safe, "Permission mode: safe");
+      assert.include(safe, "do not ask for permission in text");
+      assert.notInclude(safe, "Interpretation assumptions");
+    });
+  });
 });
 
 describe("agent prompt envelope evidence sufficiency", function () {
