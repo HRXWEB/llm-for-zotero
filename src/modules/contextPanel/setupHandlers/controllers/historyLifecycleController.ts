@@ -12,6 +12,7 @@ import {
   type ConversationCatalogEntry,
 } from "../../../../core/conversations/repository";
 import { resolveFreshConversationDraft } from "../../freshConversationDraft";
+import { provisionDefaultPaperConversation } from "../../conversationProvisioning";
 import { resolveWebChatSessionConversation } from "../../webchatSessionConversation";
 import {
   evaluateConversationForkEligibility,
@@ -2453,9 +2454,8 @@ export function createHistoryLifecycleController(
       );
     }
     if (!targetSummary) {
-      targetSummary = await conversationRepository.ensureCatalogEntry({
+      targetSummary = await provisionDefaultPaperConversation({
         system,
-        kind: "paper",
         libraryID,
         paperItemID,
       });
@@ -2570,10 +2570,8 @@ export function createHistoryLifecycleController(
       // Ephemeral webchat session rows (flagged in the catalog) are swept at
       // the next startup, so they must never become the paper's persisted
       // last-used conversation. Registering the key in the isolation set
-      // BEFORE syncConversationIdentity() runs makes the guard inside
-      // setLastUsedPaperConversationKey hold for every later writer too —
-      // identity sync and history-navigation priming both re-persist the
-      // active key on their own.
+      // here makes the guard inside setLastUsedPaperConversationKey hold for
+      // later writers, including history-navigation priming.
       if (targetSummary.webchatSession === true) {
         webChatIsolatedConversationKeys.add(resolvedConversationKey);
       } else {

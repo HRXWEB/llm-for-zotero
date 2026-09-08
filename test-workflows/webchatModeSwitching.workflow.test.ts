@@ -139,10 +139,22 @@ describe("workflow: webchat mode switching", function () {
       );
       const webChatSessionKey = entered.conversationKey;
 
-      const left = await api.selectPanelModelEntry(
+      let left = await api.selectPanelModelEntry(
         panel.panelId,
         API_MODEL_ENTRY_ID,
       );
+      // The API key can already be marked loaded from before WebChat. Wait
+      // for its transcript to render, not just that cached identity flag.
+      const renderDeadline = Date.now() + 15000;
+      while (
+        !(left.messageText || "").includes(
+          "API question asked before webchat",
+        ) &&
+        Date.now() < renderDeadline
+      ) {
+        await Zotero.Promise.delay(25);
+        left = await api.getDiagnostics(panel.panelId);
+      }
       assert.isFalse(left.webChatMode);
       assert.equal(selectedModelEntryId(), API_MODEL_ENTRY_ID);
       assert.equal(

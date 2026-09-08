@@ -8,8 +8,10 @@ import {
 import { createCodexPaperPortalItem } from "../src/codexAppServer/portal";
 import {
   provisionConversationScopeForItem,
+  provisionDefaultPaperConversation,
   resolveConversationStorageSystemForItem,
 } from "../src/modules/contextPanel/conversationProvisioning";
+import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
 import { buildDefaultConversationKey } from "../src/shared/conversationKeySpace";
 import { validateConversationScope } from "../src/shared/conversationRegistry";
 
@@ -289,13 +291,14 @@ function installProvisioningDb(): {
           });
           return [];
         }
-        if (sql.includes("llm_for_zotero_paper_conversations")) {
+        if (sql.includes("INSERT INTO llm_for_zotero_paper_conversations")) {
           const [
             conversationID,
             instanceID,
             conversationKey,
             libraryID,
             paperItemID,
+            ,
             createdAt,
             lastActivityAt,
           ] = queryParams;
@@ -373,6 +376,88 @@ describe("conversation provisioning", function () {
     (globalThis as typeof globalThis & { Zotero?: typeof Zotero }).Zotero =
       originalZotero;
   });
+
+  for (const system of ["upstream", "claude_code", "codex"] as const) {
+    for (const retired of [false, true]) {
+      it(`shares ${system} ${retired ? "retired-key replacement" : "first initialization"} between paper restoration and host loading`, async function () {
+        const { queries, registry, ledger, restore } = installProvisioningDb();
+        try {
+          const paper = {
+            id: 3345,
+            libraryID: 1,
+            isAttachment: () => false,
+            isRegularItem: () => true,
+          } as Zotero.Item;
+          globalThis.Zotero.Items.get = (id: number) =>
+            id === paper.id ? paper : null;
+          const defaultKey =
+            system === "claude_code"
+              ? buildDefaultClaudePaperConversationKey(paper.id)
+              : system === "codex"
+                ? buildDefaultCodexPaperConversationKey(paper.id)
+                : paper.id;
+          const item =
+            system === "claude_code"
+              ? createClaudePaperPortalItem(paper, defaultKey)
+              : system === "codex"
+                ? createCodexPaperPortalItem(paper, defaultKey)
+                : paper;
+          if (retired) {
+            ledger.set(defaultKey, {
+              conversationKey: defaultKey,
+              instanceID: `retired-${system}`,
+              conversationID: `retired-${system}`,
+              system,
+              kind: "paper",
+              profileSignature: "test-profile",
+              libraryID: 1,
+              paperItemID: paper.id,
+              issuedAt: 1,
+              retiredAt: 2,
+            });
+          }
+          const [restored, loaded] = await Promise.all([
+            provisionDefaultPaperConversation({
+              system,
+              libraryID: 1,
+              paperItemID: paper.id,
+            }),
+            provisionConversationScopeForItem({
+              item,
+              conversationSystem: system,
+            }),
+          ]);
+          assert.isTrue(loaded);
+          assert.isOk(restored);
+          const key = restored!.conversationKey;
+          assert.equal(getConversationKey(item), key);
+          if (retired) assert.notEqual(key, defaultKey);
+          else assert.equal(key, defaultKey);
+          assert.equal(
+            registry.get(key)?.instanceID,
+            ledger.get(key)?.instanceID,
+          );
+          const table =
+            system === "upstream"
+              ? "paper"
+              : system === "claude_code"
+                ? "claude"
+                : "codex";
+          assert.lengthOf(
+            queries.filter((q) =>
+              q.sql.includes(
+                `INSERT INTO llm_for_zotero_${table}_conversations`,
+              ),
+            ),
+            1,
+          );
+          if (retired) assert.equal(ledger.get(defaultKey)?.retiredAt, 2);
+        } finally {
+          restore();
+        }
+      });
+    }
+  }
 
   it("registers a fresh Codex default paper conversation before validation", async function () {
     const { queries, registry, restore } = installProvisioningDb();

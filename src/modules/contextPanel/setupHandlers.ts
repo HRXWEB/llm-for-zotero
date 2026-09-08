@@ -158,7 +158,6 @@ import {
   setLastUsedUpstreamConversationMode,
   setLastUsedUpstreamGlobalConversationKey,
   getLastUsedPaperConversationKey,
-  setLastUsedPaperConversationKey,
   removeLastUsedPaperConversationKey,
   getLockedGlobalConversationKey,
   setLockedGlobalConversationKey,
@@ -542,7 +541,6 @@ import {
   removeLastUsedCodexGlobalConversationKey,
   removeLastUsedCodexPaperConversationKey,
   setLastUsedCodexGlobalConversationKey,
-  setLastUsedCodexPaperConversationKey,
   setLastUsedCodexConversationMode,
   setCodexReasoningModePref,
   setCodexRuntimeModelPref,
@@ -1781,11 +1779,6 @@ export function setupHandlers(
             paperStateKey,
             normalizedConversationKey,
           );
-          setLastUsedCodexPaperConversationKey(
-            libraryID,
-            Math.floor(currentBasePaperItemID),
-            normalizedConversationKey,
-          );
         }
       } else {
         activeConversationModeByLibrary.set(libraryID, mode);
@@ -1813,11 +1806,6 @@ export function setupHandlers(
           );
           activePaperConversationByPaper.set(
             paperStateKey,
-            normalizedConversationKey,
-          );
-          setLastUsedPaperConversationKey(
-            libraryID,
-            Math.floor(currentBasePaperItemID),
             normalizedConversationKey,
           );
         }

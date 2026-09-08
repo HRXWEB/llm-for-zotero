@@ -678,6 +678,31 @@ async function provisionCodexConversation(scope: {
   return provisionRuntimeConversationUncoalesced("codex", scope);
 }
 
+export async function provisionDefaultPaperConversation(params: {
+  system: ConversationSystem;
+  libraryID: number;
+  paperItemID: number;
+}): Promise<ConversationCatalogEntry | null> {
+  const libraryID = normalizePositiveInt(params.libraryID);
+  const paperItemID = normalizePositiveInt(params.paperItemID);
+  if (!libraryID || !paperItemID) return null;
+  await initConversationKeyLedgerStore();
+  const conversationKey =
+    params.system === "claude_code"
+      ? buildDefaultClaudePaperConversationKey(paperItemID)
+      : params.system === "codex"
+        ? buildDefaultCodexPaperConversationKey(paperItemID)
+        : paperItemID;
+  // Paper restoration and host loading must share the complete lookup/create
+  // decision, including the identity allocated for a retired default key.
+  return provisionConversationEntry(params.system, {
+    conversationKey,
+    kind: "paper",
+    libraryID,
+    paperItemID,
+  });
+}
+
 export async function provisionConversationScopeForItem(params: {
   item: Zotero.Item;
   conversationSystem?: ConversationSystem | null;
