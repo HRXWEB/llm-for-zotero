@@ -501,6 +501,18 @@ describe("workflow: note editing mode", function () {
     );
   });
 
+  it("labels a standalone note as Note chat when opened", async function () {
+    fixture = await api.createStandaloneNoteFixture({
+      noteHtml: "<p>Standalone note label consistency.</p>",
+    });
+    const standalone = await api.openStandaloneForItem(fixture.noteItemId);
+    try {
+      assert.equal(standalone.paperTabText, "Note chat");
+    } finally {
+      await api.closeStandalone();
+    }
+  });
+
   it("switches a standalone note directly between both toolbar runtimes", async function () {
     fixture = await api.createItemNoteFixture({
       title: "Workflow Standalone Runtime Parent",
@@ -519,10 +531,12 @@ describe("workflow: note editing mode", function () {
           (fixture as WorkflowTestNoteFixture).noteItemId,
         );
         assert.equal(initial.conversationSystem, "upstream");
+        assert.equal(initial.paperTabText, "Note chat");
         assertDualRuntimeControls(initial);
 
         const codex = await api.clickStandaloneSystemToggle("codex");
         assert.equal(codex.conversationSystem, "codex");
+        assert.equal(codex.paperTabText, "Note chat");
         assert.isTrue(
           isConversationKeyForKind(
             "codex",
@@ -535,6 +549,7 @@ describe("workflow: note editing mode", function () {
 
         const claude = await api.clickStandaloneSystemToggle("claude_code");
         assert.equal(claude.conversationSystem, "claude_code");
+        assert.equal(claude.paperTabText, "Note chat");
         assert.isTrue(
           isConversationKeyForKind(
             "claude_code",
