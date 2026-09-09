@@ -14,8 +14,8 @@ function buildInvestigationReadingGuidance(
   const readingStrategy = investigation.readingStrategy || "adaptive";
   return [
     `Reading guidance (owned by the approved investigation): ${reviewMode} review, ${readingStrategy} reading, ${investigation.requiredEvidenceDepth} evidence depth.`,
-    "The host reading manifest from research_update is the only reading instruction during execution. Read each manifest group with paper_read mode 'overview' on that group's targets: in this investigation overview delivers each paper's host-sized text at the manifest's evidenceDepthTarget, so it satisfies the required depth. Persist every group with research_update record_papers before reading more. Use mode 'targeted' only to verify a decisive claim or resolve an important uncertainty.",
-    "No per-turn read budget applies and paperEvidenceProgress never asks you to stop reading; the host completes the reading task only when every manifest paper is durable.",
+    "The host reading manifest from research_update is the only reading instruction during execution. Each manifest entry carries the host tier and its readMode: core papers are read with paper_read mode 'overview' (host-sized text at the manifest's evidenceDepthTarget, which satisfies the required depth), supporting papers with mode 'targeted' and the suggested queries, peripheral papers with mode 'overview' bounded to suggestedMaxChars. Read one proposed group at a time and persist it as claim-based nodes with research_update record_papers before reading more. Use mode 'targeted' otherwise only to verify an edge or resolve an important uncertainty.",
+    "No per-turn read budget applies and paperEvidenceProgress never asks you to stop reading; the host completes the reading task only when every manifest paper is durable. After that the loop runs links, verification, structure and writing phases: research_update next_work names the phase, the host-ranked candidates and the stop rule, and advance_phase moves on once the rule is met.",
   ].join(" ");
 }
 
