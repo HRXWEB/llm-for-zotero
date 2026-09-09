@@ -467,6 +467,9 @@ export type ThemeFinding = Readonly<{
   paperFindingIds: readonly string[];
   evidenceRefs: readonly string[];
   limitations: readonly string[];
+  /** Edges the theme rests on; required once the job has edges. */
+  edgeIds?: readonly string[];
+  communityId?: string;
   scopeLineageDigest?: string;
   status?: "valid" | "invalidated";
   invalidatedAt?: number;

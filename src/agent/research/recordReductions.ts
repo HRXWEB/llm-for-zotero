@@ -5,6 +5,7 @@ import { positiveInt, safeId, string, strings } from "./recordValidation";
 import { commitResearchRecords } from "./stages";
 import {
   listPaperFindings,
+  listResearchEdges,
   listResearchRecallProbes,
   saveResearchRecallProbe,
   saveThemeFinding,
@@ -109,6 +110,16 @@ export async function recordResearchReductions(params: {
         ]),
       );
       const evidenceRefs = new Set(evidenceByRef.keys());
+      const edges = (await listResearchEdges(job.researchJobId)).filter(
+        (edge) => edge.status !== "merged" && edge.status !== "refuted",
+      );
+      const edgeById = new Map(edges.map((edge) => [edge.edgeId, edge]));
+      const identityOfFinding = new Map(
+        paperFindings.map((entry) => [
+          entry.findingId,
+          `${entry.libraryID}:${entry.itemKey}`,
+        ]),
+      );
       for (let index = 0; index < (input.themes || []).length; index += 1) {
         const raw = input.themes![index];
         if (!validateObject<Record<string, unknown>>(raw)) {
@@ -166,6 +177,34 @@ export async function recordResearchReductions(params: {
             `themes[${index}] uses evidence not retained by its paper findings`,
           );
         }
+        const themeIdentities = new Set(
+          paperFindingIds.map((id) => identityOfFinding.get(id) || ""),
+        );
+        const edgeIds =
+          raw.edgeIds === undefined
+            ? []
+            : strings(raw.edgeIds, `themes[${index}].edgeIds`);
+        if (edges.length && themeIdentities.size >= 2 && !edgeIds.length) {
+          throw new Error(
+            `themes[${index}] spans ${themeIdentities.size} papers but names no edgeIds; a theme is a community in the graph, so cite the edges (from list_graph) that connect its papers`,
+          );
+        }
+        for (const edgeId of edgeIds) {
+          const edge = edgeById.get(edgeId);
+          if (!edge) {
+            throw new Error(
+              `themes[${index}] names edge ${edgeId}, which is unknown, refuted, or merged`,
+            );
+          }
+          if (
+            !themeIdentities.has(edge.source) ||
+            !themeIdentities.has(edge.target)
+          ) {
+            throw new Error(
+              `themes[${index}] names edge ${edgeId} (${edge.source} -> ${edge.target}), but both papers must belong to the theme`,
+            );
+          }
+        }
         const themeId = safeId(string(raw.themeId, `themes[${index}].themeId`));
         const finding: ThemeFinding = {
           version: 2,
@@ -181,6 +220,10 @@ export async function recordResearchReductions(params: {
             raw.limitations || [],
             `themes[${index}].limitations`,
           ),
+          ...(edgeIds.length ? { edgeIds } : {}),
+          ...(typeof raw.communityId === "string" && raw.communityId.trim()
+            ? { communityId: raw.communityId.trim() }
+            : {}),
           scopeLineageDigest: job.scopeLineageDigest,
           status: "valid",
           createdAt: Date.now(),

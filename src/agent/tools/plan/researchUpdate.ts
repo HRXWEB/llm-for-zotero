@@ -452,6 +452,17 @@ export function createResearchUpdateTool(
                   type: "array",
                   items: { type: "string" },
                 },
+                edgeIds: {
+                  type: "array",
+                  items: { type: "string" },
+                  description:
+                    "Edges (from list_graph) the theme rests on; required for a multi-paper theme once edges exist, and every edge must connect two of the theme's papers.",
+                },
+                communityId: {
+                  type: "string",
+                  description:
+                    "Host community id from list_graph this theme corresponds to.",
+                },
               },
             },
           },

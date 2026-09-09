@@ -670,6 +670,12 @@ export function decodeThemeFinding(value: unknown): ThemeFinding {
     paperFindingIds: strings(input.paperFindingIds, "paperFindingIds"),
     evidenceRefs: strings(input.evidenceRefs, "evidenceRefs"),
     limitations: strings(input.limitations, "limitations"),
+    ...(input.edgeIds === undefined
+      ? {}
+      : { edgeIds: strings(input.edgeIds, "edgeIds") }),
+    ...(typeof input.communityId === "string" && input.communityId
+      ? { communityId: input.communityId }
+      : {}),
     scopeLineageDigest:
       input.version === 2
         ? string(input.scopeLineageDigest, "scopeLineageDigest")

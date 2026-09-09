@@ -27,7 +27,8 @@ import {
   parseTierDecisions,
 } from "./synthesisControls";
 import { buildCorpusMap } from "./tiering";
-import { listResearchEdges, listResearchOpenQuestions } from "./store";
+import { listResearchEdges } from "./store";
+import { buildGraphView } from "./graphView";
 import {
   advanceSynthesisPhase,
   currentPhase,
@@ -159,11 +160,13 @@ export async function executeResearchUpdate(
     return describeNextWork({ job, corpus });
   }
   if (input.operation === "list_graph") {
-    const [edges, questions] = await Promise.all([
-      listResearchEdges(job.researchJobId),
-      listResearchOpenQuestions(job.researchJobId),
-    ]);
-    return { phase: currentPhase(job), edges, questions };
+    return buildGraphView({
+      job,
+      corpus,
+      investigation,
+      snapshotByKey,
+      displayLabels,
+    });
   }
   const allowedCriteria = new Set(
     investigation.criteria.map((entry) => entry.id),

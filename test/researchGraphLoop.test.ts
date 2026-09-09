@@ -377,3 +377,164 @@ describe("research graph loop", function () {
     );
   });
 });
+
+describe("research structure phase", function () {
+  const originalZotero = (globalThis as any).Zotero;
+  let harness: ResearchHarness | undefined;
+  beforeEach(async function () {
+    harness = installResearchHarness();
+    await harness.approve();
+  });
+  afterEach(function () {
+    harness?.close();
+    harness = undefined;
+    (globalThis as any).Zotero = originalZotero;
+  });
+
+  async function reachStructure(h: ResearchHarness) {
+    await recordAllNodes(h);
+    const { edges } = await h.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Two extends one.",
+          confidence: "high",
+        },
+        {
+          source: "1:PAPER002",
+          target: "1:PAPER003",
+          type: "contradicts",
+          statement: "Three contradicts two.",
+          confidence: "low",
+        },
+      ],
+    });
+    await h.run({ operation: "advance_phase", phase: "verification" });
+    await h.verifiedRead(["PAPER003"], "body", {
+      pageIndex: 2,
+      mode: "targeted",
+    });
+    await h.run({
+      operation: "update_edges",
+      edges: [
+        { edgeId: edges[1].edgeId, status: "verified", note: "Table 1." },
+      ],
+    });
+    await h.run({ operation: "advance_phase", phase: "structure" });
+    return edges;
+  }
+
+  it("serves the graph view with communities, chronology and gaps", async function () {
+    const edges = await reachStructure(harness!);
+    await harness!.run({
+      operation: "record_questions",
+      questions: [
+        {
+          text: "Why the sign flip?",
+          scope: { kind: "edge", ref: edges[1].edgeId },
+        },
+      ],
+    });
+    const graph = await harness!.run({ operation: "list_graph" });
+    assert.equal(graph.phase, "structure");
+    assert.lengthOf(graph.nodes, 3);
+    assert.deepEqual(graph.nodes[0].claimIds, [
+      "PAPER001:c1",
+      "PAPER001:c2",
+      "PAPER001:c3",
+    ]);
+    assert.deepEqual(
+      graph.edges.map((edge: any) => [edge.type, edge.status]),
+      [
+        ["extends", "candidate"],
+        ["contradicts", "verified"],
+      ],
+    );
+    assert.equal(graph.edges[1].note, "Table 1.");
+    assert.deepEqual(graph.communities[0].members, [
+      "1:PAPER001",
+      "1:PAPER002",
+      "1:PAPER003",
+    ]);
+    assert.deepEqual(
+      graph.chronology.map((entry: any) => entry.year),
+      ["2016", "2017", "2018"],
+    );
+    assert.deepEqual(graph.gaps.isolatedNodes, []);
+    assert.deepEqual(graph.gaps.unresolvedContradictions, []);
+    assert.lengthOf(graph.openQuestions, 1);
+    assert.deepEqual(graph.gaps.openQuestions, [
+      graph.openQuestions[0].questionId,
+    ]);
+  });
+
+  it("binds themes to edges that connect their papers and gates finalize on the writing phase", async function () {
+    const edges = await reachStructure(harness!);
+    const unbound = await attempt(() =>
+      harness!.run({
+        operation: "record_themes",
+        themes: [
+          {
+            themeId: "T1",
+            title: "Latent state",
+            synthesis: "Papers one and two build one story.",
+            limitations: [],
+            paperIdentities: ["1:PAPER001", "1:PAPER002"],
+          },
+        ],
+      }),
+    );
+    assert.match(unbound, /names no edgeIds/);
+    const wrongEdge = await attempt(() =>
+      harness!.run({
+        operation: "record_themes",
+        themes: [
+          {
+            themeId: "T1",
+            title: "Latent state",
+            synthesis: "Papers one and two build one story.",
+            limitations: [],
+            paperIdentities: ["1:PAPER001", "1:PAPER002"],
+            edgeIds: [edges[1].edgeId],
+          },
+        ],
+      }),
+    );
+    assert.match(wrongEdge, /both papers must belong to the theme/);
+    const early = await attempt(() =>
+      harness!.run({ operation: "finalize", outcome: "complete" }),
+    );
+    assert.match(early, /writing phase/);
+    await harness!.run({
+      operation: "record_themes",
+      themes: [
+        {
+          themeId: "T1",
+          title: "Latent state",
+          synthesis:
+            "Paper two extends paper one; paper three contradicts two on the sign.",
+          limitations: [],
+          paperIdentities: ["1:PAPER001", "1:PAPER002", "1:PAPER003"],
+          edgeIds: [edges[0].edgeId, edges[1].edgeId],
+          communityId: "C1",
+        },
+      ],
+    });
+    const themes = await harness!.run({ operation: "list_themes" });
+    assert.deepEqual(themes.themes[0].edgeIds, [
+      edges[0].edgeId,
+      edges[1].edgeId,
+    ]);
+    await harness!.run({ operation: "advance_phase", phase: "writing" });
+    const finalized = await harness!.run({
+      operation: "finalize",
+      outcome: "complete",
+    });
+    assert.equal(finalized.progress.coverageStatus, "complete");
+    const finalJob = await job(harness!);
+    assert.equal(finalJob.status, "completed");
+  });
+});

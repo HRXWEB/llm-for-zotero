@@ -223,6 +223,8 @@ export async function inspectResearch(params: {
         paperFindingIds: theme.paperFindingIds,
         evidenceRefs: theme.evidenceRefs,
         limitations: theme.limitations,
+        ...(theme.edgeIds ? { edgeIds: theme.edgeIds } : {}),
+        ...(theme.communityId ? { communityId: theme.communityId } : {}),
       })),
       totalThemes: themes.length,
       instruction: themes.length
