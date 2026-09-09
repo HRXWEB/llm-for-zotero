@@ -20,6 +20,7 @@ import {
   normalizeQuoteCitationPlaceholdersForDisplay,
   replaceQuoteCitationPlaceholdersForMarkdown,
   sanitizeInvalidStructuredSourceMarkers,
+  withReusableQuoteTextIndexes,
   DISPLAYED_QUOTE_ANCHOR_CACHE_MAX_BYTES,
 } from "../src/modules/contextPanel/quoteCitations";
 import { stripLeadingCitationSeparators } from "../src/modules/contextPanel/citationText";
@@ -5052,5 +5053,71 @@ describe("quoteCitations", function () {
       [5, 6],
     );
     assert.equal(countOccurrences(finalized.markdown, "[[quote:"), 2);
+  });
+});
+
+describe("withReusableQuoteTextIndexes", function () {
+  it("lets a review-citation index reuse the text indexes of a prepared source index", function () {
+    const sourceTexts = [
+      {
+        sourceText:
+          "Mitochondrial density rose by forty percent in the treated cohort.",
+        citationLabel: "(Doe, 2020)",
+        contextItemId: 11,
+      },
+      {
+        sourceText:
+          "Control animals showed no change in mitochondrial density.",
+        citationLabel: "(Doe, 2020)",
+        contextItemId: 11,
+      },
+    ];
+    const prepared = buildQuoteSourceIndex({ sourceTexts });
+    assert.equal(prepared.sources.length, 2);
+
+    const reused = buildQuoteSourceIndex({
+      quoteCitations: [
+        buildQuoteCitation({
+          id: "Q_review",
+          quoteText: "Mitochondrial density rose by forty percent",
+          citationLabel: "(Doe, 2020)",
+          contextItemId: 11,
+        }),
+      ],
+      sourceTexts: withReusableQuoteTextIndexes(sourceTexts, prepared),
+    });
+
+    const reusedSourceEntries = reused.sources.filter(
+      (entry) => entry.origin === "source-text",
+    );
+    assert.equal(reusedSourceEntries.length, 2);
+    for (const entry of reusedSourceEntries) {
+      const preparedEntry = prepared.sources.find(
+        (candidate) => candidate.sourceText === entry.sourceText,
+      );
+      assert.strictEqual(
+        entry.textIndex,
+        preparedEntry?.textIndex,
+        "source text index should be the prepared object, not a rebuild",
+      );
+    }
+    assert.isTrue(
+      reused.sources.some((entry) => entry.origin === "quote-citation"),
+      "review citation should still be indexed",
+    );
+  });
+
+  it("leaves source texts alone when the prepared index does not cover them", function () {
+    const sourceTexts = [
+      { sourceText: "An unrelated paragraph.", citationLabel: "(Roe, 2021)" },
+    ];
+    const prepared = buildQuoteSourceIndex({
+      sourceTexts: [
+        { sourceText: "A different paragraph.", citationLabel: "(Roe, 2021)" },
+      ],
+    });
+    const out = withReusableQuoteTextIndexes(sourceTexts, prepared);
+    assert.isUndefined(out[0].textIndex);
+    assert.notStrictEqual(out, sourceTexts, "returns a new array");
   });
 });

@@ -1669,6 +1669,31 @@ export function buildQuoteSourceIndex(params: {
   return { quoteCitations, sources, metadataTexts: [...metadataTextSet] };
 }
 
+/**
+ * A review-citation index must include the citations themselves, so it cannot
+ * be the cached evidence-only index. It can still borrow that index's source
+ * text indexes, which are the expensive part: full-paper text is normalized
+ * and indexed once per evidence scope instead of once per validated message.
+ */
+export function withReusableQuoteTextIndexes(
+  sourceTexts: QuoteSourceText[] | undefined | null,
+  prepared: QuoteSourceIndex,
+): QuoteSourceText[] {
+  const indexesBySourceText = new Map<string, QuoteTextIndex>();
+  for (const entry of prepared.sources) {
+    if (entry.origin !== "source-text" || !entry.textIndex) continue;
+    indexesBySourceText.set(entry.sourceText, entry.textIndex);
+  }
+  return (sourceTexts || []).map((source) => {
+    if (source.textIndex) return source;
+    const normalized = normalizeMultilineText(source.sourceText || source.text);
+    const textIndex = normalized
+      ? indexesBySourceText.get(normalized)
+      : undefined;
+    return textIndex ? { ...source, textIndex } : source;
+  });
+}
+
 export function resolveExactDisplayedQuoteCitation(params: {
   quoteText: string;
   citationLabel?: string;

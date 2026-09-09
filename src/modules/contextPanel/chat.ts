@@ -411,6 +411,7 @@ import {
   finalizeAssistantQuoteCitations,
   finalizeAssistantQuoteCitationsCooperatively,
   mergeQuoteCitations,
+  withReusableQuoteTextIndexes,
   type QuoteSecondaryEvidence,
   type QuoteSourceText,
 } from "./quoteCitations";
@@ -5496,10 +5497,24 @@ async function applyAssistantMessageQuoteGate(
     : null;
   if (!finalized) {
     quoteValidationDecisionComputations += 1;
+    const reusableSourceIndex = reviewCitations.length
+      ? preparedSourceIndex ||
+        (evidenceSignature
+          ? getOrBuildCachedQuoteSourceIndex(
+              evidenceSignature,
+              evidence.sourceTexts,
+            )
+          : undefined)
+      : undefined;
     const sourceIndex = reviewCitations.length
       ? buildQuoteSourceIndex({
           quoteCitations: reviewCitations,
-          sourceTexts: evidence.sourceTexts,
+          sourceTexts: reusableSourceIndex
+            ? withReusableQuoteTextIndexes(
+                evidence.sourceTexts,
+                reusableSourceIndex,
+              )
+            : evidence.sourceTexts,
         })
       : preparedSourceIndex
         ? preparedSourceIndex
