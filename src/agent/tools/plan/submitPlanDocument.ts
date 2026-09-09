@@ -12,16 +12,14 @@ import type {
   AgentToolResult,
 } from "../../types";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import {
-  DirectDocumentFinalizer,
-  PlanDocumentFinalizer,
-  type SubmitPlanDocumentInput,
-} from "../../documents/finalizer";
+import { DirectDocumentFinalizer } from "../../documents/directFinalization";
+import { PlanDocumentFinalizer } from "../../documents/planFinalization";
 import type {
   DocumentAssetProvenance,
   PlanCitationCluster,
   PlanCitationSource,
   PlanDocumentAsset,
+  SubmitPlanDocumentInput,
 } from "../../documents/types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { fail, ok, validateObject } from "../shared";

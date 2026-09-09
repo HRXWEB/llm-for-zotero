@@ -426,7 +426,7 @@ import {
   getAgentRunTrace,
   saveAgentRunTraceSnapshot,
 } from "../../agent/store/traceStore";
-import { deliverPendingPlanDocumentMessage } from "../../agent/documents/finalizer";
+import { deliverPendingPlanDocumentMessage } from "../../agent/documents/publication";
 import { loadDocumentIdForMessageOwner } from "../../agent/documents/store";
 import {
   applyHistoryCompression,

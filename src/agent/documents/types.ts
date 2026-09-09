@@ -254,3 +254,21 @@ export type PlanDocumentOutboxRecord = Readonly<{
   updatedAt: number;
   deliveredAt?: number;
 }>;
+
+export type SubmitPlanDocumentInput = Readonly<{
+  materialOutputId?: string;
+  title: string;
+  markdown: string;
+  citations: readonly PlanCitationCluster[];
+  quotes: readonly Readonly<{
+    quoteId: string;
+    text: string;
+    libraryID: number;
+    itemKey: string;
+    attachmentItemKey: string;
+    evidenceRefs: readonly string[];
+  }>[];
+  assets: readonly PlanDocumentAsset[];
+  groundingReviewed: "passed" | "passed_with_limitations";
+  groundingIssues: readonly string[];
+}>;

@@ -46,7 +46,7 @@ import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
-import { deliverPendingPlanDocumentMessage } from "../src/agent/documents/finalizer";
+import { deliverPendingPlanDocumentMessage } from "../src/agent/documents/publication";
 import {
   initPlanDocumentStore,
   loadPlanDocumentOutbox,

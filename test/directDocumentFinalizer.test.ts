@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { DirectDocumentFinalizer } from "../src/agent/documents/finalizer";
+import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import type {
   DocumentOutcomePolicy,
   PlanCitationCluster,
@@ -601,5 +601,39 @@ describe("DirectDocumentFinalizer", function () {
       now: 301,
     });
     assert.include(cited.document.visibleMarkdown, "## References");
+  });
+  it("rejects citation expansion past the final byte limit before persisting a document", async function () {
+    const max = 2 * 1024 * 1024;
+    const prefix = "# Guide\n\nContext [[cite:C1]].\n\n";
+    const markdown = prefix + "x".repeat(max - prefix.length - 10);
+    await expectRejected(
+      finalizer.finalize({
+        request: request({
+          required: true,
+          documentKind: "guide",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        }),
+        runId: "run-formatted-limit",
+        input: input({
+          markdown,
+          citations: [
+            {
+              citationId: "C1",
+              sources: [
+                { libraryID: 1, itemKey: "AAAA1111", evidenceRefs: [] },
+              ],
+            },
+          ],
+        }),
+        now: 100,
+      }),
+      /Finalized document exceeds the 2 MiB limit/,
+    );
+    assert.isFalse(
+      queries.some((entry) =>
+        entry.sql.includes("INSERT INTO llm_for_zotero_plan_documents"),
+      ),
+    );
   });
 });

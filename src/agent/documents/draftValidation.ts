@@ -12,7 +12,7 @@ function normalizeHeading(value: string): string {
   return value.trim().toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ");
 }
 
-function collectHeadings(markdown: string): Set<string> {
+export function collectHeadings(markdown: string): Set<string> {
   const headings = new Set<string>();
   for (const line of markdown.split(/\r?\n/)) {
     const match = /^#{1,6}\s+(.+?)\s*$/.exec(line);
