@@ -203,13 +203,23 @@ describe("research network loop, live", function () {
     const { report, rendered } = await api.researchFlightReport({
       executionId: approved.executionId,
     });
-    Zotero.debug(
-      `RESEARCH_FLIGHT_REPORT\n${rendered}\nTOOLS: ${events.join(" → ")}\nWALL ${wallSeconds}s`,
-      1,
-    );
-    console.log(
-      `\n${rendered}\nTOOLS: ${events.join(" → ")}\nWALL ${wallSeconds}s\n`,
-    );
+    const summary = `RESEARCH_FLIGHT_REPORT\n${rendered}\nTOOLS: ${events.join(" → ")}\nWALL ${wallSeconds}s\nOUTCOME ${JSON.stringify(execution)}`;
+    Zotero.debug(summary, 1);
+    console.log(`\n${summary}\n`);
+    // The runner captures neither console nor Zotero.debug; keep the report
+    // on disk so a failed flight can still be read.
+    const reportPath = String(
+      (globalThis as any).Services?.env?.get?.(
+        "LLM_FOR_ZOTERO_FLIGHT_REPORT_PATH",
+      ) || "",
+    ).trim();
+    if (reportPath) {
+      try {
+        await (globalThis as any).IOUtils.writeUTF8(reportPath, summary);
+      } catch (error) {
+        Zotero.debug(`flight report write failed: ${String(error)}`, 1);
+      }
+    }
 
     assert.equal(
       execution?.kind,

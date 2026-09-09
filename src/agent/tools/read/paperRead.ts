@@ -1129,17 +1129,26 @@ export function createPaperReadTool(
         }
         return visualTool.execute(input.visualInput as never, context);
       }
+      // Inside an approved research plan the host manifest owns reading
+      // depth: overview already delivers each paper's host-sized text at the
+      // required depth, so an explicit "full" read of manifest targets is
+      // served as overview instead of failing on missing full-read authority.
+      const servedFullAsOverview =
+        input.mode === "full" &&
+        context.request.planContext?.phase === "executing" &&
+        Boolean(input.target || input.targets?.length);
+      const mode: PaperReadMode = servedFullAsOverview
+        ? "overview"
+        : input.mode;
       const targets =
-        input.mode === "full"
+        mode === "full"
           ? resolveFullReadTargets({ input, context, zoteroGateway })
           : resolveDefaultTargets(
               input.target,
               input.targets,
               context,
               zoteroGateway,
-              input.mode === "overview"
-                ? MAX_FULL_TARGETS
-                : MAX_TARGETED_TARGETS,
+              mode === "overview" ? MAX_FULL_TARGETS : MAX_TARGETED_TARGETS,
             );
       const displayLabels = context.request.metadata?.paperDisplayLabels as
         | Record<string, string>
@@ -1161,7 +1170,7 @@ export function createPaperReadTool(
       if (!targets.length) {
         throw new Error(describeNoDefaultPaperTarget(context.request));
       }
-      if (input.mode === "figures") {
+      if (mode === "figures") {
         if (
           context.request.classifiedIntent?.semantic?.figures?.kind === "tables"
         ) {
@@ -1193,7 +1202,7 @@ export function createPaperReadTool(
         const { artifacts, ...content } = figureResult;
         return artifacts?.length ? { content, artifacts } : content;
       }
-      if (input.mode === "full") {
+      if (mode === "full") {
         if (
           !fullReadAnalyzer &&
           context.request.exhaustiveReadBackend === "unavailable"
@@ -1274,7 +1283,7 @@ export function createPaperReadTool(
         };
         return output;
       }
-      if (input.mode === "overview") {
+      if (mode === "overview") {
         const runtimeBudget = context.request.runtimeContextBudget;
         const adaptiveBudget = runtimeBudget
           ? resolveAdaptiveReadingBudget({
@@ -1344,7 +1353,13 @@ export function createPaperReadTool(
           String((result as Record<string, unknown>).coverage || "unknown"),
         );
         return {
-          mode: input.mode,
+          mode,
+          ...(servedFullAsOverview
+            ? {
+                readingNote:
+                  "mode 'full' was served as 'overview': inside an approved research plan the host manifest owns reading depth, and overview delivers each paper's host-sized text at the required depth. Record these papers with research_update record_papers.",
+              }
+            : {}),
           results: overviewQuotePack.results.map((result) => {
             const paper = (result as Record<string, unknown>).paperContext as
               | (PaperDisplayMetadata & {
@@ -1419,7 +1434,7 @@ export function createPaperReadTool(
       });
       const quoteCitations: QuoteCitation[] = [];
       return {
-        mode: input.mode,
+        mode,
         results,
         papers: buildTargetedPaperGroups(
           targets,
