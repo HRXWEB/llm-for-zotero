@@ -403,15 +403,17 @@ function findQuoteElementForAnchor(
     const card = queryElements(messageScope, ".llm-quote-card")[
       anchor.quoteOrdinal
     ];
+    // Sync keys carry raw quote prose, so compare them in JS rather than
+    // interpolating them into a selector.
     const sameQuote =
       card &&
       (anchor.quoteCitationId
         ? datasetValue(card, "quoteCitationId") === anchor.quoteCitationId
-        : Boolean(
-            anchor.citationSyncKey &&
-            card.querySelector?.(
-              `[data-citation-sync-key="${anchor.citationSyncKey}"]`,
-            ),
+        : Boolean(anchor.citationSyncKey) &&
+          queryElements(card, "[data-citation-sync-key]").some(
+            (element) =>
+              datasetValue(element, "citationSyncKey") ===
+              anchor.citationSyncKey,
           ));
     if (sameQuote) return card;
   }

@@ -102,6 +102,8 @@ describe("llmClient context budget", function () {
       outputTokenLimit: { mode: "custom", tokens: 200_000 },
     });
     assert.equal(auto.outputReserveTokens, 8_192);
-    assert.equal(custom.outputReserveTokens, 8_192);
+    // A custom cap is reserved in full, up to the answer share of the usable
+    // window (25% of 180k), so the planner leaves room for the cap it sends.
+    assert.equal(custom.outputReserveTokens, 45_000);
   });
 });

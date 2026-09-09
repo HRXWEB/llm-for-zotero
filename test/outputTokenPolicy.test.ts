@@ -142,6 +142,38 @@ describe("context allocation", function () {
     assert.equal(allocation.inputBudgetTokens, 180_000 - 2_048);
   });
 
+  it("reserves a custom cap above the default so a full prompt still transmits it", function () {
+    const custom: OutputRequestPolicy = {
+      mode: "numeric",
+      tokens: 32_000,
+      source: "custom",
+    };
+    const allocation = resolveContextAllocation({
+      contextWindow: 200_000,
+      policy: custom,
+    });
+    assert.equal(allocation.answerReserveTokens, 32_000);
+    assert.equal(allocation.inputBudgetTokens, 180_000 - 32_000);
+    // The largest prompt the planner may build must not shrink the user's cap.
+    const transmitted = resolveTransmittedOutputPolicy({
+      policy: custom,
+      contextWindow: 200_000,
+      estimatedInputTokens: allocation.inputBudgetTokens,
+    });
+    assert.equal(transmitted.mode, "numeric");
+    if (transmitted.mode !== "numeric") return;
+    assert.equal(transmitted.tokens, 32_000);
+  });
+
+  it("caps a custom reserve at the answer share of the usable window", function () {
+    const allocation = resolveContextAllocation({
+      contextWindow: 200_000,
+      policy: { mode: "numeric", tokens: 200_000, source: "custom" },
+    });
+    assert.equal(allocation.answerReserveTokens, 45_000);
+    assert.equal(allocation.inputBudgetTokens, 180_000 - 45_000);
+  });
+
   it("scales the reserve down on tiny context windows", function () {
     const allocation = resolveContextAllocation({
       contextWindow: 8_000,
