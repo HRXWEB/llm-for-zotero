@@ -8,6 +8,7 @@ import type {
   PlanCitationSource,
 } from "./types";
 import { stripHandwrittenReferences } from "./draftValidation";
+import { ToolInputRejection } from "../tools/execution/failure";
 
 const CITATION_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
 
@@ -201,7 +202,7 @@ function validateLocator(params: {
         params.source.locator?.sourceFingerprint,
   );
   if (!trusted) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Citation locator for ${params.source.itemKey} is not backed by trusted evidence`,
     );
   }
@@ -269,26 +270,30 @@ export async function formatDocumentCitations(params: {
   const clustersById = new Map<string, PlanCitationCluster>();
   const resolved = clusters.map((cluster) => {
     if (!cluster.citationId.trim() || clustersById.has(cluster.citationId)) {
-      throw new Error(`Duplicate or empty citation ID: ${cluster.citationId}`);
+      throw new ToolInputRejection(
+        `Duplicate or empty citation ID: ${cluster.citationId}`,
+      );
     }
     if (!cluster.sources.length) {
-      throw new Error(`Citation ${cluster.citationId} has no sources`);
+      throw new ToolInputRejection(
+        `Citation ${cluster.citationId} has no sources`,
+      );
     }
     const sourceKeys = cluster.sources.map(sourceKey);
     if (new Set(sourceKeys).size !== sourceKeys.length) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Citation ${cluster.citationId} contains duplicate sources`,
       );
     }
     clustersById.set(cluster.citationId, cluster);
     const items = cluster.sources.map((source) => {
       if (!corpusKeys.has(sourceKey(source))) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Citation ${cluster.citationId} references an item outside the approved corpus`,
         );
       }
       if (params.requireEvidence !== false && !source.evidenceRefs.length) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Citation ${cluster.citationId} requires at least one evidence reference`,
         );
       }
@@ -301,7 +306,7 @@ export async function formatDocumentCitations(params: {
           evidence.libraryID !== source.libraryID ||
           evidence.itemKey !== source.itemKey
         ) {
-          throw new Error(
+          throw new ToolInputRejection(
             `Citation ${cluster.citationId} has an invalid evidence reference`,
           );
         }
@@ -311,7 +316,7 @@ export async function formatDocumentCitations(params: {
       }
       const item = itemByLibraryAndKey(source.libraryID, source.itemKey);
       if (!item || item.isNote?.()) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Citation ${cluster.citationId} does not resolve to a citable Zotero item`,
         );
       }
@@ -328,25 +333,27 @@ export async function formatDocumentCitations(params: {
     tokenIds.push(match[1]);
   }
   if (!tokenIds.length && clusters.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Citation mappings were supplied but the document has no citation tokens",
     );
   }
   for (const citationId of tokenIds) {
     if (!clustersById.has(citationId)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document contains unresolved citation token ${citationId}`,
       );
     }
   }
   for (const citationId of clustersById.keys()) {
     if (!tokenIds.includes(citationId)) {
-      throw new Error(`Citation ${citationId} is not used in the document`);
+      throw new ToolInputRejection(
+        `Citation ${citationId} is not used in the document`,
+      );
     }
   }
   if (!clusters.length) {
     if (params.spec.requiresReferences) {
-      throw new Error(
+      throw new ToolInputRejection(
         "The approved document requires References but contains no citations",
       );
     }

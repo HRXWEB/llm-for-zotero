@@ -1,6 +1,7 @@
 import { Marked } from "marked";
 import type { DocumentCitationEvidence } from "./citationService";
 import type { PlanVerifiedQuote, SubmitPlanDocumentInput } from "./types";
+import { ToolInputRejection } from "../tools/execution/failure";
 const QUOTE_TOKEN = /\[\[quote:([A-Za-z0-9._:-]+)\]\]/g;
 export async function resolveVerifiedQuotes(params: {
   markdown: string;
@@ -14,7 +15,9 @@ export async function resolveVerifiedQuotes(params: {
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(quote.quoteId) ||
       mappings.has(quote.quoteId)
     ) {
-      throw new Error(`Duplicate or invalid quote ID: ${quote.quoteId}`);
+      throw new ToolInputRejection(
+        `Duplicate or invalid quote ID: ${quote.quoteId}`,
+      );
     }
     mappings.set(quote.quoteId, quote);
   }
@@ -22,16 +25,22 @@ export async function resolveVerifiedQuotes(params: {
     (match) => match[1],
   );
   if (new Set(tokenIds).size !== tokenIds.length) {
-    throw new Error("Each verified quote token may appear only once");
+    throw new ToolInputRejection(
+      "Each verified quote token may appear only once",
+    );
   }
   for (const quoteId of tokenIds) {
     if (!mappings.has(quoteId)) {
-      throw new Error(`Document contains unresolved quote token ${quoteId}`);
+      throw new ToolInputRejection(
+        `Document contains unresolved quote token ${quoteId}`,
+      );
     }
   }
   for (const quoteId of mappings.keys()) {
     if (!tokenIds.includes(quoteId)) {
-      throw new Error(`Quote ${quoteId} is not used in the document`);
+      throw new ToolInputRejection(
+        `Quote ${quoteId} is not used in the document`,
+      );
     }
   }
   if (!mappings.size) return { markdown: params.markdown, verifiedQuotes: [] };
@@ -51,10 +60,14 @@ export async function resolveVerifiedQuotes(params: {
     const quote = mappings.get(quoteId)!;
     const identity = `${quote.libraryID}:${quote.itemKey}`;
     if (!params.corpusKeys.has(identity)) {
-      throw new Error(`Quote ${quoteId} references an item outside the corpus`);
+      throw new ToolInputRejection(
+        `Quote ${quoteId} references an item outside the corpus`,
+      );
     }
     if (!quote.evidenceRefs.length) {
-      throw new Error(`Quote ${quoteId} requires trusted research evidence`);
+      throw new ToolInputRejection(
+        `Quote ${quoteId} requires trusted research evidence`,
+      );
     }
     const paper = Zotero.Items.getByLibraryAndKey(
       quote.libraryID,
@@ -72,7 +85,7 @@ export async function resolveVerifiedQuotes(params: {
       !attachment.isAttachment?.() ||
       Number(attachment.parentID || 0) !== Number(paper.id)
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Quote ${quoteId} has an invalid PDF attachment identity`,
       );
     }
@@ -85,13 +98,15 @@ export async function resolveVerifiedQuotes(params: {
         !["body", "quote"].includes(record.sourceKind) ||
         record.locator?.attachmentItemKey !== quote.attachmentItemKey
       ) {
-        throw new Error(`Quote ${quoteId} has an invalid evidence reference`);
+        throw new ToolInputRejection(
+          `Quote ${quoteId} has an invalid evidence reference`,
+        );
       }
       return record;
     });
     const reader = readers.get(Number(attachment.id));
     if (!reader) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Quote ${quoteId} requires the source PDF to be open for strict PDF.js verification`,
       );
     }
@@ -101,7 +116,7 @@ export async function resolveVerifiedQuotes(params: {
       quote.text,
     );
     if (verification.status !== "matched") {
-      throw new Error(
+      throw new ToolInputRejection(
         `Quote ${quoteId} failed strict PDF.js verification: ${verification.status === "defer" ? verification.reason : "the literal wording was not found"}`,
       );
     }
@@ -112,7 +127,7 @@ export async function resolveVerifiedQuotes(params: {
           record.locator.pageIndex === verification.certificate.pageIndex,
       )
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Quote ${quoteId} is not backed by trusted evidence on its verified PDF page`,
       );
     }

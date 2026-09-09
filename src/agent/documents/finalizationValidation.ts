@@ -4,6 +4,7 @@ import {
   PLAN_DOCUMENT_ASSETS_MAX_BYTES,
   type PlanDocumentAsset,
 } from "./types";
+import { ToolInputRejection } from "../tools/execution/failure";
 export function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
@@ -12,7 +13,7 @@ export function validateVisibleDocumentPrivacy(markdown: string): void {
   const parser = new Marked();
   parser.walkTokens(parser.lexer(markdown), (token) => {
     if (token.type === "image") {
-      throw new Error(
+      throw new ToolInputRejection(
         "Document figures must be supplied in assets, not as Markdown image paths. Copy the selected figure's documentAsset from paper_read into assets; the host renders its image, caption and provenance.",
       );
     }
@@ -22,7 +23,7 @@ export function validateVisibleDocumentPrivacy(markdown: string): void {
       markdown,
     )
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Document Markdown contains a local filesystem path; use relative asset links or Zotero links",
     );
   }
@@ -40,21 +41,23 @@ export function validateAssets(
       asset.assetId.includes("..") ||
       ids.has(asset.assetId)
     ) {
-      throw new Error(`Duplicate or empty document asset ID: ${asset.assetId}`);
+      throw new ToolInputRejection(
+        `Duplicate or empty document asset ID: ${asset.assetId}`,
+      );
     }
     ids.add(asset.assetId);
     if (!asset.contentHash.trim() || !asset.durablePath.trim()) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document asset ${asset.assetId} lacks durable provenance`,
       );
     }
     if (!/^sha256:[a-f0-9]{64}$/i.test(asset.contentHash)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document asset ${asset.assetId} has an invalid content hash`,
       );
     }
     if (!/^image\/(?:png|jpeg|gif|webp|svg\+xml)$/i.test(asset.mimeType)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document asset ${asset.assetId} is not a supported figure`,
       );
     }
@@ -64,17 +67,21 @@ export function validateAssets(
       !Number.isInteger(asset.height) ||
       Number(asset.height) <= 0
     ) {
-      throw new Error(`Document asset ${asset.assetId} requires dimensions`);
+      throw new ToolInputRejection(
+        `Document asset ${asset.assetId} requires dimensions`,
+      );
     }
     if (!asset.caption.trim()) {
-      throw new Error(`Document asset ${asset.assetId} requires a caption`);
+      throw new ToolInputRejection(
+        `Document asset ${asset.assetId} requires a caption`,
+      );
     }
     if (
       requireEvidence &&
       asset.provenance.origin === "generated" &&
       !asset.provenance.evidenceRefs.length
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Generated asset ${asset.assetId} requires evidence references`,
       );
     }
@@ -82,13 +89,15 @@ export function validateAssets(
       asset.byteLength <= 0 ||
       asset.byteLength > PLAN_DOCUMENT_ASSET_MAX_BYTES
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document asset ${asset.assetId} exceeds the 25 MiB limit`,
       );
     }
     total += asset.byteLength;
   }
   if (total > PLAN_DOCUMENT_ASSETS_MAX_BYTES) {
-    throw new Error("Document assets exceed the 100 MiB per-document limit");
+    throw new ToolInputRejection(
+      "Document assets exceed the 100 MiB per-document limit",
+    );
   }
 }

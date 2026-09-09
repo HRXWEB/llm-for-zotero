@@ -643,6 +643,9 @@ describe("document support audit in the plan finalizer", function () {
   it("rejects unsupported cross-paper paragraphs, then calibrates and accepts a supported document", async function () {
     const { PlanDocumentFinalizer } =
       await import("../src/agent/documents/planFinalization");
+    // Loaded the same way as the finalizer so the class identity matches.
+    const { ToolInputRejection } =
+      await import("../src/agent/tools/execution/failure");
     harness = installResearchHarness();
     await harness.approve({ deliverable: { kind: "document", spec } });
     await completeResearch(harness);
@@ -665,6 +668,7 @@ describe("document support audit in the plan finalizer", function () {
         },
         now: 500,
       });
+    let unsupportedError: unknown;
     const unsupported = await attempt(() =>
       submit(
         [
@@ -678,7 +682,15 @@ describe("document support audit in the plan finalizer", function () {
           "",
           "Papers one and three converge on decoding [[cite:C1]] [[cite:C3]].",
         ].join("\n"),
-      ),
+      ).catch((error: unknown) => {
+        unsupportedError = error;
+        throw error;
+      }),
+    );
+    assert.instanceOf(
+      unsupportedError,
+      ToolInputRejection,
+      "a refused document counts on the input-rejection cap, not the tool-error breaker",
     );
     assert.match(unsupported, /support audit failed/);
     assert.match(unsupported, /record_edges/);

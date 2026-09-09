@@ -8,6 +8,7 @@ import type { TrustedReadObservation } from "../src/agent/plans/types";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type { AgentRuntimeRequest } from "../src/agent/types";
 import { clearPageTextCache } from "../src/modules/contextPanel/livePdfSelectionLocator";
+import { ToolInputRejection } from "../src/agent/tools/execution/failure";
 
 const observation: TrustedReadObservation = {
   version: 1,
@@ -89,6 +90,11 @@ async function expectRejected(
     assert.fail("expected the document finalizer to reject");
   } catch (error) {
     assert.match(String(error), message);
+    assert.instanceOf(
+      error,
+      ToolInputRejection,
+      "a refused submission is a repair opportunity for the model, not a tool failure",
+    );
   }
 }
 

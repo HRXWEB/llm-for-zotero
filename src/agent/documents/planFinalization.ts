@@ -36,6 +36,7 @@ import type {
   SubmitPlanDocumentInput,
 } from "./types";
 import { getPlannedDocumentOrigin } from "./types";
+import { ToolInputRejection } from "../tools/execution/failure";
 function coverageItem(
   item: ResearchCorpusItem,
   evidence: readonly ResearchEvidenceRecord[],
@@ -97,7 +98,7 @@ async function assertPlanDocumentPredecessorsComplete(
       !(entry.kind === "supporting_child" && entry.status === "cancelled"),
   );
   if (unresolvedTasks.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       "The formal document must be the final active plan task after all other approved work is verified complete",
     );
   }
@@ -196,7 +197,7 @@ export class PlanDocumentFinalizer {
       researchJob &&
       (researchJob.status !== "completed" || !researchJob.coverageStatus)
     ) {
-      throw new Error("Research coverage is not terminal yet");
+      throw new ToolInputRejection("Research coverage is not terminal yet");
     }
     await assertPlanDocumentPredecessorsComplete(ledger, task.taskId);
     const effectiveSnapshotId =
@@ -321,7 +322,7 @@ export class PlanDocumentFinalizer {
                   (reference) => !evidenceByRef.has(reference),
                 )
               ) {
-                throw new Error(
+                throw new ToolInputRejection(
                   `Generated asset ${asset.assetId} references unknown research evidence`,
                 );
               }
@@ -332,7 +333,7 @@ export class PlanDocumentFinalizer {
                 `${asset.provenance.libraryID}:${asset.provenance.itemKey}`,
               )
             ) {
-              throw new Error(
+              throw new ToolInputRejection(
                 `Extracted asset ${asset.assetId} is outside the approved corpus`,
               );
             }
@@ -349,7 +350,7 @@ export class PlanDocumentFinalizer {
                 entry.locator?.pageIndex === provenance.pageIndex,
             );
             if (!trusted) {
-              throw new Error(
+              throw new ToolInputRejection(
                 `Extracted asset ${asset.assetId} lacks trusted figure provenance`,
               );
             }
@@ -384,7 +385,7 @@ export class PlanDocumentFinalizer {
                       expectedHash),
               );
               if (!trusted) {
-                throw new Error(
+                throw new ToolInputRejection(
                   `Document asset ${asset.assetId} was not emitted by a verified tool call in this execution`,
                 );
               }

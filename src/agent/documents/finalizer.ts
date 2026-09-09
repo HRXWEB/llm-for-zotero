@@ -37,6 +37,7 @@ import {
   type SubmitPlanDocumentInput,
 } from "./types";
 import { resolveVerifiedQuotes } from "./verifiedQuotes";
+import { ToolInputRejection } from "../tools/execution/failure";
 
 type DocumentFinalizationContext = Pick<
   DocumentArtifactV2,
@@ -84,7 +85,8 @@ export async function finalizeDocument(params: {
   // Plans retain their approved evidence requirements, including authored plans.
   const requireEvidence = planned || researchGrounded;
   const submittedTitle = input.title.trim();
-  if (!submittedTitle) throw new Error("Document title is required");
+  if (!submittedTitle)
+    throw new ToolInputRejection("Document title is required");
   // The approved spec owns the title. A differing submission is a format
   // problem the host repairs (title and leading H1), not a reason to discard a
   // finished document.
@@ -98,9 +100,11 @@ export async function finalizeDocument(params: {
             heading.trim() === submittedTitle ? `${hashes}${title}` : line,
         );
   if (!spec.allowFigures && input.assets.length)
-    throw new Error("The approved document spec does not allow figures");
+    throw new ToolInputRejection(
+      "The approved document spec does not allow figures",
+    );
   if (utf8Bytes(titledMarkdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES)
-    throw new Error("Document Markdown exceeds the 2 MiB limit");
+    throw new ToolInputRejection("Document Markdown exceeds the 2 MiB limit");
   // A valid citation is not a supported claim: every synthesis paragraph that
   // cites two or more papers must rest on recorded relationships. The repair
   // is to record the missing edge (still allowed while the document task is
@@ -113,7 +117,7 @@ export async function finalizeDocument(params: {
       })
     : undefined;
   if (supportAudit?.unsupported.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Document support audit failed: ${supportAudit.unsupported.length} cross-paper paragraph${
         supportAudit.unsupported.length === 1 ? "" : "s"
       } cite papers with no recorded relationship between them.\n${describeUnsupportedParagraphs(
@@ -145,14 +149,16 @@ export async function finalizeDocument(params: {
     !researchGrounded &&
     collectHeadings(calibratedMarkdown).size === 0
   )
-    throw new Error("A document must contain at least one Markdown heading");
+    throw new ToolInputRejection(
+      "A document must contain at least one Markdown heading",
+    );
   validateVisibleDocumentPrivacy(calibratedMarkdown);
   validateAssets(input.assets, requireEvidence);
   if (
     input.groundingReviewed === "passed_with_limitations" &&
     !input.groundingIssues.length
   )
-    throw new Error(
+    throw new ToolInputRejection(
       "A grounding review with limitations must record the detected issues",
     );
   const resolvedQuotes = await resolveVerifiedQuotes({
@@ -175,7 +181,7 @@ export async function finalizeDocument(params: {
     requireEvidence,
   });
   if (utf8Bytes(formatted.visibleMarkdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES)
-    throw new Error("Finalized document exceeds the 2 MiB limit");
+    throw new ToolInputRejection("Finalized document exceeds the 2 MiB limit");
   // Check the complete visible payload before copying any assets or publishing it.
   const assets = await materializePlanDocumentAssets(input.assets);
   const validation: DocumentArtifactV2["validation"] = {

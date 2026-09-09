@@ -20,6 +20,7 @@ import {
   materialDocumentId,
   resolveMaterialOutput,
 } from "./workflowMaterial";
+import { ToolInputRejection } from "../tools/execution/failure";
 function directDocumentSpec(params: {
   request: AgentRuntimeRequest;
   title: string;
@@ -141,7 +142,7 @@ function validateDirectAssetProvenance(params: {
             normalizeAssetHash(asset.contentHash)),
     );
     if (!artifact) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Document asset ${asset.assetId} was not emitted by a successful host tool call`,
       );
     }
@@ -150,7 +151,7 @@ function validateDirectAssetProvenance(params: {
         params.researchGrounded &&
         asset.provenance.evidenceRefs.some((ref) => !observationIds.has(ref))
       ) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Generated asset ${asset.assetId} has an invalid evidence reference`,
         );
       }
@@ -167,7 +168,7 @@ function validateDirectAssetProvenance(params: {
         entry.capabilities.includes("figure"),
     );
     if (!sourceObservation) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Extracted asset ${asset.assetId} is not backed by a host-verified figure observation`,
       );
     }
@@ -223,12 +224,12 @@ export class DirectDocumentFinalizer {
         ),
       )
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         "A literature-review document requires host-verified abstract or body evidence",
       );
     }
     if (researchGrounded && !params.input.citations.length) {
-      throw new Error(
+      throw new ToolInputRejection(
         "A literature-review document requires grounded citations",
       );
     }

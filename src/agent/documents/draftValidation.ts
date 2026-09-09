@@ -1,3 +1,5 @@
+import { ToolInputRejection } from "../tools/execution/failure";
+
 const QUOTE_TOKEN = /\[\[quote:([A-Za-z0-9._:-]+)\]\]/g;
 /**
  * A leading enumerator ("1.", "2)", "3.1", "IV.", "A.") is presentation, not
@@ -107,7 +109,9 @@ export function assertDocumentDraftValid(params: {
 }): void {
   const issues = collectDocumentDraftIssues(params);
   if (issues.length) {
-    throw new Error(`Document validation failed:\n- ${issues.join("\n- ")}`);
+    throw new ToolInputRejection(
+      `Document validation failed:\n- ${issues.join("\n- ")}`,
+    );
   }
 }
 
