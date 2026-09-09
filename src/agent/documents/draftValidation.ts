@@ -1,4 +1,17 @@
 const QUOTE_TOKEN = /\[\[quote:([A-Za-z0-9._:-]+)\]\]/g;
+/**
+ * A leading enumerator ("1.", "2)", "3.1", "IV.", "A.") is presentation, not
+ * the section's name; numbered headings are ordinary in reviews.
+ */
+const HEADING_ENUMERATOR =
+  /^(?:\d+(?:\.\d+)*[.):]?|[ivxlcdm]+[.):]|[a-z][.):])\s+/i;
+/**
+ * A quoted span is a direct quotation when it is a run of prose. A quoted
+ * name, identifier, or term of a few words is ordinary writing and needs no
+ * quote token.
+ */
+const QUOTED_SPAN = /(?:^|[\s(])["\u201c]([^"\u201d\n]+)["\u201d]/gm;
+const DIRECT_QUOTATION_MIN_WORDS = 5;
 
 /**
  * The coverage disclosure rule in the words the validator enforces. Every
@@ -9,7 +22,21 @@ export const COVERAGE_DISCLOSURE_REQUIREMENT =
   'Coverage disclosure required: one heading containing "scope" and one heading containing "limitations"; a single "Scope and limitations" section satisfies both.';
 
 function normalizeHeading(value: string): string {
-  return value.trim().toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ");
+  return value
+    .trim()
+    .replace(HEADING_ENUMERATOR, "")
+    .toLowerCase()
+    .replace(/[`*_]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function hasDirectQuotation(markdown: string): boolean {
+  if (/^\s*>\s+\S/m.test(markdown)) return true;
+  for (const match of markdown.matchAll(QUOTED_SPAN)) {
+    const words = match[1].trim().split(/\s+/).filter(Boolean);
+    if (words.length >= DIRECT_QUOTATION_MIN_WORDS) return true;
+  }
+  return false;
 }
 
 export function collectHeadings(markdown: string): Set<string> {
@@ -61,16 +88,13 @@ export function collectDocumentDraftIssues(params: {
   if (missing.length) {
     issues.push(`Document is missing required sections: ${missing.join(", ")}`);
   }
-  if (params.validateQuotes !== false) {
-    const proseWithoutTokens = params.markdown.replace(QUOTE_TOKEN, "");
-    const hasDirectQuote =
-      /^\s*>\s+\S/m.test(proseWithoutTokens) ||
-      /(?:^|[\s(])["“][^"”\n]{20,}["”]/m.test(proseWithoutTokens);
-    if (hasDirectQuote) {
-      issues.push(
-        "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
-      );
-    }
+  if (
+    params.validateQuotes !== false &&
+    hasDirectQuotation(params.markdown.replace(QUOTE_TOKEN, ""))
+  ) {
+    issues.push(
+      "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+    );
   }
   return issues;
 }
