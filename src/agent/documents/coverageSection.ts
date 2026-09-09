@@ -50,6 +50,12 @@ export function buildVerificationSummary(params: {
 const LIMITATION_HEADING = /\blimit(?:ation|ations|s)\b/i;
 const SCOPE_HEADING = /\bscope\b/i;
 
+function isReferencesHeading(entry: {
+  match: RegExpExecArray | null;
+}): boolean {
+  return entry.match?.[2].trim().toLowerCase() === "references";
+}
+
 /**
  * Insert the summary under the limitations (or scope) heading, or add a
  * "Scope and limitations" section before References when neither exists.
@@ -68,13 +74,26 @@ export function ensureCoverageSection(params: {
       match: /^(#{1,6})\s+(.+?)\s*$/.exec(line),
     }))
     .filter((entry) => entry.match);
+  // The section that discloses scope and limitations together is the home
+  // for calibration; a limitations heading elsewhere (for example
+  // "Agreements, contradictions, and limitations") comes second.
   const target =
+    headingLines.find(
+      (entry) =>
+        SCOPE_HEADING.test(entry.match![2]) &&
+        LIMITATION_HEADING.test(entry.match![2]),
+    ) ||
     headingLines.find((entry) => LIMITATION_HEADING.test(entry.match![2])) ||
     headingLines.find((entry) => SCOPE_HEADING.test(entry.match![2]));
   if (target) {
     const depth = target.match![1].length;
+    // The section ends at the next heading of the same or a higher level,
+    // or at References whatever its level: a review often writes its
+    // sections as H1 and the bibliography as H2.
     const nextIndex = headingLines.find(
-      (entry) => entry.index > target.index && entry.match![1].length <= depth,
+      (entry) =>
+        entry.index > target.index &&
+        (entry.match![1].length <= depth || isReferencesHeading(entry)),
     )?.index;
     const end = nextIndex ?? lines.length;
     let insertAt = end;
@@ -84,9 +103,7 @@ export function ensureCoverageSection(params: {
     const after = lines.slice(insertAt).join("\n");
     return `${before}${block}${after ? `\n\n${after.replace(/^\n+/, "")}` : ""}`;
   }
-  const referencesLine = headingLines.find(
-    (entry) => entry.match![2].trim().toLowerCase() === "references",
-  );
+  const referencesLine = headingLines.find(isReferencesHeading);
   const sectionLevels = headingLines
     .slice(1)
     .map((entry) => entry.match![1].length);

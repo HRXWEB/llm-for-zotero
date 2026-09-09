@@ -112,6 +112,52 @@ describe("document support audit", function () {
     );
   });
 
+  it("prefers the scope-and-limitations section over an earlier limitations heading", function () {
+    const markdown = [
+      "# Review",
+      "",
+      "# Agreements, contradictions, and limitations",
+      "",
+      "The studies agree on method.",
+      "",
+      "# Conclusion",
+      "",
+      "Bounded prior.",
+      "",
+      "# Scope and limitations",
+      "",
+      "Three papers were read in full.",
+      "",
+      "## References",
+    ].join("\n");
+    const output = ensureCoverageSection({
+      markdown,
+      summary: "Coverage: 3 papers.",
+    });
+    assert.equal(
+      output,
+      [
+        "# Review",
+        "",
+        "# Agreements, contradictions, and limitations",
+        "",
+        "The studies agree on method.",
+        "",
+        "# Conclusion",
+        "",
+        "Bounded prior.",
+        "",
+        "# Scope and limitations",
+        "",
+        "Three papers were read in full.",
+        "",
+        "Coverage: 3 papers.",
+        "",
+        "## References",
+      ].join("\n"),
+    );
+  });
+
   it("generates the section before References when the model omitted it", function () {
     const output = ensureCoverageSection({
       markdown: "# Review\n\n## Themes\n\nText.\n\n## References\n",
