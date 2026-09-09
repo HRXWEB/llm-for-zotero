@@ -1,0 +1,379 @@
+import { assert } from "chai";
+import {
+  listResearchEdges,
+  listResearchOpenQuestions,
+  loadResearchJobForExecution,
+} from "../src/agent/research/store";
+import {
+  installResearchHarness,
+  nodeFinding,
+  type ResearchHarness,
+} from "./helpers/researchHarness";
+
+async function job(h: ResearchHarness) {
+  return (await loadResearchJobForExecution((await h.ledger()).executionId))!;
+}
+
+async function attempt(work: () => Promise<unknown>) {
+  try {
+    await work();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return "";
+}
+
+/** Inventory, read and record every fixture paper as a core node. */
+async function recordAllNodes(h: ResearchHarness) {
+  await h.run(
+    { operation: "inventory_scope" },
+    {
+      runtimeContextBudget: {
+        contextWindowTokens: 200_000,
+        usedContextTokens: 10_000,
+      },
+    },
+  );
+  await h.verifiedRead(
+    h.papers.map((paper) => paper.key),
+    "body",
+  );
+  let last: any;
+  for (const [index, paper] of h.papers.entries()) {
+    const others = h.papers.filter((entry) => entry.key !== paper.key);
+    last = await h.run({
+      operation: "record_papers",
+      papers: [
+        {
+          libraryID: 1,
+          itemKey: paper.key,
+          finding: nodeFinding({
+            mainMessage: `Paper ${index + 1} main message.`,
+            noLinkSeen: undefined,
+            candidateLinks: [
+              {
+                target: `1:${others[0].key}`,
+                type: "extends",
+                note: "shared task",
+              },
+            ],
+          }),
+        },
+      ],
+    });
+  }
+  return last;
+}
+
+describe("research graph loop", function () {
+  const originalZotero = (globalThis as any).Zotero;
+  let harness: ResearchHarness | undefined;
+  beforeEach(async function () {
+    harness = installResearchHarness();
+    await harness.approve();
+  });
+  afterEach(function () {
+    harness?.close();
+    harness = undefined;
+    (globalThis as any).Zotero = originalZotero;
+  });
+
+  it("moves to the links phase when every node is durable and shows every node compactly", async function () {
+    const last = await recordAllNodes(harness!);
+    assert.match(last.continuationCheckpoint.instruction, /links phase/);
+    assert.equal((await job(harness!)).synthesisPhase, "links");
+    const view = await harness!.run({ operation: "list_findings" });
+    assert.equal(view.view, "compact");
+    assert.lengthOf(view.findings, 3);
+    assert.deepEqual(
+      view.findings[0].claims.map((claim: any) => claim.claimId),
+      ["PAPER001:c1", "PAPER001:c2", "PAPER001:c3"],
+    );
+    assert.equal(view.findings[0].frameSlots.sq1, "Bayesian observer.");
+    assert.equal(view.findings[0].candidateLinks[0].target, "1:PAPER002");
+    assert.isNull(view.nextCursor);
+  });
+
+  it("refuses edges before the links phase and validates them afterwards", async function () {
+    await harness!.run({ operation: "inventory_scope" });
+    const early = await attempt(() =>
+      harness!.run({
+        operation: "record_edges",
+        edges: [
+          {
+            source: "1:PAPER001",
+            target: "1:PAPER002",
+            type: "extends",
+            statement: "x",
+            confidence: "low",
+          },
+        ],
+      }),
+    );
+    assert.match(early, /nodes phase/);
+    await recordAllNodes(harness!);
+    const unknownClaim = await attempt(() =>
+      harness!.run({
+        operation: "record_edges",
+        edges: [
+          {
+            source: "1:PAPER001",
+            target: "1:PAPER002",
+            type: "extends",
+            statement: "Two extends one.",
+            confidence: "medium",
+            sourceClaimIds: ["PAPER001:c9"],
+          },
+        ],
+      }),
+    );
+    assert.match(unknownClaim, /claim PAPER001:c9/);
+    const result = await harness!.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Paper two extends paper one to humans.",
+          confidence: "medium",
+          sourceClaimIds: ["PAPER001:c1"],
+          targetClaimIds: ["PAPER002:c1"],
+        },
+        {
+          source: "1:PAPER002",
+          target: "1:PAPER003",
+          type: "contradicts",
+          statement: "Paper three reports the opposite bias.",
+          confidence: "low",
+          sourceClaimIds: ["PAPER002:c1"],
+          targetClaimIds: ["PAPER003:c1"],
+        },
+      ],
+    });
+    assert.lengthOf(result.edges, 2);
+    assert.isTrue(
+      result.edges[1].requiresVerification,
+      "contradictions are always verified",
+    );
+    assert.isFalse(result.edges[0].requiresVerification);
+    assert.equal(result.edges[0].status, "candidate");
+    const again = await harness!.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Revised statement.",
+          confidence: "high",
+        },
+      ],
+    });
+    assert.equal(again.edges[0].edgeId, result.edges[0].edgeId);
+    assert.match(again.warnings[0], /updated existing edge/);
+    const edges = await listResearchEdges((await job(harness!)).researchJobId);
+    assert.lengthOf(edges, 2);
+    assert.equal(edges[0].statement, "Revised statement.");
+    assert.deepEqual(
+      edges[0].subquestionIds,
+      [],
+      "the re-record replaced its claim ids, so its subquestions follow",
+    );
+    assert.deepEqual(edges[1].subquestionIds, ["sq2"]);
+  });
+
+  it("enforces the stop rules on phase transitions and ranks required verification first", async function () {
+    await recordAllNodes(harness!);
+    const noEdges = await attempt(() =>
+      harness!.run({ operation: "advance_phase", phase: "verification" }),
+    );
+    assert.match(noEdges, /No edges are recorded/);
+    const skip = await attempt(() =>
+      harness!.run({ operation: "advance_phase", phase: "structure" }),
+    );
+    assert.match(skip, /one step at a time/);
+    await harness!.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Two extends one.",
+          confidence: "high",
+        },
+        {
+          source: "1:PAPER002",
+          target: "1:PAPER003",
+          type: "contradicts",
+          statement: "Three contradicts two.",
+          confidence: "low",
+        },
+      ],
+    });
+    const advanced = await harness!.run({
+      operation: "advance_phase",
+      phase: "verification",
+    });
+    assert.equal(advanced.phase, "verification");
+    const work = await harness!.run({ operation: "next_work" });
+    assert.equal(work.phase, "verification");
+    assert.isFalse(work.phaseComplete);
+    assert.equal(work.candidates[0].kind, "verify_edge");
+    assert.equal(work.candidates[0].type, "contradicts");
+    assert.isTrue(work.candidates[0].required);
+    assert.match(work.candidates[0].action, /update_edges/);
+    const blocked = await attempt(() =>
+      harness!.run({ operation: "advance_phase", phase: "structure" }),
+    );
+    assert.match(blocked, /must be verified, refuted, or marked tentative/);
+    const contradiction = work.candidates[0].edgeId;
+    const noRead = await attempt(() =>
+      harness!.run({
+        operation: "update_edges",
+        edges: [{ edgeId: contradiction, status: "verified" }],
+      }),
+    );
+    assert.match(noRead, /targeted paper_read/);
+    await harness!.verifiedRead(["PAPER003"], "body", {
+      pageIndex: 4,
+      mode: "targeted",
+    });
+    const decided = await harness!.run({
+      operation: "update_edges",
+      edges: [
+        {
+          edgeId: contradiction,
+          status: "verified",
+          note: "Figure 2 shows the reversed sign.",
+        },
+      ],
+    });
+    assert.equal(decided.edges[0].status, "verified");
+    const stored = (
+      await listResearchEdges((await job(harness!)).researchJobId)
+    ).find((edge) => edge.edgeId === contradiction)!;
+    assert.lengthOf(stored.verification!.evidenceRefs, 1);
+    assert.match(stored.verification!.evidenceRefs[0], /:obs:1$/);
+    const tentative = await attempt(() =>
+      harness!.run({
+        operation: "update_edges",
+        edges: [{ edgeId: work.candidates[1].edgeId, status: "tentative" }],
+      }),
+    );
+    assert.match(tentative, /needs a note/);
+    await harness!.run({
+      operation: "update_edges",
+      edges: [
+        {
+          edgeId: work.candidates[1].edgeId,
+          status: "tentative",
+          note: "Different tasks; not checkable.",
+        },
+      ],
+    });
+    const done = await harness!.run({ operation: "next_work" });
+    assert.isTrue(done.phaseComplete);
+    assert.lengthOf(done.candidates, 0);
+    assert.equal(done.counts.verifiedEdges, 1);
+    assert.equal(done.counts.tentativeEdges, 1);
+    const structure = await harness!.run({
+      operation: "advance_phase",
+      phase: "structure",
+    });
+    assert.equal(structure.phase, "structure");
+  });
+
+  it("records and resolves open questions scoped to edges, nodes and subquestions", async function () {
+    await recordAllNodes(harness!);
+    const { edges } = await harness!.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Two extends one.",
+          confidence: "high",
+        },
+        {
+          source: "1:PAPER002",
+          target: "1:PAPER003",
+          type: "shares_method",
+          statement: "Same task.",
+          confidence: "high",
+        },
+      ],
+    });
+    const badScope = await attempt(() =>
+      harness!.run({
+        operation: "record_questions",
+        questions: [
+          { text: "Does it replicate?", scope: { kind: "edge", ref: "nope" } },
+        ],
+      }),
+    );
+    assert.match(badScope, /existing edge/);
+    const recorded = await harness!.run({
+      operation: "record_questions",
+      questions: [
+        {
+          text: "Does it replicate in humans?",
+          scope: { kind: "edge", ref: edges[0].edgeId },
+        },
+        {
+          text: "Which frameworks recur?",
+          scope: { kind: "subquestion", ref: "sq1" },
+          priority: 3,
+        },
+        {
+          text: "Is paper three an outlier?",
+          scope: { kind: "node", ref: "1:PAPER003" },
+        },
+      ],
+    });
+    assert.deepEqual(
+      recorded.questions.map((question: any) => question.priority),
+      [1, 3, 2],
+    );
+    const work = await harness!
+      .run({ operation: "advance_phase", phase: "verification" })
+      .then(() => harness!.run({ operation: "next_work" }));
+    const questionCandidate = work.candidates.find(
+      (entry: any) => entry.kind === "answer_question",
+    );
+    assert.deepEqual(questionCandidate.targets, ["1:PAPER001", "1:PAPER002"]);
+    const missingResolution = await attempt(() =>
+      harness!.run({
+        operation: "resolve_questions",
+        questions: [
+          { questionId: recorded.questions[0].questionId, status: "answered" },
+        ],
+      }),
+    );
+    assert.match(missingResolution, /resolution/);
+    await harness!.run({
+      operation: "resolve_questions",
+      questions: [
+        {
+          questionId: recorded.questions[0].questionId,
+          status: "answered",
+          resolution: "Yes, paper two.",
+        },
+        {
+          questionId: recorded.questions[1].questionId,
+          status: "abandoned",
+          resolution: "Out of scope.",
+        },
+      ],
+    });
+    const questions = await listResearchOpenQuestions(
+      (await job(harness!)).researchJobId,
+    );
+    assert.deepEqual(
+      questions.map((question) => question.status),
+      ["answered", "abandoned", "open"],
+    );
+  });
+});

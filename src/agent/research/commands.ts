@@ -14,6 +14,10 @@ type NoPayload = {
   outcome?: never;
   slots?: never;
   tiers?: never;
+  edges?: never;
+  questions?: never;
+  phase?: never;
+  view?: "compact" | "full";
   cursor?: number;
   limit?: number;
 };
@@ -24,7 +28,21 @@ export type ResearchUpdateInput =
         | "next_screen_batch"
         | "list_verified_reads"
         | "list_findings"
-        | "list_themes";
+        | "list_themes"
+        | "list_graph"
+        | "next_work";
+    })
+  | (Omit<NoPayload, "edges"> & {
+      operation: "record_edges" | "update_edges";
+      edges: unknown[];
+    })
+  | (Omit<NoPayload, "questions"> & {
+      operation: "record_questions" | "resolve_questions";
+      questions: unknown[];
+    })
+  | (Omit<NoPayload, "phase"> & {
+      operation: "advance_phase";
+      phase: string;
     })
   | (Omit<NoPayload, "stage"> & {
       operation: "set_stage";
@@ -76,9 +94,41 @@ export function validateResearchUpdate(
       "finalize",
       "set_frame",
       "set_tiers",
+      "record_edges",
+      "update_edges",
+      "record_questions",
+      "resolve_questions",
+      "advance_phase",
+      "next_work",
+      "list_graph",
     ].includes(String(operation))
   ) {
     return fail("research_update operation is invalid");
+  }
+  if (
+    (operation === "record_edges" || operation === "update_edges") &&
+    (!Array.isArray(args.edges) || !args.edges.length)
+  ) {
+    return fail(`${operation} requires edges[]`);
+  }
+  if (
+    (operation === "record_questions" || operation === "resolve_questions") &&
+    (!Array.isArray(args.questions) || !args.questions.length)
+  ) {
+    return fail(`${operation} requires questions[]`);
+  }
+  if (
+    operation === "advance_phase" &&
+    (typeof args.phase !== "string" || !args.phase.trim())
+  ) {
+    return fail("advance_phase requires phase");
+  }
+  if (
+    args.view !== undefined &&
+    args.view !== "compact" &&
+    args.view !== "full"
+  ) {
+    return fail("view must be compact or full");
   }
   if (
     operation === "set_frame" &&
@@ -143,6 +193,9 @@ export function validateResearchUpdate(
   const page = {
     cursor: args.cursor === undefined ? undefined : Number(args.cursor),
     limit: args.limit === undefined ? undefined : Number(args.limit),
+    ...(args.view === undefined
+      ? {}
+      : { view: args.view as "compact" | "full" }),
   };
   switch (operation) {
     case "set_stage":
@@ -182,6 +235,18 @@ export function validateResearchUpdate(
       return ok({ ...page, operation, slots: args.slots as unknown[] });
     case "set_tiers":
       return ok({ ...page, operation, tiers: args.tiers as unknown[] });
+    case "record_edges":
+    case "update_edges":
+      return ok({ ...page, operation, edges: args.edges as unknown[] });
+    case "record_questions":
+    case "resolve_questions":
+      return ok({
+        ...page,
+        operation,
+        questions: args.questions as unknown[],
+      });
+    case "advance_phase":
+      return ok({ ...page, operation, phase: String(args.phase).trim() });
     default:
       return ok({ ...page, operation });
   }

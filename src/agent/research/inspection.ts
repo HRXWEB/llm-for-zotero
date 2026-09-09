@@ -4,6 +4,7 @@ import type { ResearchUpdateInput } from "./commands";
 import { selectPreferredVerifiedReads } from "./reading";
 import {
   listPaperFindings,
+  listResearchEdges,
   listResearchEvidence,
   listThemeFindings,
 } from "./store";
@@ -102,14 +103,76 @@ export async function inspectResearch(params: {
         (corpusOrdinal.get(`${right.libraryID}:${right.itemKey}`) ??
           Number.MAX_SAFE_INTEGER),
     );
+    const compact =
+      input.view === "compact" ||
+      (input.view === undefined && Boolean(job.frame));
     const cursor = input.cursor || 0;
-    const limit = input.limit || 20;
+    const limit =
+      input.limit ||
+      (compact
+        ? Math.max(20, job.nodeCapacity?.fullNodeCapacity || 0, findings.length)
+        : 20);
     const labels = buildPaperDisplayLabels(
       [...snapshotByKey.values()].map((entry) => ({
         ...entry,
         identity: `${entry.libraryID}:${entry.itemKey}`,
       })),
     );
+    if (compact) {
+      const edges = await listResearchEdges(job.researchJobId);
+      const edgeCount = new Map<string, number>();
+      for (const edge of edges) {
+        if (edge.status === "merged") continue;
+        for (const end of [edge.source, edge.target]) {
+          edgeCount.set(end, (edgeCount.get(end) || 0) + 1);
+        }
+      }
+      const tierByIdentity = new Map(
+        corpus.map((entry) => [
+          `${entry.libraryID}:${entry.itemKey}`,
+          entry.tier,
+        ]),
+      );
+      const compactPage = findings
+        .slice(cursor, cursor + limit)
+        .map((finding) => {
+          const identity = `${finding.libraryID}:${finding.itemKey}`;
+          return {
+            identity,
+            displayLabel: labels.get(identity),
+            year: snapshotByKey.get(identity)?.year,
+            tier: finding.tier || tierByIdentity.get(identity) || "core",
+            evidenceDepth:
+              preferredByPaper.get(identity)?.evidenceDepth || "metadata",
+            mainMessage: finding.mainMessage,
+            frameSlots: finding.frameSlots || {},
+            claims: (finding.claims || []).map((claim) => ({
+              claimId: claim.claimId,
+              kind: claim.kind,
+              statement: claim.statement.slice(0, 240),
+              subquestionIds: claim.subquestionIds,
+              evidence: claim.evidence.sourceKind,
+              ...(claim.evidence.verified ? { verified: true } : {}),
+            })),
+            hooks: finding.hooks,
+            candidateLinks: finding.candidateLinks,
+            noLinkSeen: finding.noLinkSeen,
+            questionsRaised: finding.questionsRaised,
+            edgeCount: edgeCount.get(identity) || 0,
+          };
+        });
+      const compactNext = cursor + compactPage.length;
+      return {
+        view: "compact",
+        phase: job.synthesisPhase || "nodes",
+        frame: job.frame,
+        findings: compactPage,
+        nextCursor: compactNext < findings.length ? compactNext : null,
+        totalFindings: findings.length,
+        instruction:
+          "Every node is in view. Record the explicit typed edge list with record_edges: for each real relationship name source, target, type, the claim ids it rests on, a one-sentence statement and confidence. Candidate links are suggestions, not edges.",
+      };
+    }
     const page = findings.slice(cursor, cursor + limit).map((finding) => ({
       displayLabel: labels.get(`${finding.libraryID}:${finding.itemKey}`),
       findingId: finding.findingId,

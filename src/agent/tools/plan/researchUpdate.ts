@@ -50,7 +50,90 @@ export function createResearchUpdateTool(
               "finalize",
               "set_frame",
               "set_tiers",
+              "record_edges",
+              "update_edges",
+              "record_questions",
+              "resolve_questions",
+              "advance_phase",
+              "next_work",
+              "list_graph",
             ],
+          },
+          view: {
+            type: "string",
+            enum: ["compact", "full"],
+            description:
+              "list_findings view. compact (default once a frame exists) returns every node with frame slots, claim ids and candidate links for the link pass.",
+          },
+          phase: {
+            type: "string",
+            enum: ["links", "verification", "structure", "writing"],
+            description:
+              "advance_phase: the next loop phase. The host enforces the stop rule of each transition and names the blockers.",
+          },
+          edges: {
+            type: "array",
+            minItems: 1,
+            description:
+              "record_edges: typed relationships between two durable nodes (source, target, type, statement, confidence, sourceClaimIds, targetClaimIds, optional edgeKey). update_edges: decisions on existing edges (edgeId, status verified|refuted|tentative|merged|candidate, note, mergedInto, optional statement/confidence). verified and refuted need a targeted read of the pair after the edge was recorded; tentative needs a note.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                edgeId: { type: "string" },
+                edgeKey: { type: "string" },
+                source: { type: "string" },
+                target: { type: "string" },
+                type: { type: "string", enum: RESEARCH_EDGE_TYPES },
+                statement: { type: "string" },
+                confidence: { type: "string", enum: ["low", "medium", "high"] },
+                sourceClaimIds: { type: "array", items: { type: "string" } },
+                targetClaimIds: { type: "array", items: { type: "string" } },
+                requiresVerification: { type: "boolean" },
+                status: {
+                  type: "string",
+                  enum: [
+                    "candidate",
+                    "verified",
+                    "refuted",
+                    "tentative",
+                    "merged",
+                  ],
+                },
+                note: { type: "string" },
+                mergedInto: { type: "string" },
+              },
+            },
+          },
+          questions: {
+            type: "array",
+            minItems: 1,
+            description:
+              "record_questions: open questions the corpus raises (text, scope {kind: subquestion|edge|node|corpus, ref}, priority 1-3). resolve_questions: questionId, status answered|abandoned, resolution, optional evidenceRefs.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                questionId: { type: "string" },
+                text: { type: "string" },
+                scope: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["kind"],
+                  properties: {
+                    kind: {
+                      type: "string",
+                      enum: ["subquestion", "edge", "node", "corpus"],
+                    },
+                    ref: { type: "string" },
+                  },
+                },
+                priority: { type: "integer", minimum: 1, maximum: 3 },
+                status: { type: "string", enum: ["answered", "abandoned"] },
+                resolution: { type: "string" },
+                evidenceRefs: { type: "array", items: { type: "string" } },
+              },
+            },
           },
           stage: { type: "string", enum: STAGES },
           slots: {

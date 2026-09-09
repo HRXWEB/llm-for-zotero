@@ -27,7 +27,17 @@ import {
   parseTierDecisions,
 } from "./synthesisControls";
 import { buildCorpusMap } from "./tiering";
-import { listResearchEdges } from "./store";
+import { listResearchEdges, listResearchOpenQuestions } from "./store";
+import {
+  advanceSynthesisPhase,
+  currentPhase,
+  describeNextWork,
+  recordResearchEdges,
+  recordResearchQuestions,
+  resolveResearchQuestions,
+  updateResearchEdges,
+} from "./graphLoop";
+import type { ResearchSynthesisPhase } from "./types";
 import { validateStoredResearchTransition } from "./stages";
 import {
   listPaperFindings,
@@ -145,6 +155,16 @@ export async function executeResearchUpdate(
       snapshotByKey,
       taskEvidence,
     });
+  if (input.operation === "next_work") {
+    return describeNextWork({ job, corpus });
+  }
+  if (input.operation === "list_graph") {
+    const [edges, questions] = await Promise.all([
+      listResearchEdges(job.researchJobId),
+      listResearchOpenQuestions(job.researchJobId),
+    ]);
+    return { phase: currentPhase(job), edges, questions };
+  }
   const allowedCriteria = new Set(
     investigation.criteria.map((entry) => entry.id),
   );
@@ -254,6 +274,25 @@ export async function executeResearchUpdate(
     );
   }
   if (
+    input.operation === "record_themes" &&
+    job.frame &&
+    !["structure", "writing"].includes(currentPhase(job))
+  ) {
+    throw new Error(
+      `Themes are recorded in the structure phase after the edge list is verified; the loop is in the ${currentPhase(job)} phase. Use next_work to see what remains.`,
+    );
+  }
+  if (
+    input.operation === "finalize" &&
+    input.outcome === "complete" &&
+    job.frame &&
+    !["writing", "complete"].includes(currentPhase(job))
+  ) {
+    throw new Error(
+      `Research finalizes from the writing phase; the loop is in the ${currentPhase(job)} phase. Advance through links, verification and structure with advance_phase first.`,
+    );
+  }
+  if (
     input.operation === "finalize" &&
     input.outcome === "complete" &&
     job.activeStage !== "hierarchical_synthesis"
@@ -329,6 +368,49 @@ export async function executeResearchUpdate(
   )
     await recordResearchReductions({ input, job, corpusByKey, evidenceByRef });
 
+  let graphContent: Record<string, unknown> = {};
+  if (input.operation === "record_edges") {
+    graphContent = await recordResearchEdges({
+      job,
+      edges: input.edges,
+      corpusByKey,
+    });
+  }
+  if (input.operation === "update_edges") {
+    graphContent = await updateResearchEdges({
+      job,
+      updates: input.edges,
+      taskEvidence,
+    });
+  }
+  if (input.operation === "record_questions") {
+    graphContent = {
+      questions: await recordResearchQuestions({
+        job,
+        questions: input.questions,
+        corpusByKey,
+        subquestionIds: allowedSubquestions,
+      }),
+    };
+  }
+  if (input.operation === "resolve_questions") {
+    graphContent = {
+      questions: await resolveResearchQuestions({
+        job,
+        resolutions: input.questions,
+      }),
+    };
+  }
+  if (input.operation === "advance_phase") {
+    job = await advanceSynthesisPhase({
+      job,
+      to: input.phase as ResearchSynthesisPhase,
+      corpus,
+      conversationKey: context.request.conversationKey,
+    });
+    graphContent = { phase: job.synthesisPhase };
+  }
+
   let automaticStage =
     input.operation === "set_stage" ? input.stage : undefined;
   let remainingReadingManifest: ReadingManifestEntry[] | undefined;
@@ -358,6 +440,10 @@ export async function executeResearchUpdate(
     if (everyPaperUnderstood) {
       automaticStage = "hierarchical_synthesis";
       remainingReadingManifest = [];
+      // Every node is durable: the loop moves to the link pass.
+      if (job.frame && currentPhase(job) === "nodes") {
+        job = { ...job, synthesisPhase: "links" };
+      }
     } else {
       remainingReadingManifest = await buildReadingManifest({
         corpus: currentCorpus.filter(
@@ -463,6 +549,7 @@ export async function executeResearchUpdate(
     ...(input.operation === "record_papers" && input.warnings.length
       ? { warnings: input.warnings }
       : {}),
+    ...graphContent,
   };
   if (
     adaptiveReview &&
