@@ -354,3 +354,144 @@ describe("research reading task ownership", function () {
     );
   });
 });
+
+describe("research coverage evidence storage", function () {
+  const originalZotero = globalThis.Zotero;
+  afterEach(function () {
+    globalThis.Zotero = originalZotero;
+  });
+
+  it("keeps the scope lineage digest through the evidence store so a bound coverage task can complete", async function () {
+    const { decodeTaskEvidence } = await import("../src/agent/plans/decoders");
+    const harness = installSqliteZotero();
+    try {
+      await initAgentPlanStore();
+      await initResearchStore();
+      const { coordinator, ledger } = await approveResearchPlan(
+        harness.gateway,
+      );
+      const job = await loadResearchJobForExecution(ledger.executionId);
+      await coordinator.completeResearchReading({
+        executionId: ledger.executionId,
+        researchJobId: job!.researchJobId,
+        scopeLineageDigest: job!.scopeLineageDigest!,
+        durablePapers: 2,
+        totalPapers: 2,
+        now: 5,
+      });
+      // Verifier placement is a host contract: coverage sits on the last
+      // read or reasoning step. Close the intermediate reasoning step first.
+      let current = (await loadPlanExecutionLedger(ledger.executionId))!;
+      const reasoning = current.tasks.find(
+        (task) => task.taskId === current.activeTaskId,
+      )!;
+      const reasoningRequirement = reasoning.completionRequirements!.find(
+        (entry) => entry.kind === "bounded_reasoning",
+      )!;
+      current = await coordinator.requestTransitionWithEvidence({
+        request: {
+          executionId: ledger.executionId,
+          taskId: reasoning.taskId,
+          toStatus: "completed",
+          requestedBy: "original",
+        },
+        evidence: {
+          version: 3,
+          evidenceId: `${reasoning.taskId}:reasoning`,
+          executionId: ledger.executionId,
+          taskId: reasoning.taskId,
+          kind: "reasoning_assertion",
+          verified: true,
+          requirementId: reasoningRequirement.requirementId,
+          criterionIds: reasoningRequirement.criterionIds,
+          contractDigest: reasoningRequirement.contractDigest,
+          payload: { type: "bounded_reasoning", assertion: "Synthesized." },
+          createdAt: 6,
+        },
+        now: 6,
+      });
+      current = await coordinator.startNextTask(ledger.executionId, 7);
+      const coverageTask = current.tasks.find((task) =>
+        task.completionRequirements?.some(
+          (entry) => entry.kind === "research_coverage",
+        ),
+      )!;
+      assert.equal(current.activeTaskId, coverageTask.taskId);
+      const requirement = coverageTask.completionRequirements!.find(
+        (entry) => entry.kind === "research_coverage",
+      )!;
+      assert.equal(
+        requirement.targetBoundary?.scopeDigest,
+        job!.scopeLineageDigest,
+      );
+      const evidence = {
+        version: 3 as const,
+        evidenceId: `${job!.researchJobId}:coverage:complete`,
+        executionId: ledger.executionId,
+        taskId: coverageTask.taskId,
+        kind: "research_coverage" as const,
+        verified: true,
+        requirementId: requirement.requirementId,
+        criterionIds: requirement.criterionIds,
+        contractDigest: requirement.contractDigest,
+        payload: {
+          type: "research_coverage" as const,
+          researchJobId: job!.researchJobId,
+          coverageStatus: "complete" as const,
+          totalItems: 2,
+          screenedItems: 2,
+          candidateItems: 2,
+          deepReadCompleted: 2,
+          scopeLineageDigest: job!.scopeLineageDigest,
+        },
+        reference: job!.researchJobId,
+        summary: "Coverage complete",
+        createdAt: 8,
+      };
+      const decoded = decodeTaskEvidence(JSON.parse(JSON.stringify(evidence)));
+      assert.equal(
+        decoded.payload?.type === "research_coverage"
+          ? decoded.payload.scopeLineageDigest
+          : undefined,
+        job!.scopeLineageDigest,
+        "the decoder must keep the lineage that binds coverage to its task",
+      );
+      await coordinator.attachEvidence(evidence);
+      const answerRequirement = coverageTask.completionRequirements!.find(
+        (entry) => entry.kind === "bounded_reasoning",
+      );
+      if (answerRequirement) {
+        await coordinator.attachEvidence({
+          version: 3,
+          evidenceId: `${coverageTask.taskId}:answer`,
+          executionId: ledger.executionId,
+          taskId: coverageTask.taskId,
+          kind: "reasoning_assertion",
+          verified: true,
+          requirementId: answerRequirement.requirementId,
+          criterionIds: answerRequirement.criterionIds,
+          contractDigest: answerRequirement.contractDigest,
+          payload: { type: "bounded_reasoning", assertion: "Answered." },
+          createdAt: 9,
+        });
+      }
+      // Completion re-reads the stored evidence through the decoder.
+      const completed = await coordinator.requestTransition(
+        {
+          executionId: ledger.executionId,
+          taskId: coverageTask.taskId,
+          toStatus: "completed",
+          requestedBy: "host",
+        },
+        10,
+      );
+      assert.equal(
+        completed.tasks.find((task) => task.taskId === coverageTask.taskId)
+          ?.status,
+        "completed",
+      );
+    } finally {
+      harness.db.close();
+    }
+  });
+});

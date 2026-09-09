@@ -774,6 +774,12 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
           rawPayload.deepReadCompleted,
           "evidence.payload.deepReadCompleted",
         ),
+        // The scope lineage is what binds coverage to its requirement; a
+        // decoder that drops it makes every bound coverage task uncompletable.
+        ...(typeof rawPayload.scopeLineageDigest === "string" &&
+        rawPayload.scopeLineageDigest
+          ? { scopeLineageDigest: rawPayload.scopeLineageDigest }
+          : {}),
       };
     } else if (type === "material_integrity") {
       if (rawPayload.integrityValidated !== true)
