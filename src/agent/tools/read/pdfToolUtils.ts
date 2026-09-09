@@ -51,43 +51,23 @@ export const PAPER_TARGET_SELECTOR_SCHEMA = {
   },
 };
 
-export function paperTargetInputIssues(
-  args: Record<string, unknown>,
-): string[] {
-  const issues: string[] = [];
-  const entries = Array.isArray(args.targets)
-    ? args.targets.map((value, index) => ({ value, path: `targets[${index}]` }))
-    : args.target !== undefined
-      ? [{ value: args.target, path: "target" }]
-      : [];
-  for (const { value, path } of entries) {
-    if (!validateObject<Record<string, unknown>>(value)) {
-      issues.push(`${path} must be an object`);
-      continue;
-    }
-    for (const key of Object.keys(value))
-      if (!["itemId", "contextItemId"].includes(key))
-        issues.push(
-          `${path}.${key} is unsupported; use itemId and optional contextItemId only`,
-        );
-    if (!Number.isSafeInteger(value.itemId) || Number(value.itemId) < 1)
-      issues.push(`${path}.itemId must be a positive integer`);
-    if (
-      value.contextItemId !== undefined &&
-      (!Number.isSafeInteger(value.contextItemId) ||
-        Number(value.contextItemId) < 1)
-    )
-      issues.push(`${path}.contextItemId must be a positive integer`);
-  }
-  return issues;
-}
+/**
+ * The published selector schema is the single owner of "what is a valid
+ * paper target". Every validator below derives its field set from it.
+ */
+const PAPER_TARGET_SELECTOR_FIELDS: ReadonlySet<string> = new Set(
+  Object.keys(PAPER_TARGET_SELECTOR_SCHEMA.properties),
+);
+const VISUAL_TARGET_FIELDS: ReadonlySet<string> = new Set([
+  ...PAPER_TARGET_SELECTOR_FIELDS,
+  "attachmentId",
+  "name",
+]);
+const PAPER_SELECTOR_ADVICE = "use itemId and optional contextItemId only";
+const VISUAL_SELECTOR_ADVICE = `${PAPER_SELECTOR_ADVICE}; uploaded attachments use attachmentId or name`;
 
-export type ResolvedPaperTargetSelector = Readonly<
-  Pick<PdfTarget, "paperContext" | "itemId" | "contextItemId">
->;
-
-export type VisualResolvedPaperTargetSelector = Readonly<{
-  paperSelector?: ResolvedPaperTargetSelector;
+export type VisualPaperTargetSelector = Readonly<{
+  paperSelector?: PaperTargetSelector;
   attachmentId?: string;
   name?: string;
 }>;
@@ -104,11 +84,11 @@ export type ExplicitTargetSyntaxResult =
   | Readonly<{ kind: "omitted" }>
   | Readonly<{
       kind: "paper_selectors";
-      selectors: readonly ResolvedPaperTargetSelector[];
+      selectors: readonly PaperTargetSelector[];
     }>
   | Readonly<{
       kind: "visual_selector";
-      selector: VisualResolvedPaperTargetSelector;
+      selector: VisualPaperTargetSelector;
     }>
   | Readonly<{
       kind: "invalid";
@@ -174,17 +154,6 @@ export function normalizeTargets(
   return targets.length ? targets : undefined;
 }
 
-const PAPER_TARGET_FIELDS = new Set([
-  "paperContext",
-  "itemId",
-  "contextItemId",
-]);
-const VISUAL_TARGET_FIELDS = new Set([
-  ...PAPER_TARGET_FIELDS,
-  "attachmentId",
-  "name",
-]);
-
 function invalidTargetSyntax(
   code: Exclude<
     ExplicitTargetErrorCode,
@@ -195,29 +164,69 @@ function invalidTargetSyntax(
   return { kind: "invalid", code, message };
 }
 
-function hasUnsupportedFields(
-  value: Record<string, unknown>,
-  supported: ReadonlySet<string>,
-): boolean {
-  return Object.keys(value).some((key) => !supported.has(key));
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 1;
 }
 
-function toResolvedPaperTargetSelector(
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasVisualSelectorFields(value: Record<string, unknown>): boolean {
+  return "attachmentId" in value || "name" in value;
+}
+
+/**
+ * Check one non-empty selector object against the published contract and
+ * name every offending field by path so the model can correct the call.
+ */
+function selectorIssues(
   value: Record<string, unknown>,
-): ResolvedPaperTargetSelector | null {
-  const normalized = normalizeTarget(value);
+  path: string,
+  mode: "paper" | "visual",
+): string[] {
+  const supported =
+    mode === "visual" ? VISUAL_TARGET_FIELDS : PAPER_TARGET_SELECTOR_FIELDS;
+  const advice =
+    mode === "visual" ? VISUAL_SELECTOR_ADVICE : PAPER_SELECTOR_ADVICE;
+  const issues: string[] = [];
+  for (const key of Object.keys(value))
+    if (!supported.has(key))
+      issues.push(`${path}.${key} is unsupported; ${advice}`);
+  const identifiesUpload =
+    mode === "visual" &&
+    (isNonEmptyString(value.attachmentId) || isNonEmptyString(value.name));
   if (
-    !normalized ||
-    (!normalized.paperContext &&
-      !normalized.itemId &&
-      !normalized.contextItemId)
-  ) {
-    return null;
+    (value.itemId !== undefined || !identifiesUpload) &&
+    !isPositiveInteger(value.itemId)
+  )
+    issues.push(`${path}.itemId must be a positive integer`);
+  if (
+    value.contextItemId !== undefined &&
+    !isPositiveInteger(value.contextItemId)
+  )
+    issues.push(`${path}.contextItemId must be a positive integer`);
+  if (mode === "visual") {
+    if (
+      value.attachmentId !== undefined &&
+      !isNonEmptyString(value.attachmentId)
+    )
+      issues.push(`${path}.attachmentId must be a non-empty string`);
+    if (value.name !== undefined && !isNonEmptyString(value.name))
+      issues.push(`${path}.name must be a non-empty string`);
   }
+  return issues;
+}
+
+function toPaperTargetSelector(
+  value: Record<string, unknown>,
+): PaperTargetSelector | undefined {
+  if (!isPositiveInteger(value.itemId)) return undefined;
   return {
-    paperContext: normalized.paperContext,
-    itemId: normalized.itemId,
-    contextItemId: normalized.contextItemId,
+    itemId: value.itemId,
+    contextItemId: isPositiveInteger(value.contextItemId)
+      ? value.contextItemId
+      : undefined,
   };
 }
 
@@ -225,6 +234,7 @@ function toResolvedPaperTargetSelector(
  * Normalize model-generated paper_read selector syntax without resolving
  * Zotero identity. Exactly-empty target objects remain a compatibility alias
  * for an omitted target, while non-empty malformed selectors fail closed.
+ * The same field contract applies to every paper_read mode.
  */
 export function normalizeExplicitTargetSyntax(params: {
   targetProvided: boolean;
@@ -255,37 +265,29 @@ export function normalizeExplicitTargetSyntax(params: {
       );
     }
     if (!params.targets.length) return { kind: "omitted" };
-    const selectors: ResolvedPaperTargetSelector[] = [];
+    const selectors: PaperTargetSelector[] = [];
     for (const [index, entry] of params.targets.entries()) {
+      const path = `targets[${index}]`;
       if (!validateObject<Record<string, unknown>>(entry)) {
         return invalidTargetSyntax(
           "unsupported_target_selector",
-          `targets[${index}] must be an object.`,
+          `${path} must be an object.`,
         );
       }
       if (!Object.keys(entry).length) {
         return invalidTargetSyntax(
           "empty_target_entry",
-          `targets[${index}] must identify a paper.`,
+          `${path} must identify a paper.`,
         );
       }
-      if (hasUnsupportedFields(entry, PAPER_TARGET_FIELDS)) {
+      const issues = selectorIssues(entry, path, "paper");
+      if (issues.length) {
         return invalidTargetSyntax(
           "unsupported_target_selector",
-          `targets[${index}] has unsupported fields: ${Object.keys(entry)
-            .filter((field) => !PAPER_TARGET_FIELDS.has(field))
-            .join(
-              ", ",
-            )}. Use only paperContext, itemId, contextItemId; omit descriptive metadata.`,
+          issues.join("\n"),
         );
       }
-      const selector = toResolvedPaperTargetSelector(entry);
-      if (!selector) {
-        return invalidTargetSyntax(
-          "unsupported_target_selector",
-          `targets[${index}] must include paperContext, itemId, or contextItemId.`,
-        );
-      }
+      const selector = toPaperTargetSelector(entry)!;
       if (selectors.length < params.maxCount) selectors.push(selector);
     }
     return { kind: "paper_selectors", selectors };
@@ -299,51 +301,35 @@ export function normalizeExplicitTargetSyntax(params: {
     );
   }
   if (!Object.keys(params.target).length) return { kind: "omitted" };
-  if (hasUnsupportedFields(params.target, VISUAL_TARGET_FIELDS)) {
+  if (params.mode !== "visual" && hasVisualSelectorFields(params.target)) {
     return invalidTargetSyntax(
-      "unsupported_target_selector",
-      "target contains an unsupported selector.",
+      "selector_not_supported_for_mode",
+      "attachmentId and name selectors are supported only for visual or capture reads.",
     );
   }
-  const normalized = normalizeTarget(params.target);
-  if (!normalized) {
+  const issues = selectorIssues(params.target, "target", params.mode);
+  if (issues.length) {
     return invalidTargetSyntax(
       "unsupported_target_selector",
-      "target must include a supported paper or visual selector.",
+      issues.join("\n"),
     );
   }
-  const hasVisualSelector = Boolean(normalized.attachmentId || normalized.name);
-  if (hasVisualSelector) {
-    if (params.mode !== "visual") {
-      return invalidTargetSyntax(
-        "selector_not_supported_for_mode",
-        "attachmentId and name selectors are supported only for visual or capture reads.",
-      );
-    }
-    const paperSelector =
-      toResolvedPaperTargetSelector(params.target) || undefined;
+  const paperSelector = toPaperTargetSelector(params.target);
+  if (params.mode === "visual") {
     return {
       kind: "visual_selector",
       selector: {
         paperSelector,
-        attachmentId: normalized.attachmentId,
-        name: normalized.name,
+        attachmentId: isNonEmptyString(params.target.attachmentId)
+          ? params.target.attachmentId.trim()
+          : undefined,
+        name: isNonEmptyString(params.target.name)
+          ? params.target.name.trim()
+          : undefined,
       },
     };
   }
-  const selector = toResolvedPaperTargetSelector(params.target);
-  if (!selector) {
-    return invalidTargetSyntax(
-      "unsupported_target_selector",
-      "target must include paperContext, itemId, or contextItemId.",
-    );
-  }
-  return params.mode === "visual"
-    ? {
-        kind: "visual_selector",
-        selector: { paperSelector: selector },
-      }
-    : { kind: "paper_selectors", selectors: [selector] };
+  return { kind: "paper_selectors", selectors: [paperSelector!] };
 }
 
 function describeTarget(target: PdfTarget): string {

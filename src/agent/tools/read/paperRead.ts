@@ -28,7 +28,6 @@ import {
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
   PAPER_TARGET_SELECTOR_SCHEMA,
-  paperTargetInputIssues,
   buildCaptureFollowupMessage,
   semanticPdfMode,
   normalizeExplicitTargetSyntax,
@@ -1023,18 +1022,7 @@ export function createPaperReadTool(
         maxCount: maxTargets,
       });
       if (targetSyntax.kind === "invalid") {
-        const issues =
-          mode !== "visual" && mode !== "capture"
-            ? paperTargetInputIssues(args)
-            : [];
-        return fail(
-          `${targetSyntax.code}: ${issues.length ? issues.join("\n") : targetSyntax.message}`,
-        );
-      }
-      if (targetSyntax.kind === "paper_selectors") {
-        const issues = paperTargetInputIssues(args);
-        if (issues.length)
-          return fail(`unsupported_target_selector: ${issues.join("\n")}`);
+        return fail(`${targetSyntax.code}: ${targetSyntax.message}`);
       }
       const explicitTarget =
         targetSyntax.kind === "visual_selector"

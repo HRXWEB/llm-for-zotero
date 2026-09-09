@@ -686,7 +686,69 @@ describe("semantic tool surface", function () {
     if (parsed.ok) return;
     assert.include(parsed.error, "title");
     assert.include(parsed.error, "itemId and optional contextItemId only");
-    assert.notInclude(parsed.error, "Use only paperContext");
+  });
+
+  it("paper_read applies one target contract regardless of mode", function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const modes = [
+      "overview",
+      "targeted",
+      "full",
+      "figures",
+      "visual",
+      "capture",
+    ] as const;
+    for (const mode of modes) {
+      const parsed = tool.validate({
+        mode,
+        target: { paperContext: { itemId: 3603, contextItemId: 3604 } },
+        ...(mode === "visual" ? { pages: [1] } : {}),
+      });
+      assert.isFalse(parsed.ok, `${mode} should reject paperContext`);
+      if (parsed.ok) continue;
+      assert.include(parsed.error, "unsupported_target_selector", mode);
+      assert.include(parsed.error, "target.paperContext is unsupported", mode);
+      assert.include(
+        parsed.error,
+        "itemId and optional contextItemId only",
+        mode,
+      );
+    }
+  });
+
+  it("paper_read visual target validation names the offending field and requires itemId", function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const metadata = tool.validate({
+      mode: "visual",
+      target: { itemId: 3603, title: "A known paper" },
+      pages: [1],
+    });
+    assert.isFalse(metadata.ok);
+    if (!metadata.ok) {
+      assert.include(metadata.error, "target.title is unsupported");
+    }
+
+    const contextOnly = tool.validate({
+      mode: "capture",
+      target: { contextItemId: 3604 },
+    });
+    assert.isFalse(contextOnly.ok);
+    if (!contextOnly.ok) {
+      assert.include(
+        contextOnly.error,
+        "target.itemId must be a positive integer",
+      );
+    }
   });
 
   it("paper_read advertises non-empty target shapes without root composition", function () {
@@ -1632,7 +1694,7 @@ describe("semantic tool surface", function () {
     );
     const validated = tool.validate({
       mode: "visual",
-      target: { paperContext },
+      target: { itemId: 11, contextItemId: 22 },
       pages: [4],
       query: "Render page 4 from the raw PDF",
     });
@@ -2116,7 +2178,10 @@ describe("semantic tool surface", function () {
     );
     const validated = tool.validate({
       mode: "visual",
-      target: { paperContext },
+      target: {
+        itemId: paperContext.itemId,
+        contextItemId: paperContext.contextItemId,
+      },
       pages: [2],
       query: "Explain Figure 1",
     });
