@@ -238,6 +238,21 @@ export type WorkflowTestTargetedQuoteRefreshResult = {
   targetWasReplaced: boolean;
   targetNotSourceCardCount: number;
   targetStrongBodyCount: number;
+  /**
+   * Probe for the reader's view: a quote card expanded in a later message must
+   * survive a targeted re-render that also changes the height of an earlier
+   * message, and it must stay where the reader left it in the viewport.
+   */
+  scrollStability: {
+    chatBoxScrollable: boolean;
+    earlierWrapperHeightDelta: number;
+    expandedBeforeRerender: boolean;
+    expandedAfterRerender: boolean;
+    expandedBodyTextAfterRerender: string;
+    cardTopDelta: number;
+    scrollTopDelta: number;
+    diagnostics: Record<string, unknown>;
+  };
 };
 
 export type WorkflowTestStandaloneDiagnostics = {

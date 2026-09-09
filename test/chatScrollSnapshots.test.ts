@@ -22,6 +22,7 @@ import {
   persistChatScrollSnapshotForConversationKey,
   requestFollowBottomCatchup,
   restoreChatScrollSnapshotForConversationKey,
+  settleFollowBottomIntent,
 } from "../src/modules/contextPanel/chatScrollSnapshots";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -210,6 +211,78 @@ function appendElement(
 }
 
 describe("chat scroll snapshots", function () {
+  describe("settleFollowBottomIntent", function () {
+    function makeTwoTurnChat(scrollTop: number): FakeElement {
+      const chatBox = makeChatBox({
+        scrollTop,
+        scrollHeight: 1000,
+        clientHeight: 100,
+      });
+      appendElement(chatBox, "llm-message-wrapper", {
+        offsetTop: 0,
+        offsetHeight: 500,
+        dataset: {
+          messageRole: "user",
+          messageTimestamp: "1",
+          messageAnchorKey: "turn-1",
+        },
+      });
+      appendElement(chatBox, "llm-message-wrapper", {
+        offsetTop: 500,
+        offsetHeight: 500,
+        dataset: {
+          messageRole: "assistant",
+          messageTimestamp: "2",
+          messageAnchorKey: "turn-2",
+        },
+      });
+      return chatBox;
+    }
+
+    it("ends follow-bottom intent once a settled conversation is no longer at the bottom", function () {
+      clearChatScrollSnapshotsForTests();
+      const chatBox = makeTwoTurnChat(900);
+      setFollowBottomChatScrollSnapshot(3, chatBox);
+      // The reader pulled away (or opened something that grew the page).
+      chatBox.scrollTop = 400;
+
+      const settled = settleFollowBottomIntent(3, chatBox, {
+        streaming: false,
+      });
+
+      assert.equal(settled?.mode, "manual");
+      assert.equal(settled?.anchor?.kind, "message");
+      assert.equal(settled?.anchor?.messageAnchorKey, "turn-1");
+      assert.equal(getChatScrollSnapshot(3)?.mode, "manual");
+    });
+
+    it("keeps following while the answer is still streaming", function () {
+      clearChatScrollSnapshotsForTests();
+      const chatBox = makeTwoTurnChat(900);
+      setFollowBottomChatScrollSnapshot(3, chatBox);
+      chatBox.scrollTop = 400;
+
+      const settled = settleFollowBottomIntent(3, chatBox, {
+        streaming: true,
+      });
+
+      assert.equal(settled?.mode, "followBottom");
+      assert.equal(getChatScrollSnapshot(3)?.mode, "followBottom");
+    });
+
+    it("keeps following while the reader is still at the bottom", function () {
+      clearChatScrollSnapshotsForTests();
+      const chatBox = makeTwoTurnChat(900);
+      setFollowBottomChatScrollSnapshot(3, chatBox);
+
+      const settled = settleFollowBottomIntent(3, chatBox, {
+        streaming: false,
+      });
+
+      assert.equal(settled?.mode, "followBottom");
+    });
+  });
+
   it("locates the visible anchor without measuring every message of a long conversation", function () {
     clearChatScrollSnapshotsForTests();
     const chatBox = makeChatBox({

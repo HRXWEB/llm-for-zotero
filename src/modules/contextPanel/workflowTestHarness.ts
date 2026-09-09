@@ -1,3 +1,4 @@
+import { getChatScrollSnapshot } from "./chatScrollSnapshots";
 import {
   exerciseNativePlanReview,
   exerciseNativeQuestionReview,
@@ -2809,7 +2810,16 @@ async function exerciseTargetedQuoteRefresh(
   const targetWrapper = wrappersAfter.find(
     (wrapper) => wrapper.dataset.messageTimestamp === targetTimestamp,
   );
+  const scrollStability = await probeTargetedRerenderScrollStability({
+    panel,
+    item,
+    chatBox,
+    wrappers: wrappersAfter,
+    expandedMessage: assistantMessages[5],
+    earlierMessage: assistantMessages[2],
+  });
   return {
+    scrollStability,
     messageCount: messages.length,
     assistantMessageCount: assistantMessages.length,
     quoteCardCount: chatBox.querySelectorAll(".llm-quote-card").length,
@@ -2825,6 +2835,154 @@ async function exerciseTargetedQuoteRefresh(
     targetStrongBodyCount:
       targetWrapper?.querySelectorAll(".llm-quote-card-body strong").length ||
       0,
+  };
+}
+
+function wrapperForMessage(
+  wrappers: HTMLElement[],
+  message: Message,
+): HTMLElement {
+  const timestamp = `${Math.floor(Number(message.timestamp) || 0)}`;
+  const wrapper = wrappers.find(
+    (candidate) => candidate.dataset.messageTimestamp === timestamp,
+  );
+  if (!wrapper) {
+    throw new Error(`Workflow chat has no wrapper for message ${timestamp}`);
+  }
+  return wrapper;
+}
+
+async function probeTargetedRerenderScrollStability(params: {
+  panel: PanelRecord;
+  item: Zotero.Item;
+  chatBox: HTMLElement;
+  wrappers: HTMLElement[];
+  expandedMessage: Message;
+  earlierMessage: Message;
+}): Promise<WorkflowTestTargetedQuoteRefreshResult["scrollStability"]> {
+  const { chatBox } = params;
+  const win = params.panel.body.ownerDocument.defaultView;
+  if (!win) throw new Error("Workflow panel has no window");
+  const nextFrame = () =>
+    new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
+
+  const expandedWrapper = wrapperForMessage(
+    params.wrappers,
+    params.expandedMessage,
+  );
+  const earlierWrapper = wrapperForMessage(
+    params.wrappers,
+    params.earlierMessage,
+  );
+  const conversationKey = getConversationKey(params.item);
+  const timeline: Array<Record<string, unknown>> = [];
+  const record = (label: string) => {
+    const snapshot = getChatScrollSnapshot(conversationKey);
+    timeline.push({
+      label,
+      scrollTop: chatBox.scrollTop,
+      scrollHeight: chatBox.scrollHeight,
+      wrapperTop:
+        expandedWrapper.getBoundingClientRect().top -
+        chatBox.getBoundingClientRect().top,
+      snapshot: snapshot
+        ? `${snapshot.mode}@${snapshot.scrollTop}${snapshot.anchor ? `/${snapshot.anchor.kind}:${snapshot.anchor.quoteCitationId || snapshot.anchor.messageAnchorKey}` : ""}`
+        : null,
+    });
+  };
+  record("start");
+  // Put the reader on the later message with a little context above it.
+  chatBox.scrollTop +=
+    expandedWrapper.getBoundingClientRect().top -
+    chatBox.getBoundingClientRect().top -
+    24;
+  record("after-scroll-write");
+  await nextFrame();
+  record("after-frame-1");
+  await nextFrame();
+  record("after-frame-2");
+
+  const card = expandedWrapper.querySelector(
+    '.llm-quote-card[data-quote-status="verified"]',
+  ) as HTMLElement | null;
+  if (!card) throw new Error("Expanded message rendered no verified card");
+  card.click();
+  record("after-click");
+  await nextFrame();
+  record("after-click-frame");
+  const occurrenceId = card.dataset.quoteOccurrenceId || "";
+  const expandedBeforeRerender = card.dataset.expanded === "true";
+  const scrollTopBefore = chatBox.scrollTop;
+  const cardTopBefore = card.getBoundingClientRect().top;
+  const earlierHeightBefore = earlierWrapper.getBoundingClientRect().height;
+
+  // An earlier message changes height above the viewport while the expanded
+  // message is re-rendered with identical content under new citation identity.
+  params.earlierMessage.quoteDisplayOverride = {
+    markdown: Array.from(
+      { length: 8 },
+      (_value, quoteIndex) =>
+        `> **Rejected interpretation ${quoteIndex + 1}** remains visible for manual review.\n>\n> It stays in the transcript so the reader can see what the model claimed.\n>\n> It also stays long enough to move everything below it.\n>\n> Not a source quote`,
+    ).join("\n\n"),
+    quoteCitations: [],
+  };
+  params.expandedMessage.quoteCitations =
+    params.expandedMessage.quoteCitations?.map((citation) => ({
+      ...citation,
+    }));
+  refreshChat(params.panel.body, params.item, {
+    rerenderAssistantMessages: new Set([
+      params.earlierMessage,
+      params.expandedMessage,
+    ]),
+  });
+  await nextFrame();
+
+  record("after-rerender-frame");
+  const snapshotBefore = getChatScrollSnapshot(conversationKey);
+  const expandedWrapperAfter = wrapperForMessage(
+    Array.from(
+      chatBox.querySelectorAll(".llm-message-wrapper[data-message-timestamp]"),
+    ) as HTMLElement[],
+    params.expandedMessage,
+  );
+  const cardAfter = expandedWrapperAfter.querySelector(
+    `.llm-quote-card[data-quote-occurrence-id="${occurrenceId}"]`,
+  ) as HTMLElement | null;
+  const diagnostics: Record<string, unknown> = {
+    timeline,
+    snapshotBefore: snapshotBefore
+      ? {
+          mode: snapshotBefore.mode,
+          scrollTop: snapshotBefore.scrollTop,
+          anchor: snapshotBefore.anchor,
+        }
+      : null,
+    expandedWrapperReplaced: expandedWrapperAfter !== expandedWrapper,
+    expandedWrapperStillConnected: expandedWrapper.isConnected,
+    cardAfterIsSameNode: cardAfter === card,
+    cardTopBefore,
+    cardTopAfter: cardAfter?.getBoundingClientRect().top ?? null,
+    chatBoxTop: chatBox.getBoundingClientRect().top,
+    scrollTopBefore,
+    scrollTopAfter: chatBox.scrollTop,
+    scrollHeightAfter: chatBox.scrollHeight,
+    clientHeight: chatBox.clientHeight,
+  };
+  return {
+    diagnostics,
+    chatBoxScrollable: chatBox.scrollHeight > chatBox.clientHeight + 1,
+    earlierWrapperHeightDelta:
+      earlierWrapper.getBoundingClientRect().height - earlierHeightBefore,
+    expandedBeforeRerender,
+    expandedAfterRerender: cardAfter?.dataset.expanded === "true",
+    expandedBodyTextAfterRerender: (
+      cardAfter?.querySelector(".llm-quote-card-body")?.textContent || ""
+    ).trim(),
+    cardTopDelta: cardAfter
+      ? cardAfter.getBoundingClientRect().top - cardTopBefore
+      : Number.NaN,
+    scrollTopDelta: chatBox.scrollTop - scrollTopBefore,
   };
 }
 

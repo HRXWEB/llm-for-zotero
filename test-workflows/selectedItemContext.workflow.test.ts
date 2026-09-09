@@ -460,4 +460,41 @@ describe("workflow: selected item context send", function () {
     assert.equal(result.targetNotSourceCardCount, 8);
     assert.equal(result.targetStrongBodyCount, 8);
   });
+
+  it("keeps an expanded quote card open and in place across a targeted re-render", async function () {
+    fixture = await api.createPaperWithPdfFixture({
+      title: "Quote Card Scroll Stability Workflow Paper",
+      pdfTitle: "Quote Card Scroll Stability Workflow PDF",
+    });
+
+    const panel = await api.renderPanelForItem(fixture.parentItemId);
+    const { scrollStability: probe } = await api.exerciseTargetedQuoteRefresh(
+      panel.panelId,
+    );
+
+    // The probe only proves something when the chat really scrolls and the
+    // earlier message really changed height above the reader.
+    assert.isTrue(probe.chatBoxScrollable, "chat box must be scrollable");
+    assert.notEqual(
+      probe.earlierWrapperHeightDelta,
+      0,
+      "earlier message must change height",
+    );
+    assert.isTrue(probe.expandedBeforeRerender, "card must expand on click");
+    const detail = JSON.stringify(probe.diagnostics);
+
+    assert.isTrue(
+      probe.expandedAfterRerender,
+      `expanded card must stay expanded after the targeted re-render ${detail}`,
+    );
+    assert.include(
+      probe.expandedBodyTextAfterRerender,
+      "Source quotation 1 for response 6",
+    );
+    assert.isAtMost(
+      Math.abs(probe.cardTopDelta),
+      1,
+      `expanded card moved ${probe.cardTopDelta}px in the viewport (scrollTop moved ${probe.scrollTopDelta}px) ${detail}`,
+    );
+  });
 });

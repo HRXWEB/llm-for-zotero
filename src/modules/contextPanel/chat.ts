@@ -134,6 +134,7 @@ import {
 } from "./constants";
 import {
   applyChatScrollSnapshot,
+  buildAnchoredChatScrollSnapshot,
   buildChatScrollSnapshot,
   buildFollowBottomScrollSnapshot,
   cancelFollowBottomCatchup,
@@ -144,6 +145,7 @@ import {
   persistChatScrollSnapshotForConversationKey,
   requestFollowBottomCatchup,
   setFollowBottomChatScrollSnapshot,
+  settleFollowBottomIntent,
   withScrollGuard,
 } from "./chatScrollSnapshots";
 import {
@@ -1645,7 +1647,9 @@ function stickChatBoxToBottomIfFollowing(
   conversationKey: number,
   chatBox: HTMLDivElement,
 ): boolean {
-  const snapshot = getChatScrollSnapshot(conversationKey, chatBox);
+  const snapshot = settleFollowBottomIntent(conversationKey, chatBox, {
+    streaming: conversationHasStreamingMessage(conversationKey),
+  });
   if (
     snapshot
       ? snapshot.mode !== "followBottom"
@@ -12698,17 +12702,26 @@ export function refreshChat(
   if (item && !isPanelConversationCurrent(body, item)) return;
   const chatBox = body.querySelector("#llm-chat-box") as HTMLDivElement | null;
   if (!chatBox) return;
-  if (
-    item &&
-    options.rerenderAssistantMessages &&
-    updateMountedAssistantViews(
-      body,
-      item,
+  if (item && options.rerenderAssistantMessages) {
+    const rerenderConversationKey = getConversationKey(item);
+    let updatedInPlace = false;
+    // The reader's view is anchored across the in-place update: a message
+    // changing height above the viewport must not move what they are reading.
+    withScrollGuard(
       chatBox,
-      options.rerenderAssistantMessages,
-    )
-  )
-    return;
+      rerenderConversationKey,
+      () => {
+        updatedInPlace = updateMountedAssistantViews(
+          body,
+          item,
+          chatBox,
+          options.rerenderAssistantMessages!,
+        );
+      },
+      "anchor",
+    );
+    if (updatedInPlace) return;
+  }
   const doc = body.ownerDocument!;
   setPromptMenuTarget(null);
   const paperContextDisplayCache: PaperContextDisplayCache = new Map();
@@ -12749,16 +12762,32 @@ export function refreshChat(
     body,
   );
   const activeNavigationSnapshot = getActiveChatNavigationSnapshot(chatBox);
-  const cachedSnapshot = getChatScrollSnapshot(conversationKey);
+  // A targeted re-render keeps the current DOM, so the reader's live position
+  // is the truth: settle a stale follow-bottom intent and anchor the view that
+  // is actually on screen rather than the last persisted geometry.
+  const targetedRerenderRequested = Boolean(
+    options.rerenderAssistantMessages?.size,
+  );
+  const cachedSnapshot = targetedRerenderRequested
+    ? settleFollowBottomIntent(conversationKey, chatBox, {
+        streaming: conversationHasStreamingMessage(conversationKey),
+      })
+    : getChatScrollSnapshot(conversationKey);
+  const liveAnchoredSnapshot =
+    targetedRerenderRequested && cachedSnapshot?.mode === "manual"
+      ? buildAnchoredChatScrollSnapshot(chatBox)
+      : undefined;
   const baselineSnapshot = activeNavigationSnapshot
     ? activeNavigationSnapshot
     : hasActiveFollowBottomCatchupRequest(conversationKey)
       ? buildFollowBottomScrollSnapshot(chatBox)
       : pendingRestoreSnapshot
         ? pendingRestoreSnapshot
-        : cachedSnapshot
-          ? cachedSnapshot
-          : buildChatScrollSnapshot(chatBox);
+        : liveAnchoredSnapshot
+          ? liveAnchoredSnapshot
+          : cachedSnapshot
+            ? cachedSnapshot
+            : buildChatScrollSnapshot(chatBox);
   const rawHistory = chatHistory.get(conversationKey) || [];
   // Turns queued for deletion stay in memory and DB until the undo window
   // closes; they are only hidden from the render.

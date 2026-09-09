@@ -457,7 +457,7 @@ export function buildChatScrollSnapshot(
   };
 }
 
-function buildAnchoredChatScrollSnapshot(
+export function buildAnchoredChatScrollSnapshot(
   chatBox: HTMLDivElement,
 ): ChatScrollSnapshot {
   return {
@@ -466,6 +466,31 @@ function buildAnchoredChatScrollSnapshot(
     updatedAt: Date.now(),
     anchor: findBestVisibleChatAnchor(chatBox),
   };
+}
+
+/**
+ * Follow-bottom is how the panel tracks an answer while it streams. Once the
+ * answer has settled, the reader owns the viewport: if it is no longer at the
+ * bottom — they scrolled, or opened something that grew the page — the intent
+ * ends and the current view is anchored instead, so later content changes
+ * (quote validation, diagrams finishing) keep their place rather than yanking
+ * the reader to the bottom.
+ */
+export function settleFollowBottomIntent(
+  conversationKey: number,
+  chatBox: HTMLDivElement,
+  options: { streaming: boolean },
+): ChatScrollSnapshot | undefined {
+  const normalized = normalizeConversationKey(conversationKey);
+  if (!normalized) return undefined;
+  const snapshot = getChatScrollSnapshot(normalized, chatBox);
+  if (!snapshot || snapshot.mode !== "followBottom") return snapshot;
+  if (options.streaming || isNearBottom(chatBox)) return snapshot;
+  followBottomCatchupRequests.delete(normalized);
+  const settled = buildAnchoredChatScrollSnapshot(chatBox);
+  panelScrollSnapshots.set(chatBox, { key: normalized, snapshot: settled });
+  chatScrollSnapshots.set(normalized, settled);
+  return settled;
 }
 
 export function buildFollowBottomScrollSnapshot(
