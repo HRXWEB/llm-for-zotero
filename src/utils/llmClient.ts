@@ -3268,7 +3268,16 @@ type TemperaturePolicy =
 
 const temperaturePolicyCache = new Map<string, TemperaturePolicy>();
 
-type OutputCapRecovery = { mode: "omit" } | { mode: "fixed"; value: number };
+type OutputCapRecovery = (
+  | { mode: "omit" }
+  | { mode: "fixed"; value: number }
+) & {
+  /**
+   * "endpoint": the provider's limit for this model; remembered for later
+   * requests. "request": derived from this prompt's size; never cached.
+   */
+  scope: "endpoint" | "request";
+};
 
 const OUTPUT_CAP_KEYS = [
   "max_tokens",
@@ -3336,7 +3345,7 @@ export function getOutputCapRecovery(params: {
     const window = Number(sum[3].replace(/,/g, ""));
     const room = window - input - CONTEXT_LIMIT_RECOVERY_MARGIN;
     return Number.isSafeInteger(room) && room >= MIN_PLAUSIBLE_OUTPUT_CAP
-      ? { mode: "fixed", value: room }
+      ? { mode: "fixed", value: room, scope: "request" }
       : null;
   }
 
@@ -3357,14 +3366,18 @@ export function getOutputCapRecovery(params: {
     }
   }
   if (candidates.length) {
-    return { mode: "fixed", value: Math.max(...candidates) };
+    return { mode: "fixed", value: Math.max(...candidates), scope: "endpoint" };
   }
   if (isAnthropicMessagesUrl(params.url)) {
     return params.requested > AUTO_REQUIRED_OUTPUT_TOKEN_SEED
-      ? { mode: "fixed", value: AUTO_REQUIRED_OUTPUT_TOKEN_SEED }
+      ? {
+          mode: "fixed",
+          value: AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+          scope: "endpoint",
+        }
       : null;
   }
-  return { mode: "omit" };
+  return { mode: "omit", scope: "endpoint" };
 }
 
 function getTemperaturePolicyKey(
@@ -3629,7 +3642,9 @@ async function postWithTemperatureFallback(params: {
     });
     res = await send(fallbackPayload, authState);
     if (res.ok) {
-      outputCapRecoveryCache.set(policyKey, capRecovery);
+      if (capRecovery.scope === "endpoint") {
+        outputCapRecoveryCache.set(policyKey, capRecovery);
+      }
       return res;
     }
     const secondErr = await res.text();

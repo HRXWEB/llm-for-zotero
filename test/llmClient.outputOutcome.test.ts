@@ -138,7 +138,7 @@ describe("output cap rejection recovery", function () {
           url: openaiUrl,
           requested: 384_000,
         }),
-        { mode: "fixed", value: 8_192 },
+        { mode: "fixed", value: 8_192, scope: "endpoint" },
         message,
       );
     }
@@ -153,7 +153,7 @@ describe("output cap rejection recovery", function () {
         url: openaiUrl,
         requested: 384_000,
       }),
-      { mode: "omit" },
+      { mode: "omit", scope: "endpoint" },
     );
   });
 
@@ -166,7 +166,7 @@ describe("output cap rejection recovery", function () {
         url: anthropicUrl,
         requested: 128_000,
       }),
-      { mode: "fixed", value: 8_192 },
+      { mode: "fixed", value: 8_192, scope: "endpoint" },
     );
   });
 
@@ -179,7 +179,8 @@ describe("output cap rejection recovery", function () {
         url: anthropicUrl,
         requested: 64_000,
       }),
-      { mode: "fixed", value: 200_000 - 150_000 - 1_024 },
+      // Derived from this prompt's size, so it must not be cached.
+      { mode: "fixed", value: 200_000 - 150_000 - 1_024, scope: "request" },
     );
   });
 
