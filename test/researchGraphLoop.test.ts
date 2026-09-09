@@ -650,12 +650,12 @@ describe("document support audit in the plan finalizer", function () {
     const documentTask = await harness.activeTask();
     assert.equal(documentTask.expectedEffect, "artifact");
     const finalizer = new PlanDocumentFinalizer(harness.gateway as never);
-    const submit = (markdown: string) =>
+    const submit = (markdown: string, title = spec.title) =>
       finalizer.finalize({
         executionId: ledger.executionId,
         activeTaskId: documentTask.taskId,
         input: {
-          title: spec.title,
+          title,
           markdown,
           citations,
           quotes: [],
@@ -685,7 +685,7 @@ describe("document support audit in the plan finalizer", function () {
     assert.match(unsupported, /1:PAPER001, 1:PAPER003/);
     const finalized = await submit(
       [
-        "# Latent State Review",
+        "# Latent State Review (draft)",
         "",
         "## Introduction",
         "",
@@ -695,8 +695,20 @@ describe("document support audit in the plan finalizer", function () {
         "",
         "Paper two extends paper one to humans [[cite:C1]] [[cite:C2]], and paper three contradicts two on the sign of the bias [[cite:C2]] [[cite:C3]].",
       ].join("\n"),
+      "Latent State Review (draft)",
     );
     const markdown = finalized.document.visibleMarkdown;
+    assert.equal(
+      finalized.document.title,
+      spec.title,
+      "the approved title owns the document",
+    );
+    assert.match(
+      markdown,
+      /^# Latent State Review\n/,
+      "the leading heading follows the approved title",
+    );
+    assert.notMatch(markdown, /\(draft\)/);
     assert.match(markdown, /## Scope and limitations/);
     assert.match(
       markdown,

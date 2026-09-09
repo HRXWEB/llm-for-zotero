@@ -83,15 +83,23 @@ export async function finalizeDocument(params: {
   const researchGrounded = context.integrityPolicy === "research_grounded";
   // Plans retain their approved evidence requirements, including authored plans.
   const requireEvidence = planned || researchGrounded;
-  const title = input.title.trim();
-  if (!title) throw new Error("Document title is required");
-  if (title !== spec.title)
-    throw new Error(
-      `Document title does not match the approved document spec. Expected exactly: ${JSON.stringify(spec.title)}`,
-    );
+  const submittedTitle = input.title.trim();
+  if (!submittedTitle) throw new Error("Document title is required");
+  // The approved spec owns the title. A differing submission is a format
+  // problem the host repairs (title and leading H1), not a reason to discard a
+  // finished document.
+  const title = spec.title;
+  const titledMarkdown =
+    submittedTitle === title
+      ? input.markdown
+      : input.markdown.replace(
+          /^([ \t]*#[ \t]+)(.+?)[ \t]*$/m,
+          (line, hashes: string, heading: string) =>
+            heading.trim() === submittedTitle ? `${hashes}${title}` : line,
+        );
   if (!spec.allowFigures && input.assets.length)
     throw new Error("The approved document spec does not allow figures");
-  if (utf8Bytes(input.markdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES)
+  if (utf8Bytes(titledMarkdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES)
     throw new Error("Document Markdown exceeds the 2 MiB limit");
   // A valid citation is not a supported claim: every synthesis paragraph that
   // cites two or more papers must rest on recorded relationships. The repair
@@ -99,7 +107,7 @@ export async function finalizeDocument(params: {
   // active) or to rewrite the sentence as separate claims.
   const supportAudit = context.researchGraph
     ? auditCrossPaperSupport({
-        markdown: input.markdown,
+        markdown: titledMarkdown,
         clusters: input.citations,
         edges: context.researchGraph.edges,
       })
@@ -119,13 +127,13 @@ export async function finalizeDocument(params: {
   const calibratedMarkdown =
     context.researchGraph && spec.requiresCoverageSection
       ? ensureCoverageSection({
-          markdown: input.markdown,
+          markdown: titledMarkdown,
           summary: buildVerificationSummary({
             coverageItems: context.coverageItems,
             report: context.researchGraph?.qualityReport,
           }),
         })
-      : input.markdown;
+      : titledMarkdown;
   assertDocumentDraftValid({
     markdown: calibratedMarkdown,
     requiredSections: spec.requiredSections,
