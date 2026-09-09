@@ -1,8 +1,102 @@
 import { assert } from "chai";
 import { OpenAICompatibleAgentAdapter } from "../src/agent/model/openaiCompatible";
 import type { AgentRuntimeRequest, ToolSpec } from "../src/agent/types";
+import { createBuiltInToolRegistry } from "../src/agent/tools";
 import { isMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
 import { PAPER_CITATION_CONTRACT } from "../src/shared/instructionContracts";
+
+const MOONSHOT_ANY_OF_SIBLING_CONSTRAINTS = [
+  "type",
+  "properties",
+  "required",
+  "additionalProperties",
+  "items",
+  "enum",
+  "maximum",
+  "minimum",
+  "maxLength",
+  "minLength",
+  "maxItems",
+  "minItems",
+  "default",
+];
+
+// MoonshotAI/walle model.go: InvalidPropertyNames (server/ultra validation).
+const MOONSHOT_RESERVED_PROPERTY_NAMES = new Set([
+  "$defs",
+  "$ref",
+  "anyOf",
+  "required",
+  "additionalProperties",
+]);
+
+function assertMoonshotSchema(
+  schema: unknown,
+  path: string,
+  allowEmpty = false,
+): void {
+  assert.isObject(schema, `${path} must be an object schema`);
+  assert.isNotArray(schema, `${path} must not be an array`);
+  const row = schema as Record<string, unknown>;
+  if (!Object.keys(row).length && allowEmpty) return;
+  for (const key of ["allOf", "not"]) {
+    assert.notProperty(row, key, `${path} uses unsupported keyword ${key}`);
+  }
+
+  if (row.anyOf !== undefined) {
+    assert.isArray(row.anyOf, `${path}.anyOf must be an array`);
+    assert.isNotEmpty(row.anyOf, `${path}.anyOf must not be empty`);
+    for (const key of MOONSHOT_ANY_OF_SIBLING_CONSTRAINTS) {
+      assert.notProperty(
+        row,
+        key,
+        `${path}.${key} must be distributed into the anyOf branches`,
+      );
+    }
+    for (const [index, variant] of row.anyOf.entries()) {
+      assertMoonshotSchema(variant, `${path}.anyOf[${index}]`);
+    }
+  } else if (row.$ref === undefined) {
+    assert.property(row, "type", `${path} must declare a type`);
+  }
+
+  if (row.properties !== undefined) {
+    assert.equal(row.type, "object", `${path}.properties requires object type`);
+    assert.isObject(row.properties, `${path}.properties must be an object`);
+    const properties = row.properties as Record<string, unknown>;
+    for (const [key, value] of Object.entries(properties)) {
+      assert.isFalse(
+        MOONSHOT_RESERVED_PROPERTY_NAMES.has(key),
+        `${path}.properties.${key} is a reserved Moonshot property name`,
+      );
+      assertMoonshotSchema(value, `${path}.properties.${key}`);
+    }
+    if (row.required !== undefined) {
+      assert.isArray(row.required, `${path}.required must be an array`);
+      for (const requiredKey of row.required) {
+        assert.isTrue(
+          typeof requiredKey === "string" && requiredKey in properties,
+          `${path}.required contains undeclared property ${String(requiredKey)}`,
+        );
+      }
+    }
+  }
+
+  if (row.items !== undefined) {
+    assert.equal(row.type, "array", `${path}.items requires array type`);
+    assertMoonshotSchema(row.items, `${path}.items`);
+  }
+  if (
+    row.additionalProperties &&
+    typeof row.additionalProperties === "object"
+  ) {
+    assertMoonshotSchema(
+      row.additionalProperties,
+      `${path}.additionalProperties`,
+      true,
+    );
+  }
+}
 
 function makeSseStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -149,6 +243,118 @@ describe("OpenAICompatibleAgentAdapter", function () {
         }),
       ),
     );
+  });
+
+  it("normalizes the built-in Kimi tool registry into complete schemas", async function () {
+    let capturedBody: Record<string, unknown> = {};
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "application/json" },
+            json: async () => ({ choices: [{ message: { content: "OK" } }] }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const registeredTools = registry.listTools();
+    const originalPaperSchema = registeredTools.find(
+      (tool) => tool.name === "paper_read",
+    )!.inputSchema as Record<string, unknown>;
+
+    await adapter.runStep({
+      request: makeRequest({
+        model: "kimi-for-coding",
+        apiBase: "https://api.kimi.com/coding/v1",
+        providerProtocol: "openai_chat_compat",
+      }),
+      messages: [{ role: "user", content: "Read the selected paper" }],
+      tools: registeredTools,
+    });
+
+    const serializedTools = capturedBody.tools as Array<{
+      function: {
+        name: string;
+        parameters: {
+          properties: {
+            target: Record<string, unknown>;
+            pages: { anyOf: Array<Record<string, unknown>> };
+          };
+        };
+      };
+    }>;
+    for (const tool of serializedTools) {
+      assertMoonshotSchema(
+        tool.function.parameters,
+        `tools.${tool.function.name}.parameters`,
+      );
+    }
+
+    for (const name of ["library_search", "saved_search_update"]) {
+      const schema = serializedTools.find(
+        (tool) => tool.function.name === name,
+      )!.function.parameters as unknown as {
+        properties: {
+          conditions: { items: { properties: Record<string, unknown> } };
+        };
+      };
+      assert.deepInclude(
+        schema.properties.conditions.items.properties.isRequired,
+        {
+          type: "boolean",
+        },
+      );
+    }
+
+    const paperParameters = serializedTools.find(
+      (tool) => tool.function.name === "paper_read",
+    )!.function.parameters;
+    const target = paperParameters.properties.target;
+    const targetVariants = target.anyOf as Array<Record<string, unknown>>;
+    assert.notProperty(target, "type");
+    for (const variant of targetVariants) {
+      assert.equal(variant.type, "object");
+      assert.hasAllKeys(variant.properties as Record<string, unknown>, [
+        "contextItemId",
+        "itemId",
+        "paperContext",
+        "attachmentId",
+        "name",
+      ]);
+      assert.equal(variant.additionalProperties, false);
+    }
+    assert.deepEqual(
+      paperParameters.properties.pages.anyOf.map((variant) => variant.type),
+      ["string", "number", "array"],
+    );
+    assert.equal(
+      (
+        (originalPaperSchema.properties as Record<string, unknown>)
+          .target as Record<string, unknown>
+      ).type,
+      "object",
+    );
+    assert.property(originalPaperSchema, "allOf");
   });
 
   it("redacts malformed streamed tool argument JSON", async function () {

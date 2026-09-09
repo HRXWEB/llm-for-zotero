@@ -14,6 +14,10 @@ import type {
   ZoteroGateway,
 } from "../../services/zoteroGateway";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
+import {
+  SEARCH_CONDITION_SCHEMA,
+  parseSearchCondition,
+} from "../searchConditions";
 
 type QueryLibraryInput = {
   entity: QueryLibraryEntity;
@@ -57,37 +61,13 @@ function normalizeInclude(value: unknown): QueryLibraryInclude[] | undefined {
   return includes.length ? Array.from(new Set(includes)) : undefined;
 }
 
-/**
- * Reads `conditions[]` without validating the vocabulary.
- *
- * Whether a condition and operator actually pair up is Zotero's question, not
- * ours -- `Zotero.SearchConditions` is the authority and answers it at
- * execution time with the list of valid operators. Duplicating that table
- * here is how the nine hand-written filters came to exist in the first place.
- */
 function normalizeConditions(
   value: unknown,
 ): AgentSearchCondition[] | undefined {
-  if (!Array.isArray(value) || !value.length) return undefined;
-  const conditions: AgentSearchCondition[] = [];
-  for (const entry of value) {
-    if (!validateObject<Record<string, unknown>>(entry)) continue;
-    const condition =
-      typeof entry.condition === "string" ? entry.condition.trim() : "";
-    const operator =
-      typeof entry.operator === "string" ? entry.operator.trim() : "";
-    if (!condition) continue;
-    conditions.push({
-      condition,
-      operator,
-      value:
-        typeof entry.value === "string" || typeof entry.value === "number"
-          ? entry.value
-          : undefined,
-      mode: typeof entry.mode === "string" ? entry.mode.trim() : undefined,
-      required: entry.required === true ? true : undefined,
-    });
-  }
+  if (!Array.isArray(value)) return undefined;
+  const conditions = value
+    .map(parseSearchCondition)
+    .filter((entry): entry is AgentSearchCondition => Boolean(entry));
   return conditions.length ? conditions : undefined;
 }
 
@@ -368,37 +348,7 @@ export function createQueryLibraryTool(
             type: "array",
             description:
               "Advanced search clauses, forwarded to Zotero's own search engine. Use this for anything the nine simple filters cannot express — fulltextContent, abstractNote, DOI, publisher, dateAdded, dateModified, note, annotationText, citationKey, retracted, publications, and every other Zotero search condition. Only valid with entity:'items'.",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["condition", "operator"],
-              properties: {
-                condition: {
-                  type: "string",
-                  description:
-                    "A Zotero search condition, e.g. 'title', 'abstractNote', 'fulltextContent', 'dateAdded', 'DOI', 'itemType', 'tag', 'collection', 'note', 'annotationText', 'citationKey', 'retracted'.",
-                },
-                operator: {
-                  type: "string",
-                  description:
-                    "An operator the condition accepts, e.g. is, isNot, contains, doesNotContain, beginsWith, isBefore, isAfter, isInTheLast, isLessThan, isGreaterThan, true, false. An invalid pairing is rejected with the list of valid operators for that condition.",
-                },
-                value: {
-                  description: "The value to compare against.",
-                  anyOf: [{ type: "string" }, { type: "number" }],
-                },
-                mode: {
-                  type: "string",
-                  description:
-                    "Sub-mode for conditions that take one, notably fulltextContent with 'phrase' or 'regexp'.",
-                },
-                required: {
-                  type: "boolean",
-                  description:
-                    "Force this clause to be required even under joinMode:'any'.",
-                },
-              },
-            },
+            items: SEARCH_CONDITION_SCHEMA,
           },
           joinMode: {
             type: "string",

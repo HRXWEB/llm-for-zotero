@@ -2,6 +2,8 @@ import { assert } from "chai";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import { replayLibraryInverse } from "../test/helpers/replayLibraryInverse";
+import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createSavedSearchTool } from "../src/agent/tools/write/savedSearches";
 
 declare const Zotero: any;
 
@@ -314,6 +316,74 @@ describe("library operations against real Zotero", function () {
   // ── Stage 1: the search vocabulary ────────────────────────────────────────
 
   describe("advanced search conditions", function () {
+    it("preserves isRequired through both search tools and native persistence", async function () {
+      const included = await makeItem(
+        "journalArticle",
+        "RequiredClause SharedClause",
+      );
+      const excluded = await makeItem("journalArticle", "SharedClause");
+      const g = gateway();
+      const conditions = [
+        {
+          condition: "title",
+          operator: "contains",
+          value: "RequiredClause",
+          isRequired: true,
+        },
+        {
+          condition: "title",
+          operator: "contains",
+          value: `SharedClause-${SUFFIX}`,
+        },
+      ];
+      const query = createQueryLibraryTool(g).validate({
+        entity: "items",
+        mode: "search",
+        conditions,
+        joinMode: "any",
+      });
+      assert.isTrue(query.ok);
+      if (!query.ok) return;
+      const result = await g.searchItemsByConditions({
+        libraryID: libraryID(),
+        conditions: query.value.conditions!,
+        joinMode: query.value.joinMode,
+      });
+      assert.include(
+        result.items.map((item) => item.itemId),
+        included.id,
+      );
+      assert.notInclude(
+        result.items.map((item) => item.itemId),
+        excluded.id,
+      );
+
+      const parsed = createSavedSearchTool(g).validate({
+        action: "save",
+        name: `RequiredClause-${SUFFIX}`,
+        conditions,
+        joinMode: "any",
+      });
+      assert.isTrue(parsed.ok);
+      if (!parsed.ok || parsed.value.operation.type !== "save_saved_search")
+        return;
+      const saved = await g.saveSavedSearch({
+        ...parsed.value.operation,
+        libraryID: libraryID(),
+      });
+      created.searches.push(saved.savedSearchId);
+      const required = await Zotero.DB.valueQueryAsync(
+        "SELECT required FROM savedSearchConditions WHERE savedSearchID=? AND condition=? AND value=?",
+        [saved.savedSearchId, "title", "RequiredClause"],
+      );
+      assert.equal(Number(required), 1, "the mandatory clause must persist");
+      const savedIds = (
+        await Zotero.Searches.get(saved.savedSearchId).search()
+      ).map(Number);
+      assert.include(savedIds, included.id);
+      assert.notInclude(savedIds, excluded.id);
+    });
+
     it("returns the same ids as a raw Zotero.Search", async function () {
       const item = await makeItem("journalArticle", "ConditionProbe");
 
