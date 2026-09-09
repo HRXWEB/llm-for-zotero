@@ -136,6 +136,33 @@ describe("semantic action interpretation", function () {
       );
     });
   }
+  it("keeps a document request whose required write has no library action, as no write", function () {
+    const parsed = parseClassifiedTurnIntent(
+      JSON.stringify(
+        semanticResponseFixture({
+          deliverableIntent: "document",
+          documentKind: "literature_review",
+          writeDisposition: "required",
+          actionIntents: [],
+        }),
+      ),
+    );
+    assert.equal(parsed?.writeDisposition, "none");
+    assert.deepEqual(parsed?.actionIntents, []);
+    assert.isNull(
+      parseClassifiedTurnIntent(
+        JSON.stringify(
+          semanticResponseFixture({
+            deliverableIntent: "chat",
+            writeDisposition: "required",
+            actionIntents: [],
+          }),
+        ),
+      ),
+      "a chat answer that claims a required write still needs an action",
+    );
+  });
+
   it("rejects a no-write interpretation containing a mutation", function () {
     assert.isNull(
       parseClassifiedTurnIntent(

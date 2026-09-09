@@ -119,10 +119,17 @@ export function parseClassifiedTurnIntent(
   )
     return null;
 
-  const writeDisposition = record.writeDisposition as NonNullable<
+  let writeDisposition = record.writeDisposition as NonNullable<
     ClassifiedTurnIntent["writeDisposition"]
   >;
-  if (writeDisposition === "required" && !actionIntents.length) return null;
+  if (writeDisposition === "required" && !actionIntents.length) {
+    // "Write a literature review" is a document deliverable produced by
+    // submit_document, not a library write. A required disposition with no
+    // library action can only mean the model conflated the two; keep the
+    // interpretation and record that nothing writes to the library.
+    if (deliverableIntent !== "document") return null;
+    writeDisposition = "none";
+  }
   return {
     retrievalIntent: retrievalIntent as ClassifiedTurnIntent["retrievalIntent"],
     ...(paperTargetIntent ? { paperTargetIntent } : {}),
