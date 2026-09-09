@@ -860,6 +860,8 @@ export type AgentToolResult = {
   effect?: AgentToolEffect;
   /** Set when the host granted this effect on the agent's own judgment (yolo). */
   authority?: "yolo_judgment";
+  /** The host rejected the model's input before execution; nothing ran. */
+  inputRejected?: true;
   actionReceipts: AgentActionReceipt[];
   content: unknown;
   artifacts?: AgentToolArtifact[];

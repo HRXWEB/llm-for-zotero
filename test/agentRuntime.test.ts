@@ -2097,8 +2097,10 @@ describe("AgentRuntime", function () {
     }
   });
 
-  for (const failingRounds of [1, 3]) {
-    it(`counts repeated tool failures across ${failingRounds} model rounds, not sibling calls`, async function () {
+  // Invalid input is rejected before execution, so it runs on the six-round
+  // input-rejection cap; three sibling calls in one round still count once.
+  for (const failingRounds of [1, 6]) {
+    it(`counts repeated input rejections across ${failingRounds} model rounds, not sibling calls`, async function () {
       const restoreDb = installMockDb();
       try {
         const registry = new AgentToolRegistry();
@@ -2206,7 +2208,7 @@ describe("AgentRuntime", function () {
           outcome.text,
           failingRounds === 1
             ? "Evidence read successfully."
-            : "Agent stopped after repeated tool errors. Please adjust the request and try again.",
+            : "Agent stopped after repeated invalid tool inputs. Please adjust the request and try again.",
         );
       } finally {
         restoreDb();
@@ -7110,6 +7112,179 @@ describe("AgentRuntime", function () {
             event.payload?.reason === "research_batch_durable",
         ),
       );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("does not abort after repeated input rejections", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      let executed = 0;
+      registry.register({
+        spec: {
+          name: "research_update",
+          description: "persist paper understanding",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) =>
+          (args as { ok?: boolean }).ok
+            ? { ok: true, value: args }
+            : { ok: false, error: "papers[0].finding is required" },
+        execute: async () => {
+          executed += 1;
+          return { content: { progress: { totalItems: 1 } } };
+        },
+      });
+
+      let stepIndex = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            stepIndex += 1;
+            if (stepIndex <= 4) {
+              const call = {
+                id: `c${stepIndex}`,
+                name: "research_update",
+                arguments: { ok: false },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            if (stepIndex === 5) {
+              const call = {
+                id: "c5",
+                name: "research_update",
+                arguments: { ok: true },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "done",
+              assistantMessage: { role: "assistant", content: "done" },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1219,
+          mode: "agent",
+          userText: "record",
+          model: "deepseek-v4-pro",
+          apiBase: "https://api.deepseek.com/anthropic",
+          apiKey: "test",
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      assert.equal(outcome.text, "done");
+      assert.equal(
+        executed,
+        1,
+        "the valid call still executes after four rejections",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("still aborts after three rounds of tool execution failures", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "research_update",
+          description: "persist paper understanding",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => {
+          throw new Error("the research store is unavailable");
+        },
+      });
+
+      let stepIndex = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            stepIndex += 1;
+            const call = {
+              id: `c${stepIndex}`,
+              name: "research_update",
+              arguments: { operation: "record_papers" },
+            };
+            return {
+              kind: "tool_calls",
+              calls: [call],
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: [call],
+              },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1220,
+          mode: "agent",
+          userText: "record",
+          model: "deepseek-v4-pro",
+          apiBase: "https://api.deepseek.com/anthropic",
+          apiKey: "test",
+        },
+      });
+
+      assert.equal(stepIndex, 3);
+      assert.match(String(outcome.text), /repeated tool errors/);
     } finally {
       restoreDb();
     }

@@ -1662,6 +1662,9 @@ export class AgentRuntime {
       }
 
       let consecutiveToolErrorRounds = 0;
+      // Rejected input never ran, so it is a repair opportunity, not a failing
+      // tool. It gets its own, more forgiving cap.
+      let consecutiveInputRejectionRounds = 0;
       const intent = requestIntent;
       const { maxRounds, maxToolCallsPerRound } = resolveAgentLimits(
         intent.isBulkOperation,
@@ -3280,11 +3283,14 @@ export class AgentRuntime {
           };
           let roundHadSuccessfulToolResult = false;
           let roundHadToolFailure = false;
+          let roundHadInputRejection = false;
           for (const call of calls) {
             const outcome = await executeToolWorkflow(call, round, {
               modelCallId: call.id,
             });
             if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;
+            else if (outcome.toolResult.inputRejected)
+              roundHadInputRejection = true;
             else if (
               readToolError(outcome.toolResult)?.toLowerCase() !==
               "user denied action"
@@ -3335,13 +3341,24 @@ export class AgentRuntime {
           appendRoundContinuation();
           // Sibling calls are one attempt: deliver every result before judging
           // repeated failure, so the next model round can repair their inputs.
-          if (roundHadSuccessfulToolResult) consecutiveToolErrorRounds = 0;
-          else if (roundHadToolFailure) consecutiveToolErrorRounds += 1;
-          if (consecutiveToolErrorRounds >= 3) {
+          if (roundHadSuccessfulToolResult) {
+            consecutiveToolErrorRounds = 0;
+            consecutiveInputRejectionRounds = 0;
+          } else {
+            if (roundHadToolFailure) consecutiveToolErrorRounds += 1;
+            if (roundHadInputRejection && !roundHadToolFailure)
+              consecutiveInputRejectionRounds += 1;
+          }
+          if (
+            consecutiveToolErrorRounds >= 3 ||
+            consecutiveInputRejectionRounds >= 6
+          ) {
             await persistTranscriptCheckpoint();
             const finalText =
               currentAnswerText ||
-              "Agent stopped after repeated tool errors. Please adjust the request and try again.";
+              (consecutiveInputRejectionRounds >= 6
+                ? "Agent stopped after repeated invalid tool inputs. Please adjust the request and try again."
+                : "Agent stopped after repeated tool errors. Please adjust the request and try again.");
             return completeRun(finalText, "failed");
           }
           if (continuationCheckpoint) {

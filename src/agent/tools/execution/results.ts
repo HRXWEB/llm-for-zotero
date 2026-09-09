@@ -45,6 +45,7 @@ export function invocationExpands(
 export function createSyntheticErrorResult(
   call: AgentToolCall,
   message: string,
+  options: { inputRejected?: boolean } = {},
 ): PreparedToolExecution {
   const syntheticTool: AgentToolDefinition<any, any> = {
     spec: {
@@ -66,6 +67,7 @@ export function createSyntheticErrorResult(
         callId: call.id,
         name: call.name,
         ok: false,
+        ...(options.inputRejected ? { inputRejected: true as const } : {}),
         actionReceipts: [createUnverifiedReceipt({ reason: message })],
         content: { error: message },
       },

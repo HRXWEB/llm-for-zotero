@@ -213,6 +213,7 @@ export class AgentToolRegistry {
       return createSyntheticErrorResult(
         call,
         `Invalid tool input for ${call.name}: ${call.name} received malformed tool arguments from the model. Retry with valid JSON.`,
+        { inputRejected: true },
       );
     }
     const validation = tool.validate(call.arguments);
@@ -229,6 +230,7 @@ export class AgentToolRegistry {
       return createSyntheticErrorResult(
         call,
         `Invalid tool input for ${call.name}: ${validationError}`,
+        { inputRejected: true },
       );
     }
 
