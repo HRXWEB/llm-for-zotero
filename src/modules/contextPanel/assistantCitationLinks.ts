@@ -4445,6 +4445,59 @@ function appendQuoteCardBodyContent(
 
 export const appendQuoteCardBodyContentForTests = appendQuoteCardBodyContent;
 
+/**
+ * Expanded/collapsed is reader state, not message state. When an answer is
+ * re-rendered (quote validation flips a card, a trace refresh, a targeted
+ * wrapper rebuild) the cards are recreated, so the owner of the rebuild asks
+ * for the keys that were open before and restores them on the new cards.
+ */
+const quoteCardExpansionControls = new WeakMap<
+  HTMLElement,
+  (expanded: boolean) => void
+>();
+
+function quoteCardStateKey(card: HTMLElement): string {
+  const occurrenceId = card.dataset.quoteOccurrenceId || "";
+  if (occurrenceId) return `occurrence:${occurrenceId}`;
+  const citationId = card.dataset.quoteCitationId || "";
+  return citationId ? `citation:${citationId}` : "";
+}
+
+function queryQuoteCards(root: ParentNode | null | undefined): HTMLElement[] {
+  if (!root || typeof root.querySelectorAll !== "function") return [];
+  return Array.from(
+    root.querySelectorAll(
+      ".llm-quote-card",
+    ) as unknown as ArrayLike<HTMLElement>,
+  );
+}
+
+export function collectExpandedQuoteCardKeys(
+  root: ParentNode | null | undefined,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const card of queryQuoteCards(root)) {
+    if (card.dataset.quoteInteractive !== "true") continue;
+    if (card.dataset.expanded !== "true") continue;
+    const key = quoteCardStateKey(card);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+export function restoreExpandedQuoteCards(
+  root: ParentNode | null | undefined,
+  keys: ReadonlySet<string>,
+): void {
+  if (!keys.size) return;
+  for (const card of queryQuoteCards(root)) {
+    if (card.dataset.quoteInteractive !== "true") continue;
+    const key = quoteCardStateKey(card);
+    if (!key || !keys.has(key)) continue;
+    quoteCardExpansionControls.get(card)?.(true);
+  }
+}
+
 function createQuoteCardElement(params: {
   ownerDoc: Document;
   quoteText: string;
@@ -4535,6 +4588,7 @@ function createQuoteCardElement(params: {
     wrapper.dataset.expanded = expanded ? "true" : "false";
     content.setAttribute("aria-expanded", expanded ? "true" : "false");
   };
+  quoteCardExpansionControls.set(wrapper, setExpanded);
   const toggleExpanded = () => {
     setExpanded(wrapper.dataset.expanded !== "true");
   };

@@ -147,6 +147,10 @@ import {
   withScrollGuard,
 } from "./chatScrollSnapshots";
 import {
+  collectExpandedQuoteCardKeys,
+  restoreExpandedQuoteCards,
+} from "./assistantCitationLinks";
+import {
   syncConversationTurnNavigator,
   updateStreamingTurnNavigator,
 } from "./conversationTurnNavigator";
@@ -12647,6 +12651,7 @@ function updateMountedAssistantViews(
       message.quoteCitations !== view.quoteCitations ||
       message.quoteDisplayOverride !== view.quoteOverride
     ) {
+      const expandedQuoteCards = collectExpandedQuoteCardKeys(view.answer);
       if (!view.answer) {
         view.answer = box.ownerDocument.createElement("div");
         view.answer.className = "llm-assistant-answer";
@@ -12667,6 +12672,7 @@ function updateMountedAssistantViews(
             box,
           ),
       });
+      restoreExpandedQuoteCards(view.answer, expandedQuoteCards);
       view.text = message.text;
       view.quoteCitations = message.quoteCitations;
       view.quoteOverride = message.quoteDisplayOverride;
@@ -14326,7 +14332,11 @@ export function refreshChat(
         ".llm-assistant-answer",
       );
       if (previousAnswer) disposeStreamingMarkdown(previousAnswer);
+      const expandedQuoteCards = collectExpandedQuoteCardKeys(
+        existingTargetedWrapper,
+      );
       existingTargetedWrapper.replaceWith(wrapper);
+      restoreExpandedQuoteCards(wrapper, expandedQuoteCards);
     } else {
       chatBox.appendChild(wrapper);
     }
