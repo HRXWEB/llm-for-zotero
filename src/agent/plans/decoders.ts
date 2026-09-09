@@ -677,6 +677,28 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
             })
           : undefined,
       };
+    } else if (type === "research_reading") {
+      payload = {
+        type,
+        researchJobId: requiredString(
+          rawPayload.researchJobId,
+          "evidence.payload.researchJobId",
+        ),
+        scopeLineageDigest: requiredString(
+          rawPayload.scopeLineageDigest,
+          "evidence.payload.scopeLineageDigest",
+        ),
+        durablePapers: requiredInteger(
+          rawPayload.durablePapers,
+          "evidence.payload.durablePapers",
+          0,
+        ),
+        totalPapers: requiredInteger(
+          rawPayload.totalPapers,
+          "evidence.payload.totalPapers",
+          0,
+        ),
+      };
     } else if (type === "bounded_reasoning") {
       payload = {
         type,

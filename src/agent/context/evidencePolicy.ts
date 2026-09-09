@@ -125,6 +125,10 @@ export function resolveTurnEvidencePolicy(
   request: AgentRuntimeRequest,
   options: { priorCoverage?: readonly AgentCoverageEntry[] } = {},
 ): TurnEvidencePolicy | null {
+  // An approved plan owns reading during execution: its tasks, investigation
+  // contract, and host reading manifest decide depth, grouping, and when
+  // reading stops. The chat-turn classifier must not add a second owner.
+  if (request.planContext?.phase === "executing") return null;
   const reading = request.classifiedIntent?.semantic?.reading;
   if (!reading || reading.source === "metadata") return null;
   const coverage = reading.coverage;

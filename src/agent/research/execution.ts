@@ -264,6 +264,7 @@ export async function executeResearchUpdate(
   let automaticStage =
     input.operation === "set_stage" ? input.stage : undefined;
   let remainingReadingManifest: ReadingManifestEntry[] | undefined;
+  let durablePaperCount = 0;
   if (
     adaptiveReview &&
     input.operation === "inventory_scope" &&
@@ -279,6 +280,7 @@ export async function executeResearchUpdate(
     const findingKeys = new Set(
       currentFindings.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
     );
+    durablePaperCount = findingKeys.size;
     const everyPaperUnderstood = currentCorpus.every(
       (entry) =>
         entry.screeningStatus === "missing" ||
@@ -372,9 +374,12 @@ export async function executeResearchUpdate(
     }));
     if (!compactRemainingManifest.length) {
       const advancedLedger =
-        await planExecutionCoordinator.advanceVerifiedTasks({
+        await planExecutionCoordinator.completeResearchReading({
           executionId: job.executionId,
-          requirementKinds: ["verified_read"],
+          researchJobId: job.researchJobId,
+          scopeLineageDigest: next.scopeLineageDigest || job.scopeLineageDigest || "",
+          durablePapers: durablePaperCount,
+          totalPapers: next.totalItems,
         });
       await context.publishPlanEvent?.({
         type: "plan_execution_updated",

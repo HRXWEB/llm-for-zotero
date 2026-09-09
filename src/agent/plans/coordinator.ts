@@ -230,6 +230,18 @@ export function assertTaskCompletionEvidence(
             })()
           : matching.some((entry) => {
               if (requirement.kind === "verified_read") {
+                // A reading task bound to a research scope completes only when
+                // the research job reports every manifest paper durable for
+                // that exact scope. Individual verified reads are evidence, not
+                // completion.
+                const boundScope = requirement.targetBoundary?.scopeDigest;
+                if (boundScope) {
+                  return (
+                    entry.kind === "verified_read" &&
+                    entry.payload?.type === "research_reading" &&
+                    entry.payload.scopeLineageDigest === boundScope
+                  );
+                }
                 return (
                   entry.kind === "verified_read" &&
                   entry.payload?.type === "verified_read" &&
@@ -415,6 +427,29 @@ function assignCompletionRequirements(params: {
     }));
     return { ...step, completionRequirements };
   });
+}
+
+const RESEARCH_OWNED_REQUIREMENT_KINDS = new Set<PlanCompletionRequirementKind>(
+  ["verified_read", "research_coverage"],
+);
+
+/**
+ * Reading and coverage requirements of a research plan are owned by the
+ * research job: they complete against its scope lineage digest, never against
+ * an individual read. The binding follows scope amendments.
+ */
+function bindResearchRequirementsToScope(
+  requirements: readonly PlanCompletionRequirement[] | undefined,
+  scopeDigest: string,
+): readonly PlanCompletionRequirement[] | undefined {
+  return requirements?.map((requirement) =>
+    RESEARCH_OWNED_REQUIREMENT_KINDS.has(requirement.kind)
+      ? {
+          ...requirement,
+          targetBoundary: { ...(requirement.targetBoundary || {}), scopeDigest },
+        }
+      : requirement,
+  );
 }
 
 /** A planned deep read is a body-evidence promise, regardless of provider wording. */
@@ -1208,6 +1243,8 @@ export class PlanExecutionCoordinator {
     const executionId = makeId(
       `plan-execution-${artifact.planId}-r${artifact.revision}`,
     );
+    const approvedScopeDigest =
+      artifact.contract?.investigation?.scopeSnapshot?.digest;
     const tasks: ExecutionTask[] = artifact.steps.map((step) => ({
       version: 2,
       taskId: `${executionId}:${step.planStepId}`,
@@ -1220,7 +1257,12 @@ export class PlanExecutionCoordinator {
       expectedEffect: step.expectedEffect,
       actionIndexes: step.actionIndexes,
       materialOutputId: step.materialOutputId,
-      completionRequirements: step.completionRequirements,
+      completionRequirements: approvedScopeDigest
+        ? bindResearchRequirementsToScope(
+            step.completionRequirements,
+            approvedScopeDigest,
+          )
+        : step.completionRequirements,
       expectedCapability: step.expectedCapability,
       obligationIds: planStepObligationIds(step, actionContract),
       status: "pending",
@@ -1503,13 +1545,14 @@ export class PlanExecutionCoordinator {
         (requirement) => ({
           ...requirement,
           requirementId: `${requirement.requirementId}:scope:${suffix}`,
-          targetBoundary:
-            requirement.kind === "research_coverage"
-              ? {
-                  ...(requirement.targetBoundary || {}),
-                  scopeDigest: params.scopeLineageDigest,
-                }
-              : requirement.targetBoundary,
+          targetBoundary: RESEARCH_OWNED_REQUIREMENT_KINDS.has(
+            requirement.kind,
+          )
+            ? {
+                ...(requirement.targetBoundary || {}),
+                scopeDigest: params.scopeLineageDigest,
+              }
+            : requirement.targetBoundary,
         }),
       );
       return {
@@ -1587,6 +1630,57 @@ export class PlanExecutionCoordinator {
       );
       now += 1;
     }
+  }
+
+  /**
+   * The research job reports that every manifest paper is durable. This is the
+   * only evidence that completes a scope-bound reading task.
+   */
+  async completeResearchReading(params: {
+    executionId: string;
+    researchJobId: string;
+    scopeLineageDigest: string;
+    durablePapers: number;
+    totalPapers: number;
+    now?: number;
+  }): Promise<PlanExecutionLedger> {
+    const ledger = await this.requireLedger(params.executionId);
+    assertExecutionMutable(ledger);
+    const now = params.now ?? Date.now();
+    for (const task of ledger.tasks) {
+      const requirement = task.completionRequirements?.find(
+        (entry) =>
+          entry.kind === "verified_read" &&
+          entry.targetBoundary?.scopeDigest === params.scopeLineageDigest,
+      );
+      if (!requirement || task.status === "completed") continue;
+      await this.attachEvidence({
+        version: 3,
+        evidenceId: `${params.researchJobId}:reading:${params.scopeLineageDigest}`,
+        executionId: params.executionId,
+        taskId: task.taskId,
+        kind: "verified_read",
+        verified: true,
+        requirementId: requirement.requirementId,
+        criterionIds: requirement.criterionIds,
+        contractDigest: requirement.contractDigest,
+        payload: {
+          type: "research_reading",
+          researchJobId: params.researchJobId,
+          scopeLineageDigest: params.scopeLineageDigest,
+          durablePapers: params.durablePapers,
+          totalPapers: params.totalPapers,
+        },
+        reference: params.researchJobId,
+        summary: `Every manifest paper is durable: ${params.durablePapers}/${params.totalPapers}`,
+        createdAt: now,
+      });
+    }
+    return this.advanceVerifiedTasks({
+      executionId: params.executionId,
+      requirementKinds: ["verified_read"],
+      now: now + 1,
+    });
   }
 
   async attachReceiptEvidence(params: {

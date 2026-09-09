@@ -5,6 +5,7 @@ import {
   renderAgentPromptEnvelope,
 } from "../src/agent/model/messageBuilder";
 import type { PlanExecutionLedger } from "../src/agent/plans/types";
+import { COVERAGE_DISCLOSURE_REQUIREMENT } from "../src/agent/documents/draftValidation";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
@@ -247,6 +248,79 @@ describe("agent prompt envelope", function () {
       "Required sections: Findings; Scope and limitations",
     );
     assert.include(prompt, "submit_document.title must match");
+    assert.include(prompt, COVERAGE_DISCLOSURE_REQUIREMENT);
+    assert.notInclude(prompt, "Coverage section required");
+  });
+
+  it("lets the approved investigation own reading guidance instead of the chat turn rule", async function () {
+    const ledger: PlanExecutionLedger = {
+      version: 1,
+      executionId: "execution-investigation",
+      planId: "plan-investigation",
+      revision: 1,
+      planDigest: "sha256:investigation",
+      conversationKey: 706,
+      attempt: 1,
+      provider: "original",
+      grant: {
+        version: 1,
+        planId: "plan-investigation",
+        revision: 1,
+        planDigest: "sha256:investigation",
+        conversationKey: 706,
+        conversationGeneration: 1,
+        approvedAt: 1,
+      },
+      status: "running",
+      tasks: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const request = resolvedAgentRequest({
+      conversationKey: 706,
+      mode: "agent",
+      userText: "Execute the approved plan",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: ledger.planId,
+        revision: ledger.revision,
+        executionId: ledger.executionId,
+        approvedDigest: ledger.planDigest,
+        provider: "original",
+      },
+      classifiedIntent: classifiedFixture({
+        semantic: semanticFixture({
+          reading: { source: "document_text", coverage: "targeted" },
+        }),
+      }),
+      metadata: {
+        planExecutionLedger: ledger,
+        approvedPlanContract: {
+          deliverable: { kind: "answer" },
+          investigation: {
+            question: "How is belief updating modeled?",
+            subquestions: [],
+            criteria: [],
+            reviewMode: "narrative",
+            readingStrategy: "adaptive",
+            scopeAmendmentPolicy: "fixed",
+            scope: { libraryID: 1, kind: "items", itemKeys: ["AAAA1111"] },
+            requiredEvidenceDepth: "body",
+            estimatedDeepReadPapers: 0,
+            approvedLargeCorpus: false,
+          },
+        },
+      },
+    });
+    const messages = await buildAgentInitialMessages(request, [], []);
+    const prompt = messages.map(messageText).join("\n");
+    assert.notInclude(prompt, "TURN RULE");
+    assert.notInclude(prompt, "The shared reading intent requires");
+    assert.include(prompt, "Reading guidance (owned by the approved investigation)");
+    assert.include(prompt, "narrative review, adaptive reading, body evidence depth");
+    assert.include(prompt, "paper_read mode 'overview'");
+    assert.include(prompt, "No per-turn read budget applies");
   });
 
   it("distinguishes omitted transcript history from an explicit empty override", async function () {

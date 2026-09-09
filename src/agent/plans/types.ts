@@ -163,6 +163,14 @@ export type TaskEvidencePayload =
       observations?: readonly TrustedReadObservation[];
     }>
   | Readonly<{
+      /** The research job reports that every manifest paper is durable. */
+      type: "research_reading";
+      researchJobId: string;
+      scopeLineageDigest: string;
+      durablePapers: number;
+      totalPapers: number;
+    }>
+  | Readonly<{
       type: "bounded_reasoning";
       assertion: string;
     }>

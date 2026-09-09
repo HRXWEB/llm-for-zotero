@@ -1,5 +1,13 @@
 const QUOTE_TOKEN = /\[\[quote:([A-Za-z0-9._:-]+)\]\]/g;
 
+/**
+ * The coverage disclosure rule in the words the validator enforces. Every
+ * instruction that asks for the disclosure renders this text so the model is
+ * never told one vocabulary and validated against another.
+ */
+export const COVERAGE_DISCLOSURE_REQUIREMENT =
+  'Coverage disclosure required: one heading containing "scope" and one heading containing "limitations"; a single "Scope and limitations" section satisfies both.';
+
 function normalizeHeading(value: string): string {
   return value.trim().toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ");
 }

@@ -300,4 +300,27 @@ describe("read stop guidance", function () {
     });
     assert.equal(guidance.recommendation, "answer_with_source_limitation");
   });
+
+  it("yields no chat turn policy while an approved plan is executing", function () {
+    const request = resolvedAgentRequest({
+      conversationKey: 4103,
+      mode: "agent",
+      userText: "Execute the approved plan",
+      model: "test-model",
+      planContext: {
+        phase: "executing",
+        planId: "plan-reading",
+        revision: 1,
+        executionId: "execution-reading",
+        approvedDigest: "sha256:reading",
+        provider: "original",
+      },
+      classifiedIntent: classifiedFixture({
+        semantic: semanticFixture({
+          reading: { source: "document_text", coverage: "targeted" },
+        }),
+      }),
+    });
+    assert.isNull(resolveTurnEvidencePolicy(request));
+  });
 });

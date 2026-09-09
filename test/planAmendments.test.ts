@@ -563,6 +563,13 @@ describe("autonomous Plan scope amendments", function () {
         coverageRequirement?.targetBoundary?.scopeDigest,
         result.job.scopeLineageDigest,
       );
+      const readingRequirement = amendedLedger?.tasks
+        .flatMap((task) => task.completionRequirements || [])
+        .find((requirement) => requirement.kind === "verified_read");
+      assert.equal(
+        readingRequirement?.targetBoundary?.scopeDigest,
+        result.job.scopeLineageDigest,
+      );
     } finally {
       harness.db.close();
     }

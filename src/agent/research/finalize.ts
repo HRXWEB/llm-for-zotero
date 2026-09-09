@@ -197,7 +197,7 @@ export async function finalizeResearch(params: {
   const requirement = task?.completionRequirements?.find(
     (entry) => entry.kind === "research_coverage",
   );
-  if (!task || !requirement) {
+  if (!ledger || !task || !requirement) {
     throw new Error("Research coverage requirement is unavailable");
   }
   await planExecutionCoordinator.attachEvidence({
@@ -227,7 +227,29 @@ export async function finalizeResearch(params: {
     createdAt: Date.now(),
   });
   if (coverageStatus === "partial") {
-    let exceptionLedger = await planExecutionCoordinator.requestTransition({
+    // The user's partial-coverage grant closes every research-owned task that
+    // the job could not complete: the scope-bound reading task and coverage.
+    const unfinishedReadingTasks = ledger.tasks.filter(
+      (entry) =>
+        entry.taskId !== job.parentTaskId &&
+        !["completed", "skipped", "cancelled"].includes(entry.status) &&
+        entry.completionRequirements?.some(
+          (requirement) =>
+            requirement.kind === "verified_read" &&
+            Boolean(requirement.targetBoundary?.scopeDigest),
+        ),
+    );
+    let exceptionLedger = ledger;
+    for (const readingTask of unfinishedReadingTasks) {
+      exceptionLedger = await planExecutionCoordinator.requestTransition({
+        executionId: job.executionId,
+        taskId: readingTask.taskId,
+        toStatus: "skipped",
+        requestedBy: "user",
+        reason: next.exceptionGrant?.limitationSummary,
+      });
+    }
+    exceptionLedger = await planExecutionCoordinator.requestTransition({
       executionId: job.executionId,
       taskId: job.parentTaskId,
       toStatus: "skipped",
