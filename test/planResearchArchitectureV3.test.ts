@@ -609,17 +609,31 @@ describe("Plan Mode research architecture v3", function () {
     assert.isFalse(
       researchUpdate.validate({ operation: "list_findings", limit: 26 }).ok,
     );
+    const identifiedPapers = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        libraryID: 1,
+        itemKey: `KEY${index}`,
+      }));
     assert.isTrue(
       researchUpdate.validate({
         operation: "record_papers",
-        papers: Array.from({ length: 2 }, () => ({})),
+        papers: identifiedPapers(2),
       }).ok,
     );
     assert.isTrue(
       researchUpdate.validate({
         operation: "record_papers",
-        papers: Array.from({ length: 26 }, () => ({})),
+        papers: identifiedPapers(26),
       }).ok,
+    );
+    const missingIdentity = researchUpdate.validate({
+      operation: "record_papers",
+      papers: [{ finding: {} }],
+    });
+    assert.isFalse(missingIdentity.ok);
+    assert.match(
+      (missingIdentity as { error: string }).error,
+      /papers\[0\]\.libraryID[\s\S]*Example:/,
     );
     assert.isUndefined(
       (researchUpdate.spec.inputSchema as any).properties.papers.maxItems,

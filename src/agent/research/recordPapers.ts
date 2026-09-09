@@ -3,6 +3,7 @@ import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { validateObject } from "../tools/shared";
 import { type ResearchUpdateInput } from "./commands";
+import { recordPaperExample } from "./recordDecoding";
 import {
   resolveTrustedPdfLocator,
   selectPreferredVerifiedReads,
@@ -74,12 +75,10 @@ export async function recordResearchPapers(params: {
   );
   const writes: Array<() => Promise<unknown>> = [];
   for (let index = 0; index < (input.papers || []).length; index += 1) {
+    // Identity and finding placement are normalized by `normalizeRecordPaperInput`
+    // in the command validator; this loop reads an already-shaped paper.
     const raw = input.papers![index];
-    if (!validateObject<Record<string, unknown>>(raw)) {
-      throw new Error(`papers[${index}] must be an object`);
-    }
-    const libraryID = positiveInt(raw.libraryID, `papers[${index}].libraryID`);
-    const itemKey = string(raw.itemKey, `papers[${index}].itemKey`);
+    const { libraryID, itemKey } = raw;
     const identity = `${libraryID}:${itemKey}`;
     const current = corpusByKey.get(identity);
     const approvedSource = snapshotByKey.get(identity);
@@ -321,12 +320,12 @@ export async function recordResearchPapers(params: {
           : strings(finding.criterionIds, "finding.criterionIds");
       if (subquestionIds.some((id) => !allowedSubquestions.has(id))) {
         throw new Error(
-          `Finding for ${identity} references an unknown subquestion`,
+          `Finding for ${identity} references an unknown subquestion\n${recordPaperExample()}`,
         );
       }
       if (criterionIds.some((id) => !allowedCriteria.has(id))) {
         throw new Error(
-          `Finding for ${identity} references an unknown criterion`,
+          `Finding for ${identity} references an unknown criterion\n${recordPaperExample()}`,
         );
       }
       const evidenceKeys = [...evidenceKeyMap.keys()];
@@ -356,11 +355,13 @@ export async function recordResearchPapers(params: {
         !new Set(["include", "exclude", "unresolved"]).has(inclusionDecision)
       ) {
         throw new Error(
-          `Finding for ${identity} has invalid inclusionDecision`,
+          `Finding for ${identity} has invalid inclusionDecision\n${recordPaperExample()}`,
         );
       }
       if (!new Set(["low", "medium", "high"]).has(confidence)) {
-        throw new Error(`Finding for ${identity} has invalid confidence`);
+        throw new Error(
+          `Finding for ${identity} has invalid confidence\n${recordPaperExample()}`,
+        );
       }
       const roles =
         finding.roles === undefined
@@ -375,7 +376,9 @@ export async function recordResearchPapers(params: {
           (role) => !(NARRATIVE_ROLES as readonly string[]).includes(role),
         )
       ) {
-        throw new Error(`Finding for ${identity} has an invalid role`);
+        throw new Error(
+          `Finding for ${identity} has an invalid role\n${recordPaperExample()}`,
+        );
       }
       if (adaptiveReview && status === "included") {
         for (const field of [
@@ -459,7 +462,7 @@ export async function recordResearchPapers(params: {
       writes.push(async () => savePaperFinding(record));
     } else if (adaptiveReview && status !== "missing") {
       throw new Error(
-        `Adaptive review paper ${identity} requires a durable finding`,
+        `Adaptive review paper ${identity} requires a durable finding\n${recordPaperExample()}`,
       );
     } else if (recordStage === "broad_screening" && status === "excluded") {
       writes.push(async () =>

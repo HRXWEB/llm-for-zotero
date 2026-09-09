@@ -358,6 +358,9 @@ export async function executeResearchUpdate(
       : {}),
     checkpointRequired,
     evidenceRefs: newEvidenceRefs,
+    ...(input.operation === "record_papers" && input.warnings.length
+      ? { warnings: input.warnings }
+      : {}),
   };
   if (
     adaptiveReview &&

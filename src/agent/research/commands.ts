@@ -1,9 +1,14 @@
 import { fail, ok, validateObject } from "../tools/shared";
 import type { AgentToolInputValidation } from "../types";
 import { RESEARCH_STAGES as STAGES, type ResearchStage } from "./policy";
+import {
+  normalizeRecordPaperInput,
+  type NormalizedRecordPaper,
+} from "./recordDecoding";
 type NoPayload = {
   stage?: never;
   papers?: never;
+  warnings?: never;
   probes?: never;
   themes?: never;
   outcome?: never;
@@ -23,9 +28,10 @@ export type ResearchUpdateInput =
       operation: "set_stage";
       stage: ResearchStage;
     })
-  | (Omit<NoPayload, "papers"> & {
+  | (Omit<NoPayload, "papers" | "warnings"> & {
       operation: "record_papers";
-      papers: unknown[];
+      papers: NormalizedRecordPaper[];
+      warnings: string[];
     })
   | (Omit<NoPayload, "probes"> & {
       operation: "record_probes";
@@ -117,8 +123,27 @@ export function validateResearchUpdate(
   switch (operation) {
     case "set_stage":
       return ok({ ...page, operation, stage: args.stage as ResearchStage });
-    case "record_papers":
-      return ok({ ...page, operation, papers: args.papers as unknown[] });
+    case "record_papers": {
+      const papers: NormalizedRecordPaper[] = [];
+      const warnings: string[] = [];
+      for (
+        let index = 0;
+        index < (args.papers as unknown[]).length;
+        index += 1
+      ) {
+        try {
+          const normalized = normalizeRecordPaperInput(
+            (args.papers as unknown[])[index],
+            index,
+          );
+          papers.push(normalized.paper);
+          warnings.push(...normalized.warnings);
+        } catch (error) {
+          return fail(error instanceof Error ? error.message : String(error));
+        }
+      }
+      return ok({ ...page, operation, papers, warnings });
+    }
     case "record_probes":
       return ok({ ...page, operation, probes: args.probes as unknown[] });
     case "record_themes":
