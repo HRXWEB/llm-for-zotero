@@ -18,6 +18,16 @@ import {
   resolveRecordBatchCap,
 } from "./readingBudget";
 import { resolveOutputReserve } from "../../utils/outputTokenPolicy";
+import {
+  applyFrameRevision,
+  applyHostTiering,
+  applyTierDecisions,
+  corpusHasHostTiers,
+  decorateReadingManifest,
+  parseTierDecisions,
+} from "./synthesisControls";
+import { buildCorpusMap } from "./tiering";
+import { listResearchEdges } from "./store";
 import { validateStoredResearchTransition } from "./stages";
 import {
   listPaperFindings,
@@ -147,7 +157,7 @@ export async function executeResearchUpdate(
   );
   const newEvidenceRefs: Record<string, string> = {};
   const completeWorkItem = (params: Parameters<CompleteResearchWorkItem>[0]) =>
-    completeResearchWorkItem(job, params);
+    completeResearchWorkItem(job!, params);
   const maxPapersPerRecord = adaptiveReview
     ? resolveRecordBatchCap({
         outputReserveTokens: resolveOutputReserve(
@@ -253,6 +263,7 @@ export async function executeResearchUpdate(
 
   let inventoriedItems: number | undefined;
   let readingManifest: ReadingManifestEntry[] | undefined;
+  let liveCorpus = corpus;
   if (input.operation === "inventory_scope") {
     ({ inventoriedItems, readingManifest } = await inventoryResearchScope({
       resumesAdaptiveInventory,
@@ -263,6 +274,34 @@ export async function executeResearchUpdate(
       completeWorkItem,
       gateway,
     }));
+    if (adaptiveReview) {
+      liveCorpus = await listResearchCorpusItems({
+        researchJobId: job.researchJobId,
+      });
+      if (!corpusHasHostTiers(liveCorpus)) {
+        ({ job, corpus: liveCorpus } = await applyHostTiering({
+          job,
+          corpus: liveCorpus,
+          investigation,
+          context,
+          conversationKey: context.request.conversationKey,
+        }));
+      }
+    }
+  }
+  if (input.operation === "set_frame") {
+    job = await applyFrameRevision({
+      job,
+      slots: input.slots,
+      conversationKey: context.request.conversationKey,
+    });
+  }
+  if (input.operation === "set_tiers") {
+    liveCorpus = await applyTierDecisions({
+      job,
+      corpus,
+      decisions: parseTierDecisions(input.tiers),
+    });
   }
 
   if (input.operation === "record_papers") {
@@ -371,17 +410,50 @@ export async function executeResearchUpdate(
     type: "plan_research_progress",
     progress: progress(next),
   });
+  const decoratedManifest =
+    adaptiveReview && readingManifest
+      ? decorateReadingManifest({
+          manifest: readingManifest,
+          corpus: liveCorpus,
+          job: next,
+          context,
+        })
+      : undefined;
+  const corpusMap =
+    adaptiveReview && next.frame
+      ? buildCorpusMap({
+          corpus: liveCorpus,
+          findings: await listPaperFindings(job.researchJobId),
+          edges: await listResearchEdges(job.researchJobId),
+          labels: displayLabels,
+        })
+      : undefined;
   const content = {
     progress: progress(next),
     displayLabels: Object.fromEntries(displayLabels),
     inventoriedItems,
     ...(maxPapersPerRecord !== undefined ? { maxPapersPerRecord } : {}),
+    ...(adaptiveReview && next.frame
+      ? {
+          phase: next.synthesisPhase || "nodes",
+          frame: next.frame,
+          ...(next.nodeCapacity ? { nodeCapacity: next.nodeCapacity } : {}),
+        }
+      : {}),
+    ...(corpusMap ? { corpusMap } : {}),
     ...(readingManifest
       ? {
-          readingManifest,
+          readingManifest: decoratedManifest?.entries || readingManifest,
+          ...(decoratedManifest
+            ? {
+                proposedGroups: decoratedManifest.proposedGroups,
+                allocatedReadingTokens:
+                  decoratedManifest.allocatedReadingTokens,
+              }
+            : {}),
           instruction: adaptiveReview
             ? readingManifest.length
-              ? "Read one capacity-sized semantic group with paper_read overview, then immediately record a rich understanding for every identity in that group before reading more. The host will checkpoint raw text and return the exact remaining manifest."
+              ? "Read one proposed group (or your own regrouping of the manifest) with paper_read in each entry's readMode, then immediately record a claim-based node for every identity in that group with record_papers before reading more. Fill every frame slot for core papers; the corpus map shows the papers already recorded so candidate links can name them. The host checkpoints raw text and returns the exact remaining manifest."
               : "No unread papers remain. Continue from list_findings or list_themes without rereading PDFs."
             : "Request the next systematic-review screening batch.",
         }
@@ -397,14 +469,36 @@ export async function executeResearchUpdate(
     input.operation === "record_papers" &&
     remainingReadingManifest
   ) {
-    const compactRemainingManifest = remainingReadingManifest.map((entry) => ({
-      identity: entry.identity,
-      title: entry.title,
-      displayLabel: displayLabels.get(entry.identity),
-      readable: entry.readable,
-      evidenceDepthTarget: entry.evidenceDepthTarget,
-      target: entry.target,
-    }));
+    const remainingDecorated = decorateReadingManifest({
+      manifest: remainingReadingManifest,
+      corpus: liveCorpus,
+      job: next,
+      context,
+    });
+    const compactRemainingManifest = remainingDecorated.entries.map(
+      (entry) => ({
+        identity: entry.identity,
+        title: entry.title,
+        displayLabel: displayLabels.get(entry.identity),
+        readable: entry.readable,
+        evidenceDepthTarget: entry.evidenceDepthTarget,
+        target: entry.target,
+        tier: entry.tier,
+        readMode: entry.readMode,
+        ...(entry.suggestedQueries
+          ? { suggestedQueries: entry.suggestedQueries }
+          : {}),
+        ...(entry.suggestedMaxChars
+          ? { suggestedMaxChars: entry.suggestedMaxChars }
+          : {}),
+      }),
+    );
+    const checkpointMap = corpusMap
+      ? `\n\nCorpus map (one line per paper):\n${corpusMap.join("\n")}`
+      : "";
+    const checkpointGroups = compactRemainingManifest.length
+      ? `\n\nProposed next groups: ${JSON.stringify(remainingDecorated.proposedGroups)}`
+      : "";
     if (!compactRemainingManifest.length) {
       const advancedLedger =
         await planExecutionCoordinator.completeResearchReading({
@@ -425,8 +519,8 @@ export async function executeResearchUpdate(
       continuationCheckpoint: {
         reason: "research_batch_durable",
         instruction: compactRemainingManifest.length
-          ? `The completed paper-understanding group is durable. Raw PDF text from that group has been released. The exact remaining frozen-scope manifest below is authoritative. Do not call inventory_scope or otherwise re-verify it. Call paper_read now for one capacity-sized semantic group from this manifest, immediately persist that group with research_update record_papers, and do not reread recorded papers.\n\n${JSON.stringify(compactRemainingManifest)}`
-          : "All paper understandings are durable and the raw PDF text has been released. Do not call inventory_scope again. Call research_update list_findings now, build and persist the cross-paper themes, finalize research, and do not reread the PDFs unless resolving a decisive uncertainty.",
+          ? `The completed paper-understanding group is durable. Raw PDF text from that group has been released. The exact remaining frozen-scope manifest below is authoritative. Do not call inventory_scope or otherwise re-verify it. Call paper_read now for the next proposed group (or your own regrouping) using each entry's readMode, immediately persist that group with research_update record_papers as claim-based nodes, and do not reread recorded papers.\n\n${JSON.stringify(compactRemainingManifest)}${checkpointGroups}${checkpointMap}`
+          : `All paper understandings are durable and the raw PDF text has been released. Do not call inventory_scope again. The loop is now in the links phase: call research_update list_findings (compact view) to see every node, record an explicit typed edge list with record_edges, then advance_phase to verification and follow next_work. Do not reread the PDFs except to verify an edge.${checkpointMap}`,
       },
     };
   }

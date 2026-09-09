@@ -92,8 +92,16 @@ export function paperFixtures(count: number): HarnessPaper[] {
     return {
       itemId: 100 + n,
       key: `PAPER${String(n).padStart(3, "0")}`,
-      title: `Paper ${n} on latent state inference`,
-      abstract: `Abstract ${n}: recurrent dynamics implement inference in area ${n}.`,
+      // Odd papers speak to the harness question; even papers are peripheral
+      // methods work, so host relevance ranking has something to separate.
+      title:
+        n % 2
+          ? `Paper ${n} on latent state inference`
+          : `Paper ${n}: a Poisson generalized additive model for tuning`,
+      abstract:
+        n % 2
+          ? `Abstract ${n}: recurrent dynamics implement latent state inference in area ${n}.`
+          : `Abstract ${n}: spline regularization estimates neural tuning curves.`,
       year: String(2015 + n),
       firstCreator: `Author${n}`,
       attachmentId: 500 + n,
@@ -212,6 +220,7 @@ export function installResearchHarness(
         title: `${paper.title}.pdf`,
         contentType: "application/pdf",
         indexingState: "indexed",
+        readableTextChars: paper.textChars,
       },
     ],
   });
@@ -232,9 +241,6 @@ export function installResearchHarness(
       const paper = paperById.get(itemId);
       return paper ? target(paper).attachments : [];
     },
-    /** Host-measured text size used for capacity and grouping. */
-    getPaperTextSize: async (itemId: number) =>
-      paperById.get(itemId)?.textChars ?? 0,
   };
   const coordinator = new PlanExecutionCoordinator();
   let executionId = "";
@@ -476,6 +482,44 @@ export function legacyFinding(overrides: Record<string, unknown> = {}) {
     limitations: ["Correlational."],
     relevance: "Central to the review question.",
     confidence: "high",
+    ...overrides,
+  };
+}
+
+/** A claim-based core node that satisfies the default harness frame. */
+export function nodeFinding(overrides: Record<string, unknown> = {}) {
+  return {
+    mainMessage: "Recurrent dynamics implement inference.",
+    relevance: "Central to the review question.",
+    confidence: "high",
+    frameSlots: {
+      question: "How is latent state computed?",
+      approach: "Recordings and a model.",
+      system: "Macaques in a navigation task.",
+      sq1: "Bayesian observer.",
+      sq2: "Latent state is decodable.",
+    },
+    claims: [
+      {
+        statement: "Latent state is decodable.",
+        kind: "finding",
+        subquestionIds: ["sq2"],
+        evidence: { sourceKind: "body" },
+      },
+      {
+        statement: "Recurrent coupling carries the state.",
+        kind: "mechanism",
+        subquestionIds: ["sq1"],
+        evidence: { sourceKind: "body" },
+      },
+      {
+        statement: "Correlational.",
+        kind: "limitation",
+        subquestionIds: [],
+        evidence: { sourceKind: "body" },
+      },
+    ],
+    noLinkSeen: "First paper recorded; no other node to relate yet.",
     ...overrides,
   };
 }

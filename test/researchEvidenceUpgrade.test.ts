@@ -7,7 +7,7 @@ import {
 } from "../src/agent/research/store";
 import {
   installResearchHarness,
-  legacyFinding,
+  nodeFinding,
   paperFixtures,
   type ResearchHarness,
 } from "./helpers/researchHarness";
@@ -27,14 +27,23 @@ describe("research evidence upgrades and record batches", function () {
     await harness.run({ operation: "inventory_scope" });
     const [first] = harness.papers;
     await harness.verifiedRead([first.key], "metadata");
+    const metadataClaims = (
+      nodeFinding().claims as Record<string, unknown>[]
+    ).map((claim) => ({ ...claim, evidence: { sourceKind: "metadata" } }));
     await harness.run({
       operation: "record_papers",
-      papers: [{ libraryID: 1, itemKey: first.key, finding: legacyFinding() }],
+      papers: [
+        {
+          libraryID: 1,
+          itemKey: first.key,
+          finding: nodeFinding({ claims: metadataClaims }),
+        },
+      ],
     });
     await harness.verifiedRead([first.key], "body");
     await harness.run({
       operation: "record_papers",
-      papers: [{ libraryID: 1, itemKey: first.key, finding: legacyFinding() }],
+      papers: [{ libraryID: 1, itemKey: first.key, finding: nodeFinding() }],
     });
     const job = await loadResearchJobForExecution(ledger.executionId);
     const evidence = await listResearchEvidence(job!.researchJobId);
@@ -90,7 +99,7 @@ describe("research evidence upgrades and record batches", function () {
         papers: harness.papers.slice(0, 5).map((paper) => ({
           libraryID: 1,
           itemKey: paper.key,
-          finding: legacyFinding(),
+          finding: nodeFinding(),
         })),
       });
     } catch (caught) {

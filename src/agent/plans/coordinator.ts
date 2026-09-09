@@ -3,6 +3,7 @@ import type {
   AgentActionContract,
   AgentActionReceipt,
 } from "../contracts/types";
+import { buildDefaultResearchFrame } from "../research/frame";
 import { resolveResearchPolicy } from "../research/policy";
 import { resolvePlannedReadingPapers } from "../research/readingBudget";
 import {
@@ -469,6 +470,15 @@ export class PlanExecutionCoordinator {
                 investigation,
                 snapshotItems.length,
               ),
+              // Adaptive reviews run the network loop: the host frame is
+              // the contract every node fills, and the phase starts at nodes.
+              ...(investigation.readingStrategy === "adaptive" &&
+              investigation.reviewMode !== "systematic"
+                ? {
+                    frame: buildDefaultResearchFrame(investigation, now),
+                    synthesisPhase: "nodes" as const,
+                  }
+                : {}),
               createdAt: now,
               updatedAt: now,
             },

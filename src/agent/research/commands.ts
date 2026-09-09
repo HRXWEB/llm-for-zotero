@@ -12,6 +12,8 @@ type NoPayload = {
   probes?: never;
   themes?: never;
   outcome?: never;
+  slots?: never;
+  tiers?: never;
   cursor?: number;
   limit?: number;
 };
@@ -44,6 +46,14 @@ export type ResearchUpdateInput =
   | (Omit<NoPayload, "outcome"> & {
       operation: "finalize";
       outcome: "complete" | "partial" | "failed";
+    })
+  | (Omit<NoPayload, "slots"> & {
+      operation: "set_frame";
+      slots: unknown[];
+    })
+  | (Omit<NoPayload, "tiers"> & {
+      operation: "set_tiers";
+      tiers: unknown[];
     });
 export function validateResearchUpdate(
   args: unknown,
@@ -64,9 +74,23 @@ export function validateResearchUpdate(
       "record_themes",
       "set_stage",
       "finalize",
+      "set_frame",
+      "set_tiers",
     ].includes(String(operation))
   ) {
     return fail("research_update operation is invalid");
+  }
+  if (
+    operation === "set_frame" &&
+    (!Array.isArray(args.slots) || !args.slots.length)
+  ) {
+    return fail("set_frame requires slots[] describing the whole frame");
+  }
+  if (
+    operation === "set_tiers" &&
+    (!Array.isArray(args.tiers) || !args.tiers.length)
+  ) {
+    return fail("set_tiers requires tiers[] with identity and tier");
   }
   if (operation === "set_stage" && args.stage === undefined)
     return fail("set_stage requires stage");
@@ -154,6 +178,10 @@ export function validateResearchUpdate(
         operation,
         outcome: args.outcome as "complete" | "partial" | "failed",
       });
+    case "set_frame":
+      return ok({ ...page, operation, slots: args.slots as unknown[] });
+    case "set_tiers":
+      return ok({ ...page, operation, tiers: args.tiers as unknown[] });
     default:
       return ok({ ...page, operation });
   }

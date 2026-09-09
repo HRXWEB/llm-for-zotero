@@ -1,3 +1,4 @@
+import { TOKEN_ESTIMATE_CHARS_PER_TOKEN } from "../../utils/modelInputCap";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import {
   buildReadingManifest,
@@ -169,6 +170,11 @@ export async function inventoryResearchScope(params: {
         attachmentInfos.some((attachment) =>
           Boolean(attachment.mineruCacheDir),
         );
+      const measuredChars = preferredReadingAttachment?.readableTextChars;
+      const textTokens =
+        measuredChars && measuredChars > 0
+          ? Math.ceil(measuredChars / TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+          : undefined;
       const liveFingerprints = await getResearchItemFingerprints(
         gateway,
         liveItem.id,
@@ -189,6 +195,7 @@ export async function inventoryResearchScope(params: {
           sourceFingerprint:
             liveFingerprints.attachmentFingerprint ||
             liveFingerprints.metadataFingerprint,
+          ...(textTokens !== undefined ? { version: 2, textTokens } : {}),
           updatedAt: Date.now(),
         });
         await completeWorkItem({

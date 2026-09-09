@@ -48,9 +48,47 @@ export function createResearchUpdateTool(
               "record_themes",
               "set_stage",
               "finalize",
+              "set_frame",
+              "set_tiers",
             ],
           },
           stage: { type: "string", enum: STAGES },
+          slots: {
+            type: "array",
+            minItems: 1,
+            description:
+              "set_frame: the complete comparison frame. Identity slots (question, approach, system) are fixed; add or re-describe comparison slots before the link pass. A slot a recorded node fills cannot be removed.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["slotId", "name", "description", "kind"],
+              properties: {
+                slotId: { type: "string" },
+                name: { type: "string" },
+                description: { type: "string" },
+                kind: { type: "string", enum: ["identity", "comparison"] },
+              },
+            },
+          },
+          tiers: {
+            type: "array",
+            minItems: 1,
+            description:
+              "set_tiers: confirm or override host-proposed tiers. An override needs a reason; when tiering is mandatory the core count stays within nodeCapacity.fullNodeCapacity.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["identity", "tier"],
+              properties: {
+                identity: {
+                  type: "string",
+                  description: "Corpus identity such as 1:ABCD1234",
+                },
+                tier: { type: "string", enum: RESEARCH_PAPER_TIERS },
+                reason: { type: "string" },
+              },
+            },
+          },
           cursor: {
             type: "integer",
             minimum: 0,

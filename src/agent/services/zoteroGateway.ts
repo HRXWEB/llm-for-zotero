@@ -22,6 +22,8 @@ import {
 } from "../../modules/contextPanel/contextResolution";
 import { resolvePaperContextRefFromAttachment } from "../../modules/contextPanel/paperAttribution";
 import { invalidateCachedContextText } from "../../modules/contextPanel/pdfContext";
+import { pdfTextCache } from "../../modules/contextPanel/state";
+import { joinLocalPath } from "../../utils/localPath";
 import { ensureMineruCacheDirForAttachment } from "../../modules/contextPanel/mineruSync";
 import {
   persistVerifiedNoteHtml,
@@ -110,6 +112,8 @@ export type LibraryItemTargetAttachment = {
     | "unavailable";
   /** If MinerU has parsed this PDF, the cache directory path containing markdown + images. */
   mineruCacheDir?: string;
+  /** Size of the readable text the host already holds for this PDF, when measurable without extraction. */
+  readableTextChars?: number;
 };
 
 export type LibraryItemTarget = {
@@ -1229,6 +1233,57 @@ const FULLTEXT_INDEX_STATE_MAP: Record<
   4: "queued",
 };
 
+/**
+ * Cheap, extraction-free size of the text the host can read for a PDF: the
+ * cached extraction when present, otherwise Zotero's full-text cache file or
+ * the MinerU markdown on disk. Undefined when nothing measurable exists.
+ */
+async function measureReadableTextChars(
+  attachment: Zotero.Item,
+  mineruCacheDir: string | undefined,
+): Promise<number | undefined> {
+  const cached = pdfTextCache.get(attachment.id);
+  if (cached?.fullLength) return cached.fullLength;
+  const stat = async (path: string) => {
+    try {
+      const io = (globalThis as unknown as { IOUtils?: any }).IOUtils;
+      const info = await io?.stat?.(path);
+      const size = Number(info?.size);
+      return Number.isFinite(size) && size > 0 ? size : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  try {
+    const fulltext = (
+      Zotero as unknown as {
+        Fulltext?: { getItemCacheFile?: (item: Zotero.Item) => nsIFile };
+      }
+    ).Fulltext;
+    const cacheFile = fulltext?.getItemCacheFile?.(attachment);
+    if (
+      cacheFile &&
+      (typeof cacheFile.exists !== "function" || cacheFile.exists())
+    ) {
+      const size = Number((cacheFile as { fileSize?: number }).fileSize);
+      if (Number.isFinite(size) && size > 0) return size;
+      if (cacheFile.path) {
+        const measured = await stat(cacheFile.path);
+        if (measured) return measured;
+      }
+    }
+  } catch {
+    // Fall through to MinerU.
+  }
+  if (mineruCacheDir?.trim()) {
+    const measured = await stat(
+      joinLocalPath(mineruCacheDir.trim(), "full.md"),
+    );
+    if (measured) return measured;
+  }
+  return undefined;
+}
+
 export class ZoteroGateway {
   getItemByLibraryAndKey(libraryID: number, key: string): Zotero.Item | null {
     return Zotero.Items.getByLibraryAndKey(libraryID, key) || null;
@@ -1471,12 +1526,17 @@ export class ZoteroGateway {
           ztoolkit.log("LLM: MinerU cache check failed", err);
         }
       }
+      const readableTextChars =
+        contentType === "application/pdf"
+          ? await measureReadableTextChars(att, mineruCacheDir)
+          : undefined;
       results.push({
         contextItemId: att.id,
         title: resolveAnyAttachmentTitle(att, i, allAtts.length),
         contentType,
         indexingState,
         mineruCacheDir,
+        ...(readableTextChars !== undefined ? { readableTextChars } : {}),
       });
     }
     return results;

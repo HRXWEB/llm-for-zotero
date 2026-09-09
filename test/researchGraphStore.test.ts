@@ -214,10 +214,30 @@ describe("research graph store", function () {
 
   it("stores frame, phase and capacity on the job and stays version 2 without them", async function () {
     const stored = (await loadResearchJob(job.researchJobId))!;
-    assert.equal(stored.version, 2, "no graph fields yet");
+    assert.equal(
+      stored.version,
+      3,
+      "adaptive jobs carry the frame from approval",
+    );
     await saveResearchJob(
       {
         ...stored,
+        frame: undefined,
+        synthesisPhase: undefined,
+        nodeCapacity: undefined,
+        qualityReport: undefined,
+        updatedAt: stored.updatedAt + 1,
+      },
+      harness!.conversationKey,
+    );
+    assert.equal(
+      (await loadResearchJob(job.researchJobId))!.version,
+      2,
+      "a job without graph fields stays readable by older builds",
+    );
+    await saveResearchJob(
+      {
+        ...(await loadResearchJob(job.researchJobId))!,
         frame: {
           version: 1,
           slots: [
