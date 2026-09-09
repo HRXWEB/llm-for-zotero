@@ -210,7 +210,8 @@ export function installStandaloneSidebarResizeBehavior(
   const applyLayout = (layout: StandaloneSidebarWidthLayout) => {
     renderedWidth = layout.renderedWidth;
     effectiveMaxWidth = layout.effectiveMaxWidth;
-    sidebarPanel.style.setProperty(
+    // The layout sidebar and its floating panel inherit the same saved width.
+    container.style.setProperty(
       "--llm-standalone-sidebar-panel-width",
       `${renderedWidth}px`,
     );

@@ -3079,13 +3079,13 @@ async function clickStandaloneTab(
 async function waitForStandaloneSidebarWidthSettled(
   doc: Document,
 ): Promise<void> {
-  const panel = doc.querySelector(
-    ".llm-standalone-sidebar-panel",
+  const sidebar = doc.querySelector(
+    ".llm-standalone-sidebar",
   ) as HTMLElement | null;
-  if (!panel) return;
+  if (!sidebar) return;
   let previous = Number.NaN;
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const width = panel.getBoundingClientRect().width;
+    const width = sidebar.getBoundingClientRect().width;
     if (width === previous) return;
     previous = width;
     await Zotero.Promise.delay(25);
@@ -3094,7 +3094,7 @@ async function waitForStandaloneSidebarWidthSettled(
 
 /**
  * Reveals the collapsed sidebar the way a pointer does. The panel slides in
- * over 180ms, so wait for it to settle before any caller measures it.
+ * over 280ms, so wait for it to settle before any caller measures it.
  */
 async function hoverStandaloneSidebarToggle(): Promise<WorkflowTestStandaloneDiagnostics> {
   assertWorkflowTestEnabled();

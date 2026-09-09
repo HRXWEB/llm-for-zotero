@@ -53,6 +53,10 @@ describe("standalone window sizing", function () {
     const attributes = new Map<string, string>();
     const classes = new Set<string>();
     const container = {
+      style: {
+        setProperty: (name: string, value: string) =>
+          cssProperties.set(name, value),
+      },
       clientWidth: 900,
       classList: {
         add: (name: string) => classes.add(name),
@@ -60,11 +64,6 @@ describe("standalone window sizing", function () {
       },
     } as unknown as HTMLElement;
     const sidebarPanel = {
-      style: {
-        setProperty: (name: string, value: string) => {
-          cssProperties.set(name, value);
-        },
-      },
       getBoundingClientRect: () => ({ width: 220 }),
     } as unknown as HTMLElement;
     const separator = {
@@ -203,6 +202,10 @@ describe("standalone window sizing", function () {
     let nextFrameId = 1;
     let containerWidth = 640;
     const container = {
+      style: {
+        setProperty: (name: string, value: string) =>
+          cssProperties.set(name, value),
+      },
       get clientWidth() {
         widthReads += 1;
         return containerWidth;
@@ -210,11 +213,6 @@ describe("standalone window sizing", function () {
       classList: { add: () => {}, remove: () => {} },
     } as unknown as HTMLElement;
     const sidebarPanel = {
-      style: {
-        setProperty: (name: string, value: string) => {
-          cssProperties.set(name, value);
-        },
-      },
       getBoundingClientRect: () => ({ width: 220 }),
     } as unknown as HTMLElement;
     const separator = {

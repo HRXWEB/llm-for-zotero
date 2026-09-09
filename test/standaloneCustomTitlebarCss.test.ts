@@ -135,7 +135,7 @@ describe("standalone custom title bar CSS", function () {
     }
   });
 
-  it("lets the tab row size its own leading slot so the tabs stay centred", function () {
+  it("reserves the controls while centering tabs when space permits", function () {
     const css = readPanelCss();
     const tabRow = extractCssRule(css, ".llm-standalone-tab-row");
 
@@ -143,7 +143,7 @@ describe("standalone custom title bar CSS", function () {
     // fixed side column would shift the tabs whenever the sidebar collapses.
     assert.include(
       tabRow,
-      "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)",
+      "grid-template-columns: minmax(max-content, 1fr) max-content minmax(0, 1fr)",
     );
   });
 

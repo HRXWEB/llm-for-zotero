@@ -334,7 +334,10 @@ describe("standalone window layout CSS", function () {
     assert.include(navRowRule, "padding: 0 8px");
     assert.include(tabRule, "appearance: none");
     assert.include(tabRule, "-moz-appearance: none");
-    assert.include(tabRule, "padding: 0 10px");
+    assert.include(
+      tabRule,
+      "padding: 0 calc(2px + 2 * var(--llm-standalone-chrome-gap))",
+    );
     assert.include(titleRule, "padding: 0 10px 0 16px");
     assert.notInclude(titleRule, "border-bottom");
     assert.include(titleRule, "box-shadow: inset 0 -1px");
@@ -364,7 +367,10 @@ describe("standalone window layout CSS", function () {
       readPanelCss(),
       ".llm-standalone-content-title-actions",
     );
-    assert.include(actionsRule, "gap: 2px");
+    assert.include(
+      actionsRule,
+      "gap: calc(var(--llm-standalone-chrome-gap) / 2)",
+    );
     assert.match(
       readPanelCss(),
       /\.llm-standalone-title-action\s*\{[^}]*width:\s*28px;[^}]*height:\s*28px;/,
@@ -428,7 +434,7 @@ describe("standalone window layout CSS", function () {
     assert.include(tabRowRule, "display: grid");
     assert.include(
       tabRowRule,
-      "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)",
+      "grid-template-columns: minmax(max-content, 1fr) max-content minmax(0, 1fr)",
     );
     assert.include(leadingRule, "grid-column: 1");
     assert.include(leadingRule, "justify-self: start");
