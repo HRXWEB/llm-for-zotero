@@ -317,8 +317,14 @@ describe("agent prompt envelope", function () {
     const prompt = messages.map(messageText).join("\n");
     assert.notInclude(prompt, "TURN RULE");
     assert.notInclude(prompt, "The shared reading intent requires");
-    assert.include(prompt, "Reading guidance (owned by the approved investigation)");
-    assert.include(prompt, "narrative review, adaptive reading, body evidence depth");
+    assert.include(
+      prompt,
+      "Reading guidance (owned by the approved investigation)",
+    );
+    assert.include(
+      prompt,
+      "narrative review, adaptive reading, body evidence depth",
+    );
     assert.include(prompt, "paper_read mode 'overview'");
     assert.include(prompt, "No per-turn read budget applies");
   });

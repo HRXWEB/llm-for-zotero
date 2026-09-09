@@ -4,7 +4,10 @@ import {
   assertTaskCompletionEvidence,
   PlanExecutionCoordinator,
 } from "../src/agent/plans/coordinator";
-import { initAgentPlanStore, loadPlanExecutionLedger } from "../src/agent/plans/store";
+import {
+  initAgentPlanStore,
+  loadPlanExecutionLedger,
+} from "../src/agent/plans/store";
 import type { ExecutionTask, TaskEvidence } from "../src/agent/plans/types";
 import {
   initResearchStore,
@@ -261,7 +264,11 @@ describe("research reading task ownership", function () {
       await coordinator.attachEvidence(perReadEvidence(task, "read-1"));
       const afterRead = await coordinator.advanceVerifiedTasks({
         executionId: ledger.executionId,
-        requirementKinds: ["verified_read", "material_integrity", "mutation_receipts"],
+        requirementKinds: [
+          "verified_read",
+          "material_integrity",
+          "mutation_receipts",
+        ],
         now: 4,
       });
       assert.equal(readingTask(afterRead).status, "in_progress");
@@ -278,8 +285,9 @@ describe("research reading task ownership", function () {
       });
       assert.equal(readingTask(completed).status, "completed");
       assert.equal(
-        completed.tasks.find((entry) => entry.planStepId === "review:r1:synthesize")
-          ?.status,
+        completed.tasks.find(
+          (entry) => entry.planStepId === "review:r1:synthesize",
+        )?.status,
         "in_progress",
       );
       assert.equal(

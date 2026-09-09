@@ -377,7 +377,8 @@ export async function executeResearchUpdate(
         await planExecutionCoordinator.completeResearchReading({
           executionId: job.executionId,
           researchJobId: job.researchJobId,
-          scopeLineageDigest: next.scopeLineageDigest || job.scopeLineageDigest || "",
+          scopeLineageDigest:
+            next.scopeLineageDigest || job.scopeLineageDigest || "",
           durablePapers: durablePaperCount,
           totalPapers: next.totalItems,
         });
