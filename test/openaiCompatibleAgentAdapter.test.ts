@@ -120,7 +120,7 @@ describe("OpenAICompatibleAgentAdapter", function () {
       name: "read_paper",
       description: "read paper",
       inputSchema: { type: "object" },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
   ];
@@ -337,7 +337,6 @@ describe("OpenAICompatibleAgentAdapter", function () {
       assert.hasAllKeys(variant.properties as Record<string, unknown>, [
         "contextItemId",
         "itemId",
-        "paperContext",
         "attachmentId",
         "name",
       ]);
@@ -354,7 +353,49 @@ describe("OpenAICompatibleAgentAdapter", function () {
       ).type,
       "object",
     );
-    assert.property(originalPaperSchema, "allOf");
+  });
+
+  it("does not let the untouched generic output default truncate max-reasoning agent work", async function () {
+    let capturedBody: Record<string, unknown> = {};
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "application/json" },
+            json: async () => ({ choices: [{ message: { content: "OK" } }] }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+
+    await adapter.runStep({
+      request: makeRequest({
+        model: "deepseek-v4-pro",
+        apiBase: "https://api.deepseek.com/v1",
+        providerProtocol: "openai_chat_compat",
+        reasoning: { provider: "deepseek", level: "xhigh" },
+        advanced: { outputTokenLimit: { mode: "auto" } },
+      }),
+      messages: [{ role: "user", content: "Call the next plan tool." }],
+      tools,
+    });
+
+    // The registry knows this model's output limit, so Auto sends it.
+    assert.equal(capturedBody?.max_tokens, 384_000);
+    assert.notProperty(capturedBody, "max_completion_tokens");
   });
 
   it("redacts malformed streamed tool argument JSON", async function () {
@@ -414,6 +455,175 @@ describe("OpenAICompatibleAgentAdapter", function () {
     if (!isMalformedToolArgumentsDiagnostic(args)) return;
     assert.include(args.rawPreview, "[redacted]");
     assert.notInclude(args.rawPreview, "secret generated script");
+  });
+
+  it("discards a broken stream's partial tool call and preserves completed conversation state", async function () {
+    const bodies: Record<string, unknown>[] = [];
+    let requests = 0;
+    (globalThis as any).ztoolkit = {
+      getGlobal: (name: string) =>
+        name === "fetch"
+          ? async (_url: string, init: RequestInit) => {
+              bodies.push(JSON.parse(String(init.body)));
+              let pulls = 0;
+              return {
+                ok: true,
+                headers: { get: () => "text/event-stream" },
+                body:
+                  requests++ === 0
+                    ? new ReadableStream<Uint8Array>({
+                        pull(controller) {
+                          if (pulls++)
+                            return controller.error(
+                              new Error("Error in input stream"),
+                            );
+                          controller.enqueue(
+                            new TextEncoder().encode(
+                              'data: {"choices":[{"delta":{"content":"Unfinished text","tool_calls":[{"index":0,"id":"partial","function":{"name":"read_paper","arguments":"{"}}]}}]}\n\n',
+                            ),
+                          );
+                        },
+                      })
+                    : makeSseStream([
+                        'data: {"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\n',
+                        "data: [DONE]\n\n",
+                      ]),
+              };
+            }
+          : undefined,
+    };
+    const request = makeRequest({ providerProtocol: "openai_chat_compat" });
+    const messages = [
+      { role: "user" as const, content: "Continue the recorded research" },
+    ];
+    const step = await adapter.runStep({ request, messages, tools });
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "stream_interrupted");
+    assert.notProperty(step.assistantMessage, "tool_calls");
+    assert.equal(step.text, "");
+    const recovered = await adapter.runStep({
+      request,
+      messages,
+      continuationMessages: [
+        { role: "user", content: step.recoveryInstruction },
+      ],
+      tools,
+    });
+    assert.equal(recovered.kind, "final");
+    assert.notInclude(JSON.stringify(bodies[1]), '"partial"');
+    assert.notInclude(JSON.stringify(bodies[1]), "Unfinished text");
+    assert.include(JSON.stringify(bodies[1]), "Continue the recorded research");
+  });
+
+  for (const aborted of [false, true]) {
+    it(`does not retry ${aborted ? "an aborted stream" : "an unrelated parser failure"}`, async function () {
+      const error = new Error(
+        aborted ? "Error in input stream" : "Unrelated failure",
+      );
+      const controller = new AbortController();
+      if (aborted) controller.abort();
+      (globalThis as any).ztoolkit = {
+        getGlobal: (name: string) =>
+          name === "fetch"
+            ? async () => ({
+                ok: true,
+                headers: { get: () => "text/event-stream" },
+                body: new ReadableStream<Uint8Array>({
+                  start(stream) {
+                    stream.error(error);
+                  },
+                }),
+              })
+            : undefined,
+      };
+      let caught: unknown;
+      try {
+        await adapter.runStep({
+          request: makeRequest(),
+          messages: [],
+          tools,
+          signal: controller.signal,
+        });
+      } catch (failure) {
+        caught = failure;
+      }
+      assert.strictEqual(caught, error);
+    });
+  }
+
+  it("preserves a streamed provider output-limit stop instead of reporting a final answer", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: { get: () => "text/event-stream" },
+          body: makeSseStream([
+            'data: {"choices":[{"delta":{"reasoning_content":"Long unfinished analysis"}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+          json: async () => ({}),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await adapter.runStep({
+      request: makeRequest({ providerProtocol: "openai_chat_compat" }),
+      messages: [{ role: "user", content: "Screen the next batch" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
+    assert.include(step.recoveryInstruction, "required tool call");
+  });
+
+  it("preserves a non-streamed provider output-limit stop", async function () {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: { get: () => "application/json" },
+          body: undefined,
+          json: async () => ({
+            choices: [
+              {
+                finish_reason: "length",
+                message: { content: "Partial draft" },
+              },
+            ],
+          }),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await adapter.runStep({
+      request: makeRequest({ providerProtocol: "openai_chat_compat" }),
+      messages: [{ role: "user", content: "Write the document" }],
+      tools,
+    });
+
+    assert.equal(step.kind, "incomplete");
+    if (step.kind !== "incomplete") return;
+    assert.equal(step.reason, "output_limit");
   });
 
   it("round-trips DeepSeek reasoning_content across tool continuations", async function () {
@@ -861,5 +1071,116 @@ describe("OpenAICompatibleAgentAdapter", function () {
         "OpenAI-compatible chat cannot send unresolved PDF file_ref",
       );
     }
+  });
+});
+
+describe("OpenAICompatibleAgentAdapter output cap rejection", function () {
+  const originalToolkit = (
+    globalThis as typeof globalThis & { ztoolkit?: unknown }
+  ).ztoolkit;
+
+  afterEach(function () {
+    (
+      globalThis as typeof globalThis & { ztoolkit?: typeof originalToolkit }
+    ).ztoolkit = originalToolkit;
+  });
+
+  function installFetch(rejectionBody: string) {
+    const bodies: Array<Record<string, unknown>> = [];
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown; log: () => void };
+      }
+    ).ztoolkit = {
+      log: () => undefined,
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          bodies.push(body);
+          if (bodies.length === 1) {
+            return {
+              ok: false,
+              status: 400,
+              statusText: "Bad Request",
+              headers: { get: () => "application/json" },
+              body: undefined,
+              json: async () => ({}),
+              text: async () => rejectionBody,
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "text/event-stream" },
+            body: makeSseStream([
+              `data: ${JSON.stringify({
+                choices: [{ delta: { content: "done" } }],
+              })}\n\n`,
+              `data: ${JSON.stringify({
+                choices: [{ delta: {}, finish_reason: "stop" }],
+              })}\n\n`,
+              "data: [DONE]\n\n",
+            ]),
+            json: async () => ({}),
+            text: async () => "",
+          };
+        };
+      },
+    };
+    return bodies;
+  }
+
+  it("retries once with the provider's stated maximum", async function () {
+    const bodies = installFetch(
+      '{"error":{"message":"Invalid max_tokens value, the valid range of max_tokens is [1, 8192]","type":"invalid_request_error","code":400}}',
+    );
+    const adapter = new OpenAICompatibleAgentAdapter();
+    const step = await adapter.runStep({
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Summarize",
+        model: "deepseek-chat",
+        apiBase: "https://api.deepseek.com/v1",
+        apiKey: "test",
+        providerProtocol: "openai_chat_compat",
+        advanced: { outputTokenLimit: { mode: "auto" }, temperature: 0.3 },
+      },
+      messages: [{ role: "user", content: "Summarize the paper." }],
+      tools: [],
+    });
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0].max_tokens, 384_000);
+    assert.equal(bodies[1].max_tokens, 8_192);
+    assert.equal(step.kind, "final");
+  });
+
+  it("retries once without the cap when the rejection names no maximum", async function () {
+    const bodies = installFetch(
+      '{"error":{"message":"Unsupported parameter: max_tokens","code":400}}',
+    );
+    const adapter = new OpenAICompatibleAgentAdapter();
+    await adapter.runStep({
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Summarize",
+        model: "deepseek-reasoner",
+        apiBase: "https://api.deepseek.com/v1",
+        apiKey: "test",
+        providerProtocol: "openai_chat_compat",
+        advanced: { outputTokenLimit: { mode: "auto" }, temperature: 0.3 },
+      },
+      messages: [{ role: "user", content: "Summarize the paper." }],
+      tools: [],
+    });
+    assert.equal(bodies.length, 2);
+    assert.property(bodies[0], "max_tokens");
+    assert.notProperty(bodies[1], "max_tokens");
   });
 });

@@ -18,6 +18,7 @@ import {
   SEARCH_CONDITION_SCHEMA,
   parseSearchCondition,
 } from "../searchConditions";
+import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type QueryLibraryInput = {
   entity: QueryLibraryEntity;
@@ -266,6 +267,7 @@ export function createQueryLibraryTool(
       name: "query_library",
       description:
         "Discover Zotero items and collections. Every call must include entity and mode. Use text, not query, for search terms. Use it to search or list any item type (papers, books, notes, web pages, and more), filter by author/year/collection/itemType, browse the collection tree, find related papers, detect duplicates, or list standalone notes. By default returns all item types; use filters.hasPdf:true for PDF-backed papers only. For 'how many papers/items...' questions, use totalCount/returnedCount/limited instead of hand-counting the returned rows. " +
+        "Compact item rows already include itemId, itemKey, itemType, title, firstCreator, and year. Omit include when those catalog fields are sufficient; include metadata or abstract only when their full contents are actually needed. " +
         "For anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary, covering full text, abstract, DOI, publisher, dates added or modified, note and annotation text, citation key, retraction status and every other condition. Use filters.deleted:true to list the trash.",
       inputSchema: {
         type: "object",
@@ -405,16 +407,16 @@ export function createQueryLibraryTool(
           },
         },
       },
-      mutability: "read",
+      executionClass: "read",
       requiresConfirmation: false,
     },
     guidance: {
       matches: (request) =>
-        /\b(unfiled|folder|folders|collection|collections|move|file|organize|organise|categorize|categorise)\b/i.test(
-          request.userText,
-        ),
+        request.classifiedIntent?.actionIntents.some(
+          (action) => action.capability === "zotero.collections",
+        ) === true,
       instruction:
-        "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, call library_update with {kind:'collections', action:'add', itemIds:[...]} and let the confirmation card collect the target folders. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices.",
+        "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, resolve the destination with library_search or request clarification before proposing a library_update. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices.",
     },
     presentation: {
       label: "Query Library",
@@ -604,7 +606,35 @@ export function createQueryLibraryTool(
         view,
       });
     },
+    planInvocation: () =>
+      readOnlyInvocationPlan({
+        domains: ["zotero_library"],
+        reason: "The structured library query reads Zotero records only.",
+      }),
     execute: async (input, context) => {
+      if (input.entity === "itemTypes") {
+        // Item-type definitions are global Zotero metadata, not library data.
+        // Fields come back for a named type only. All ~35 types with their
+        // full field lists is a large payload to spend on "what types exist".
+        const result = zoteroGateway.listItemTypes({
+          itemType: input.filters?.itemType || input.text,
+        });
+        return withResultCounts({
+          entity: input.entity,
+          mode: input.mode,
+          results: result.itemTypes,
+        });
+      }
+      if (input.entity === "libraries") {
+        // Library enumeration is the bootstrap path for clients that do not
+        // yet know which explicit libraryID to send.
+        const results = zoteroGateway.listAllLibraries();
+        return withResultCounts({
+          entity: input.entity,
+          mode: input.mode,
+          results,
+        });
+      }
       const libraryID =
         input.libraryID ||
         zoteroGateway.resolveLibraryID({
@@ -642,6 +672,7 @@ export function createQueryLibraryTool(
         if (input.mode === "search") {
           const result = await queryService.searchNotes({
             libraryID,
+            collectionId: input.filters?.collectionId,
             text: input.text || "",
             limit: input.limit,
           });
@@ -655,6 +686,7 @@ export function createQueryLibraryTool(
         // list mode
         const result = await queryService.listStandaloneNotes({
           libraryID,
+          collectionId: input.filters?.collectionId,
           limit: input.limit,
         });
         return withResultCounts(
@@ -681,26 +713,6 @@ export function createQueryLibraryTool(
           entity: input.entity,
           mode: input.mode,
           results: filtered,
-        });
-      }
-      if (input.entity === "itemTypes") {
-        // Fields come back for a named type only. All ~35 types with their
-        // full field lists is a large payload to spend on "what types exist".
-        const result = zoteroGateway.listItemTypes({
-          itemType: input.filters?.itemType || input.text,
-        });
-        return withResultCounts({
-          entity: input.entity,
-          mode: input.mode,
-          results: result.itemTypes,
-        });
-      }
-      if (input.entity === "libraries") {
-        const results = zoteroGateway.listAllLibraries();
-        return withResultCounts({
-          entity: input.entity,
-          mode: input.mode,
-          results,
         });
       }
       if (input.entity === "tags") {

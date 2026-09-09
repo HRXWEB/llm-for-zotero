@@ -35,12 +35,59 @@ export type PdfTarget = {
   name?: string;
 };
 
-export type PaperTargetSelector = Readonly<
+export type PaperTargetSelector = Readonly<{
+  itemId: number;
+  contextItemId?: number;
+}>;
+export const PAPER_TARGET_SELECTOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["itemId"],
+  description:
+    "Paper identity only. Use the supplied itemId and optional contextItemId; never copy descriptive paper metadata into a selector.",
+  properties: {
+    itemId: { type: "integer", minimum: 1 },
+    contextItemId: { type: "integer", minimum: 1 },
+  },
+};
+
+export function paperTargetInputIssues(
+  args: Record<string, unknown>,
+): string[] {
+  const issues: string[] = [];
+  const entries = Array.isArray(args.targets)
+    ? args.targets.map((value, index) => ({ value, path: `targets[${index}]` }))
+    : args.target !== undefined
+      ? [{ value: args.target, path: "target" }]
+      : [];
+  for (const { value, path } of entries) {
+    if (!validateObject<Record<string, unknown>>(value)) {
+      issues.push(`${path} must be an object`);
+      continue;
+    }
+    for (const key of Object.keys(value))
+      if (!["itemId", "contextItemId"].includes(key))
+        issues.push(
+          `${path}.${key} is unsupported; use itemId and optional contextItemId only`,
+        );
+    if (!Number.isSafeInteger(value.itemId) || Number(value.itemId) < 1)
+      issues.push(`${path}.itemId must be a positive integer`);
+    if (
+      value.contextItemId !== undefined &&
+      (!Number.isSafeInteger(value.contextItemId) ||
+        Number(value.contextItemId) < 1)
+    )
+      issues.push(`${path}.contextItemId must be a positive integer`);
+  }
+  return issues;
+}
+
+export type ResolvedPaperTargetSelector = Readonly<
   Pick<PdfTarget, "paperContext" | "itemId" | "contextItemId">
 >;
 
-export type VisualPaperTargetSelector = Readonly<{
-  paperSelector?: PaperTargetSelector;
+export type VisualResolvedPaperTargetSelector = Readonly<{
+  paperSelector?: ResolvedPaperTargetSelector;
   attachmentId?: string;
   name?: string;
 }>;
@@ -57,11 +104,11 @@ export type ExplicitTargetSyntaxResult =
   | Readonly<{ kind: "omitted" }>
   | Readonly<{
       kind: "paper_selectors";
-      selectors: readonly PaperTargetSelector[];
+      selectors: readonly ResolvedPaperTargetSelector[];
     }>
   | Readonly<{
       kind: "visual_selector";
-      selector: VisualPaperTargetSelector;
+      selector: VisualResolvedPaperTargetSelector;
     }>
   | Readonly<{
       kind: "invalid";
@@ -155,9 +202,9 @@ function hasUnsupportedFields(
   return Object.keys(value).some((key) => !supported.has(key));
 }
 
-function toPaperTargetSelector(
+function toResolvedPaperTargetSelector(
   value: Record<string, unknown>,
-): PaperTargetSelector | null {
+): ResolvedPaperTargetSelector | null {
   const normalized = normalizeTarget(value);
   if (
     !normalized ||
@@ -208,7 +255,7 @@ export function normalizeExplicitTargetSyntax(params: {
       );
     }
     if (!params.targets.length) return { kind: "omitted" };
-    const selectors: PaperTargetSelector[] = [];
+    const selectors: ResolvedPaperTargetSelector[] = [];
     for (const [index, entry] of params.targets.entries()) {
       if (!validateObject<Record<string, unknown>>(entry)) {
         return invalidTargetSyntax(
@@ -225,10 +272,14 @@ export function normalizeExplicitTargetSyntax(params: {
       if (hasUnsupportedFields(entry, PAPER_TARGET_FIELDS)) {
         return invalidTargetSyntax(
           "unsupported_target_selector",
-          `targets[${index}] contains an unsupported paper selector.`,
+          `targets[${index}] has unsupported fields: ${Object.keys(entry)
+            .filter((field) => !PAPER_TARGET_FIELDS.has(field))
+            .join(
+              ", ",
+            )}. Use only paperContext, itemId, contextItemId; omit descriptive metadata.`,
         );
       }
-      const selector = toPaperTargetSelector(entry);
+      const selector = toResolvedPaperTargetSelector(entry);
       if (!selector) {
         return invalidTargetSyntax(
           "unsupported_target_selector",
@@ -269,7 +320,8 @@ export function normalizeExplicitTargetSyntax(params: {
         "attachmentId and name selectors are supported only for visual or capture reads.",
       );
     }
-    const paperSelector = toPaperTargetSelector(params.target) || undefined;
+    const paperSelector =
+      toResolvedPaperTargetSelector(params.target) || undefined;
     return {
       kind: "visual_selector",
       selector: {
@@ -279,7 +331,7 @@ export function normalizeExplicitTargetSyntax(params: {
       },
     };
   }
-  const selector = toPaperTargetSelector(params.target);
+  const selector = toResolvedPaperTargetSelector(params.target);
   if (!selector) {
     return invalidTargetSyntax(
       "unsupported_target_selector",
@@ -437,20 +489,7 @@ export function resolveDefaultTargets(
     )
     .map((entry) => entry.paper);
   const allPapers = scope.papers.map((entry) => entry.paper);
-  const userText = context.request.userText || "";
   const paperTargetIntent = context.request.classifiedIntent?.paperTargetIntent;
-  const requestsActivePaper =
-    /\b(?:this|the current|current|active)\s+(?:paper|article|study|document|pdf)\b/i.test(
-      userText,
-    );
-  const requestsAddedPapers =
-    /\b(?:the\s+)?(?:selected|added|attached)\s+(?:papers?|articles?|studies|documents?|pdfs?)\b/i.test(
-      userText,
-    );
-  const requestsAllVisiblePapers =
-    /\b(?:these|both|all(?:\s+of\s+the)?)\s+(?:papers?|articles?|studies|documents?|pdfs?)\b/i.test(
-      userText,
-    );
   const classifiedTargets =
     paperTargetIntent === "active"
       ? activePaper
@@ -467,28 +506,7 @@ export function resolveDefaultTargets(
               ? [activePaper]
               : allPapers
             : undefined;
-  const legacySummarizeTargets =
-    paperTargetIntent === undefined &&
-    context.request.classifiedIntent?.retrievalIntent === "summarize" &&
-    allPapers.length > 1
-      ? allPapers
-      : undefined;
-  // A failed classifier leaves classifiedIntent absent. In that degraded mode
-  // the English-only phrases above are the compatibility fallback, so requests
-  // expressed differently may require explicit target/targets selectors.
-  const heuristicTargets = requestsActivePaper
-    ? activePaper
-      ? [activePaper]
-      : []
-    : requestsAddedPapers
-      ? addedPapers
-      : requestsAllVisiblePapers
-        ? allPapers
-        : activePaper
-          ? [activePaper]
-          : allPapers;
-  const implicit =
-    classifiedTargets || legacySummarizeTargets || heuristicTargets;
+  const implicit = classifiedTargets || [];
   return dedupePaperContextRefs(implicit).slice(0, maxCount);
 }
 
@@ -498,15 +516,10 @@ export function resolveDefaultTargets(
 
 export type PdfVisualMode = "general" | "figure" | "equation";
 
-export function inferPdfMode(question: string | undefined): PdfVisualMode {
-  const text = `${question || ""}`.toLowerCase();
-  if (/\b(eq|equation|theorem|proof|formula|derivation)\b/.test(text)) {
-    return "equation";
-  }
-  if (/\b(fig|figure|table|diagram|chart|plot|graph|panel)\b/.test(text)) {
-    return "figure";
-  }
-  return "general";
+export function semanticPdfMode(
+  request: Pick<AgentToolContext["request"], "classifiedIntent">,
+): PdfVisualMode {
+  return request.classifiedIntent?.semantic?.visualMode || "general";
 }
 
 // ---------------------------------------------------------------------------

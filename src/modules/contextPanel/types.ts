@@ -65,6 +65,10 @@ export interface Message {
   timestamp: number;
   runMode?: "chat" | "agent";
   agentRunId?: string;
+  /** Durable identity of the document artifact rendered for this message. */
+  documentId?: string;
+  /** @deprecated Session-only Plan document hint. */
+  planDocumentId?: string;
   selectedText?: string;
   selectedTextExpanded?: boolean;
   selectedTextContexts?: SelectedTextContext[];
@@ -113,6 +117,16 @@ export interface Message {
    * normal `text` column, but this flag is not stored across restarts.
    */
   interrupted?: boolean;
+  /** Durable terminal state for provider-normalized direct-chat responses. */
+  completionStatus?: "complete" | "incomplete" | "blocked";
+  completionReason?:
+    | "output_limit"
+    | "context_limit"
+    | "provider_pause"
+    | "safety"
+    | "refusal"
+    | "malformed_tool_call"
+    | "other";
   webchatRunState?: "done" | "incomplete" | "error";
   webchatCompletionReason?:
     | "settled"
@@ -139,6 +153,7 @@ export type ReasoningProviderKind =
   | "qwen"
   | "grok"
   | "anthropic"
+  | "customized"
   | "local"
   | "unsupported";
 export type ReasoningLevelSelection = "none" | LLMReasoningLevel;
@@ -495,6 +510,8 @@ export type SendQuestionOptions = {
   /** [webchat] When true, send the prompt into a fresh ChatGPT conversation. */
   webchatForceNewChat?: boolean;
   skipAutoCompact?: boolean;
+  /** One-shot planning or approved-plan execution context. */
+  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 export type EditRetryOptions = {

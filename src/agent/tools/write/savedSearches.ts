@@ -71,7 +71,7 @@ export function createSavedSearchTool(
           },
         },
       },
-      mutability: "write",
+      executionClass: "external_effect",
       requiresConfirmation: true,
     },
 
@@ -189,7 +189,7 @@ export function createSavedSearchTool(
       return ok(input);
     },
 
-    planMutation: (input, context) =>
+    planInvocation: (input, context) =>
       planLibraryMutations(mutationService, [input.operation], context),
 
     async execute(input, context) {
