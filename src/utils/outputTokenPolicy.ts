@@ -167,9 +167,14 @@ export function resolveContextAllocation(params: {
     1,
     Math.floor(contextWindow * CONTEXT_USABLE_RATIO),
   );
+  // A user-chosen cap is reserved in full so the prompt planner leaves room
+  // for it; an Auto capability limit is the model's ceiling, not a request,
+  // and only the default answer window is held back for it.
   const requestedReserve =
     params.policy.mode === "numeric"
-      ? Math.min(params.policy.tokens, DEFAULT_OUTPUT_RESERVE_TOKENS)
+      ? params.policy.source === "custom"
+        ? params.policy.tokens
+        : Math.min(params.policy.tokens, DEFAULT_OUTPUT_RESERVE_TOKENS)
       : DEFAULT_OUTPUT_RESERVE_TOKENS;
   const answerReserveTokens = Math.max(
     1,
