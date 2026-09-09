@@ -529,6 +529,29 @@ export async function getLatestAgentRunForConversation(
   return toAgentRunRecord(rows?.[0]);
 }
 
+/** Every run of a conversation, oldest first; the flight report joins them to an execution. */
+export async function listAgentRunsForConversation(
+  conversationKey: number,
+): Promise<AgentRunRecord[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT run_id AS runId,
+            conversation_key AS conversationKey,
+            mode,
+            model_name AS modelName,
+            status,
+            created_at AS createdAt,
+            completed_at AS completedAt,
+            final_text AS finalText
+     FROM ${AGENT_RUNS_TABLE}
+     WHERE conversation_key = ?
+     ORDER BY created_at ASC, rowid ASC`,
+    [conversationKey],
+  )) as AgentRunRow[] | undefined;
+  return (rows || [])
+    .map((row) => toAgentRunRecord(row))
+    .filter((run): run is AgentRunRecord => Boolean(run));
+}
+
 export async function appendAgentRunEvent(
   runId: string,
   seq: number,

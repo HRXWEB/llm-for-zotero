@@ -147,7 +147,32 @@ import {
   getConversationWriteGeneration,
   bumpConversationWriteGeneration,
 } from "../../shared/conversationWriteFence";
-import { loadPlanDocumentOutbox } from "../../agent/documents/store";
+import {
+  loadLatestPlanDocumentForExecution,
+  loadPlanDocumentOutbox,
+} from "../../agent/documents/store";
+import { planExecutionCoordinator } from "../../agent/plans/coordinator";
+import {
+  loadPlanArtifact,
+  loadPlanExecutionLedger,
+} from "../../agent/plans/store";
+import {
+  buildResearchFlightReport,
+  renderResearchFlightReport,
+  type FlightRun,
+} from "../../agent/research/flightReport";
+import {
+  listPaperFindings,
+  listResearchCorpusItems,
+  listResearchEdges,
+  listResearchOpenQuestions,
+  listThemeFindings,
+  loadResearchJobForExecution,
+} from "../../agent/research/store";
+import {
+  getAgentRunTrace,
+  listAgentRunsForConversation,
+} from "../../agent/store/traceStore";
 import {
   activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
@@ -1664,6 +1689,101 @@ async function exerciseDuplicatePanelSetup(
     turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
       .length,
   };
+}
+
+async function approvePlanForExecution(input: {
+  planId: string;
+  revision: number;
+  expectedDigest?: string;
+}) {
+  assertWorkflowTestEnabled();
+  const artifact = await loadPlanArtifact(input.planId, input.revision);
+  if (!artifact) throw new Error("Plan revision not found");
+  const ledger = await planExecutionCoordinator.approve({
+    planId: input.planId,
+    revision: input.revision,
+    expectedDigest: input.expectedDigest || artifact.digest,
+    conversationGeneration: getConversationWriteGeneration(
+      artifact.conversationKey,
+    ),
+    actionContract: artifact.actionContract,
+  });
+  return {
+    executionId: ledger.executionId,
+    planDigest: ledger.planDigest,
+    activeTaskId: ledger.activeTaskId,
+    provider: ledger.provider,
+  };
+}
+
+async function researchFlightReport(input: { executionId: string }) {
+  assertWorkflowTestEnabled();
+  const job = await loadResearchJobForExecution(input.executionId);
+  if (!job) throw new Error("No research job for this execution");
+  const ledger = await loadPlanExecutionLedger(input.executionId);
+  const artifact = ledger
+    ? await loadPlanArtifact(ledger.planId, ledger.revision)
+    : null;
+  const [corpus, findings, edges, questions, themes, document] =
+    await Promise.all([
+      listResearchCorpusItems({ researchJobId: job.researchJobId }),
+      listPaperFindings(job.researchJobId),
+      listResearchEdges(job.researchJobId),
+      listResearchOpenQuestions(job.researchJobId),
+      listThemeFindings(job.researchJobId, job.scopeLineageDigest),
+      loadLatestPlanDocumentForExecution(input.executionId),
+    ]);
+  const runs: FlightRun[] = [];
+  if (ledger) {
+    for (const run of await listAgentRunsForConversation(
+      ledger.conversationKey,
+    )) {
+      if (run.createdAt < job.createdAt - 5 * 60_000) continue;
+      const trace = await getAgentRunTrace(run.runId);
+      const events = trace.events.map((event) => ({
+        type: event.eventType,
+        createdAt: event.createdAt,
+        payload: event.payload as unknown as Record<string, unknown>,
+      }));
+      if (
+        !events.some(
+          (event) =>
+            event.type === "tool_call" &&
+            String(event.payload.executionId || "") === input.executionId,
+        )
+      )
+        continue;
+      runs.push({
+        runId: run.runId,
+        status: run.status,
+        createdAt: run.createdAt,
+        completedAt: run.completedAt ?? undefined,
+        events,
+      });
+    }
+  }
+  const report = buildResearchFlightReport({
+    job,
+    corpus,
+    findings,
+    edges,
+    questions,
+    themes,
+    subquestions: artifact?.contract?.investigation?.subquestions || [],
+    ...(document
+      ? {
+          document: {
+            visibleMarkdown: document.visibleMarkdown,
+            clusters: document.citationBundle.clusters.map((cluster) => ({
+              citationId: cluster.citationId,
+              sources: cluster.sources,
+            })),
+          },
+        }
+      : {}),
+    ...(runs.length ? { runs } : {}),
+  });
+  return { report, rendered: renderResearchFlightReport(report) };
 }
 
 async function exerciseRebuiltPanelPlanApproval(panelId: string) {
@@ -4899,6 +5019,8 @@ export function installWorkflowTestHarness(targetAddon: {
     togglePanelConversationMode,
     exerciseDuplicatePanelSetup,
     exerciseRebuiltPanelPlanApproval,
+    approvePlanForExecution,
+    researchFlightReport,
     exercisePanelDraftStateRefresh,
     selectPanelModelEntry,
     exerciseWebChatPdfToggleWorkflow,
