@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { buildPaperDisplayLabels } from "../../shared/paperDisplayLabels";
 import { inspectResearch } from "./inspection";
 import { recordResearchReductions } from "./recordReductions";
@@ -63,10 +64,12 @@ export async function executeResearchUpdate(
 ) {
   const plan = context.request.planContext;
   if (!plan || plan.phase !== "executing") {
-    throw new Error("research_update requires approved plan execution");
+    throw new ToolInputRejection(
+      "research_update requires approved plan execution",
+    );
   }
   let job = await loadResearchJobForExecution(plan.executionId);
-  if (!job) throw new Error("This plan has no research job");
+  if (!job) throw new ToolInputRejection("This plan has no research job");
   if (
     job.status === "waiting_for_user" &&
     !(
@@ -74,7 +77,7 @@ export async function executeResearchUpdate(
       (input.outcome === "partial" || input.outcome === "failed")
     )
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Research is waiting for the deep-read checkpoint; call approve_research_expansion so the selected mode can decide, or finalize a user-authorized partial result",
     );
   }
@@ -83,17 +86,21 @@ export async function executeResearchUpdate(
     (entry) => entry.taskId === plan.activeTaskId,
   );
   if (!activeTask || activeTask.expectedEffect === "mutation") {
-    throw new Error(
+    throw new ToolInputRejection(
       "Research updates require an active non-mutation plan task",
     );
   }
   const artifact = await loadPlanArtifact(plan.planId, plan.revision);
   const investigation = artifact?.contract?.investigation;
   if (!artifact || !investigation || !artifact.contractDigest) {
-    throw new Error("The approved research contract is unavailable");
+    throw new ToolInputRejection(
+      "The approved research contract is unavailable",
+    );
   }
   if (job.contractDigest !== artifact.contractDigest) {
-    throw new Error("Research job contract digest no longer matches the plan");
+    throw new ToolInputRejection(
+      "Research job contract digest no longer matches the plan",
+    );
   }
   const adaptiveReview =
     investigation.readingStrategy === "adaptive" &&
@@ -201,7 +208,7 @@ export async function executeResearchUpdate(
     maxPapersPerRecord !== undefined &&
     input.papers.length > maxPapersPerRecord
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       `record_papers accepts at most ${maxPapersPerRecord} papers per call for this model (received ${input.papers.length}). Record this group in smaller calls; every accepted call is durable.`,
     );
   }
@@ -212,7 +219,7 @@ export async function executeResearchUpdate(
   const resumesAdaptiveInventory =
     input.operation === "inventory_scope" && effectiveStage !== "inventory";
   if (input.operation === "record_papers" && effectiveStage === "inventory") {
-    throw new Error(
+    throw new ToolInputRejection(
       "Use inventory_scope to inventory the frozen corpus, then advance to broad_screening",
     );
   }
@@ -227,7 +234,7 @@ export async function executeResearchUpdate(
       statuses: ["in_progress"],
     });
     if (!issued.length) {
-      throw new Error(
+      throw new ToolInputRejection(
         "Call next_screen_batch before recording broad-screening decisions",
       );
     }
@@ -245,7 +252,7 @@ export async function executeResearchUpdate(
       expected.size !== submitted.size ||
       [...expected].some((identity) => !submitted.has(identity))
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         "record_papers must commit exactly the current host-issued screening batch before more work is issued",
       );
     }
@@ -256,7 +263,7 @@ export async function executeResearchUpdate(
     input.stage === "broad_screening" &&
     corpus.some((entry) => !entry.inventoryRecorded)
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Inventory is incomplete; call inventory_scope before broad screening",
     );
   }
@@ -264,7 +271,7 @@ export async function executeResearchUpdate(
     input.operation === "record_probes" &&
     effectiveStage !== "recall_expansion"
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Recall probes may only be recorded during recall expansion",
     );
   }
@@ -272,7 +279,7 @@ export async function executeResearchUpdate(
     input.operation === "record_themes" &&
     effectiveStage !== "hierarchical_synthesis"
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       "Theme findings may only be recorded during hierarchical synthesis",
     );
   }
@@ -281,7 +288,7 @@ export async function executeResearchUpdate(
     job.frame &&
     !["structure", "writing"].includes(currentPhase(job))
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Themes are recorded in the structure phase after the edge list is verified; the loop is in the ${currentPhase(job)} phase. Use next_work to see what remains.`,
     );
   }
@@ -291,7 +298,7 @@ export async function executeResearchUpdate(
     job.frame &&
     !["writing", "complete"].includes(currentPhase(job))
   ) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Research finalizes from the writing phase; the loop is in the ${currentPhase(job)} phase. Advance through links, verification and structure with advance_phase first.`,
     );
   }
@@ -300,7 +307,9 @@ export async function executeResearchUpdate(
     input.outcome === "complete" &&
     job.activeStage !== "hierarchical_synthesis"
   ) {
-    throw new Error("Research can finalize only after all six stages");
+    throw new ToolInputRejection(
+      "Research can finalize only after all six stages",
+    );
   }
 
   let inventoriedItems: number | undefined;

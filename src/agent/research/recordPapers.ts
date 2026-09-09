@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import type { TaskEvidence, TrustedReadObservation } from "../plans/types";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import type { ZoteroGateway } from "../services/zoteroGateway";
@@ -96,7 +97,9 @@ export async function recordResearchPapers(params: {
     const current = corpusByKey.get(identity);
     const approvedSource = snapshotByKey.get(identity);
     if (!current || !approvedSource) {
-      throw new Error(`Paper ${identity} is outside the frozen corpus`);
+      throw new ToolInputRejection(
+        `Paper ${identity} is outside the frozen corpus`,
+      );
     }
     const liveItem = Zotero.Items.getByLibraryAndKey(libraryID, itemKey);
     if (!liveItem || liveItem.deleted) {
@@ -137,7 +140,9 @@ export async function recordResearchPapers(params: {
             : "unreadable"
         : undefined)) as ResearchCorpusItem["screeningStatus"];
     if (!SCREENING_STATUSES.has(status)) {
-      throw new Error(`papers[${index}].screeningStatus is invalid`);
+      throw new ToolInputRejection(
+        `papers[${index}].screeningStatus is invalid`,
+      );
     }
     const parsedCriterionResults = parseCriterionResults(
       raw.criterionResults || {},
@@ -148,7 +153,7 @@ export async function recordResearchPapers(params: {
       (criterionId) => !parsedCriterionResults[criterionId],
     );
     if (missingCriteria.length) {
-      throw new Error(
+      throw new ToolInputRejection(
         `papers[${index}].criterionResults must include every approved criterion: ${[
           ...allowedCriteria,
         ].join(", ")}`,
@@ -167,7 +172,7 @@ export async function recordResearchPapers(params: {
       deepReadPlanned: job.deepReadPlanned,
     });
     if (decisionError) {
-      throw new Error(`papers[${index}] ${decisionError}`);
+      throw new ToolInputRejection(`papers[${index}] ${decisionError}`);
     }
     const evidenceKeyMap = new Map<string, string>();
     const preferredRead = preferredReads.get(identity);
@@ -194,7 +199,7 @@ export async function recordResearchPapers(params: {
     ) {
       const entry = rawEvidence[evidenceIndex];
       if (!validateObject<Record<string, unknown>>(entry)) {
-        throw new Error(
+        throw new ToolInputRejection(
           `papers[${index}].evidence[${evidenceIndex}] must be an object`,
         );
       }
@@ -206,7 +211,9 @@ export async function recordResearchPapers(params: {
           sourceKind,
         )
       ) {
-        throw new Error(`Evidence ${evidenceKey} has an invalid sourceKind`);
+        throw new ToolInputRejection(
+          `Evidence ${evidenceKey} has an invalid sourceKind`,
+        );
       }
       const sourceReadRef =
         typeof entry.sourceReadRef === "string"
@@ -220,7 +227,7 @@ export async function recordResearchPapers(params: {
           observation.capabilities.includes(sourceKind),
       );
       if (!matchingReadObservations.length) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Evidence ${evidenceKey} sourceKind ${sourceKind} was not issued by a trusted observation of ${identity}`,
         );
       }
@@ -232,17 +239,19 @@ export async function recordResearchPapers(params: {
         ? liveFingerprints.attachmentFingerprint
         : liveFingerprints.metadataFingerprint;
       if (!fingerprint || fingerprint !== liveFingerprint) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Paper ${identity} changed after scope approval; revise or refresh the plan`,
         );
       }
       let locator: ResearchEvidenceRecord["locator"];
       if (entry.locator !== undefined) {
         if (!validateObject<Record<string, unknown>>(entry.locator)) {
-          throw new Error(`Evidence ${evidenceKey} locator is invalid`);
+          throw new ToolInputRejection(
+            `Evidence ${evidenceKey} locator is invalid`,
+          );
         }
         if (!["body", "figure", "quote"].includes(sourceKind)) {
-          throw new Error(
+          throw new ToolInputRejection(
             `Evidence ${evidenceKey} cannot attach a PDF locator to ${sourceKind}`,
           );
         }
@@ -255,7 +264,7 @@ export async function recordResearchPapers(params: {
           Math.floor(Number(entry.locator.pageIndex)),
         );
         if (!Number.isFinite(Number(entry.locator.pageIndex))) {
-          throw new Error(
+          throw new ToolInputRejection(
             `Evidence ${evidenceKey} locator pageIndex is invalid`,
           );
         }
@@ -291,7 +300,7 @@ export async function recordResearchPapers(params: {
         canonicalJson({ ...existing, createdAt: 0 }) !==
           canonicalJson({ ...record, createdAt: 0 })
       ) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Evidence key ${evidenceKey} was already used with different provenance`,
         );
       }
@@ -361,12 +370,12 @@ export async function recordResearchPapers(params: {
           ? []
           : strings(finding.criterionIds, "finding.criterionIds");
       if (subquestionIds.some((id) => !allowedSubquestions.has(id))) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Finding for ${identity} references an unknown subquestion\n${recordPaperExample()}`,
         );
       }
       if (criterionIds.some((id) => !allowedCriteria.has(id))) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Finding for ${identity} references an unknown criterion\n${recordPaperExample()}`,
         );
       }
@@ -381,7 +390,7 @@ export async function recordResearchPapers(params: {
           evidence.libraryID !== libraryID ||
           evidence.itemKey !== itemKey
         ) {
-          throw new Error(
+          throw new ToolInputRejection(
             `Finding for ${identity} has invalid evidence ${evidenceRef}`,
           );
         }
@@ -396,12 +405,12 @@ export async function recordResearchPapers(params: {
       if (
         !new Set(["include", "exclude", "unresolved"]).has(inclusionDecision)
       ) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Finding for ${identity} has invalid inclusionDecision\n${recordPaperExample()}`,
         );
       }
       if (!new Set(["low", "medium", "high"]).has(confidence)) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Finding for ${identity} has invalid confidence\n${recordPaperExample()}`,
         );
       }
@@ -418,7 +427,7 @@ export async function recordResearchPapers(params: {
           (role) => !(NARRATIVE_ROLES as readonly string[]).includes(role),
         )
       ) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Finding for ${identity} has an invalid role\n${recordPaperExample()}`,
         );
       }
@@ -532,7 +541,7 @@ export async function recordResearchPapers(params: {
       };
       writes.push(async () => savePaperFinding(record));
     } else if (adaptiveReview && status !== "missing") {
-      throw new Error(
+      throw new ToolInputRejection(
         `Adaptive review paper ${identity} requires a durable finding\n${recordPaperExample()}`,
       );
     } else if (recordStage === "broad_screening" && status === "excluded") {

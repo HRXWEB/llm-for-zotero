@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import type {
   ResearchContract,
   ResearchFrame,
@@ -84,10 +85,12 @@ export function refineResearchFrame(params: {
   const proposed = new Map(params.slots.map((slot) => [slot.slotId, slot]));
   for (const slot of params.slots) {
     if (identityIds.has(slot.slotId) && slot.kind !== "identity") {
-      throw new Error(`Frame slot ${slot.slotId} is an identity slot`);
+      throw new ToolInputRejection(
+        `Frame slot ${slot.slotId} is an identity slot`,
+      );
     }
     if (!identityIds.has(slot.slotId) && slot.kind === "identity") {
-      throw new Error(
+      throw new ToolInputRejection(
         `Frame slot ${slot.slotId} cannot be an identity slot; use kind comparison`,
       );
     }
@@ -100,7 +103,7 @@ export function refineResearchFrame(params: {
       identityIds.has(slot.slotId) || params.filledSlotIds.has(slot.slotId),
   );
   if (blocked.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Frame slots ${blocked.map((slot) => slot.slotId).join(", ")} cannot be removed: identity slots are fixed and a slot that a recorded node fills stays`,
     );
   }

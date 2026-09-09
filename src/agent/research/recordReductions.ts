@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { validateObject } from "../tools/shared";
 import type { ResearchUpdateInput } from "./commands";
@@ -43,18 +44,20 @@ export async function recordResearchReductions(params: {
       for (let index = 0; index < (input.probes || []).length; index += 1) {
         const raw = input.probes![index];
         if (!validateObject<Record<string, unknown>>(raw)) {
-          throw new Error(`probes[${index}] must be an object`);
+          throw new ToolInputRejection(`probes[${index}] must be an object`);
         }
         const kind = raw.kind as ResearchRecallProbe["kind"];
         if (!kinds.has(kind)) {
-          throw new Error(`probes[${index}].kind is invalid`);
+          throw new ToolInputRejection(`probes[${index}].kind is invalid`);
         }
         if (!Array.isArray(raw.addedTargets)) {
-          throw new Error(`probes[${index}].addedTargets must be an array`);
+          throw new ToolInputRejection(
+            `probes[${index}].addedTargets must be an array`,
+          );
         }
         const addedTargets = raw.addedTargets.map((target, targetIndex) => {
           if (!validateObject<Record<string, unknown>>(target)) {
-            throw new Error(
+            throw new ToolInputRejection(
               `probes[${index}].addedTargets[${targetIndex}] must be an object`,
             );
           }
@@ -67,7 +70,7 @@ export async function recordResearchReductions(params: {
             `probes[${index}].addedTargets[${targetIndex}].itemKey`,
           );
           if (!corpusByKey.has(`${libraryID}:${itemKey}`)) {
-            throw new Error(
+            throw new ToolInputRejection(
               `Recall probe target ${libraryID}:${itemKey} is outside the frozen corpus`,
             );
           }
@@ -89,7 +92,9 @@ export async function recordResearchReductions(params: {
         };
         const prior = existing.get(probeId);
         if (prior && canonicalJson(prior) !== canonicalJson(probe)) {
-          throw new Error(`Recall probe ${probeId} changed after persistence`);
+          throw new ToolInputRejection(
+            `Recall probe ${probeId} changed after persistence`,
+          );
         }
         if (!prior) await saveResearchRecallProbe(probe);
       }
@@ -123,7 +128,7 @@ export async function recordResearchReductions(params: {
       for (let index = 0; index < (input.themes || []).length; index += 1) {
         const raw = input.themes![index];
         if (!validateObject<Record<string, unknown>>(raw)) {
-          throw new Error(`themes[${index}] must be an object`);
+          throw new ToolInputRejection(`themes[${index}] must be an object`);
         }
         const paperFindingIds = [
           ...(raw.paperFindingIds === undefined
@@ -137,7 +142,7 @@ export async function recordResearchReductions(params: {
               ).map((identity) => {
                 const finding = findingByIdentity.get(identity);
                 if (!finding) {
-                  throw new Error(
+                  throw new ToolInputRejection(
                     `themes[${index}] references unknown paper identity ${identity}`,
                   );
                 }
@@ -145,7 +150,7 @@ export async function recordResearchReductions(params: {
               })),
         ].filter((id, position, all) => all.indexOf(id) === position);
         if (!paperFindingIds.length) {
-          throw new Error(
+          throw new ToolInputRejection(
             `themes[${index}] requires paperIdentities or paperFindingIds`,
           );
         }
@@ -160,12 +165,14 @@ export async function recordResearchReductions(params: {
               ]
             : strings(raw.evidenceRefs, `themes[${index}].evidenceRefs`);
         if (paperFindingIds.some((id) => !findingIds.has(id))) {
-          throw new Error(
+          throw new ToolInputRejection(
             `themes[${index}] references an unknown paper finding`,
           );
         }
         if (themeEvidenceRefs.some((id) => !evidenceRefs.has(id))) {
-          throw new Error(`themes[${index}] references unknown evidence`);
+          throw new ToolInputRejection(
+            `themes[${index}] references unknown evidence`,
+          );
         }
         const retainedEvidence = new Set(
           paperFindingIds.flatMap(
@@ -173,7 +180,7 @@ export async function recordResearchReductions(params: {
           ),
         );
         if (themeEvidenceRefs.some((id) => !retainedEvidence.has(id))) {
-          throw new Error(
+          throw new ToolInputRejection(
             `themes[${index}] uses evidence not retained by its paper findings`,
           );
         }
@@ -185,14 +192,14 @@ export async function recordResearchReductions(params: {
             ? []
             : strings(raw.edgeIds, `themes[${index}].edgeIds`);
         if (edges.length && themeIdentities.size >= 2 && !edgeIds.length) {
-          throw new Error(
+          throw new ToolInputRejection(
             `themes[${index}] spans ${themeIdentities.size} papers but names no edgeIds; a theme is a community in the graph, so cite the edges (from list_graph) that connect its papers`,
           );
         }
         for (const edgeId of edgeIds) {
           const edge = edgeById.get(edgeId);
           if (!edge) {
-            throw new Error(
+            throw new ToolInputRejection(
               `themes[${index}] names edge ${edgeId}, which is unknown, refuted, or merged`,
             );
           }
@@ -200,7 +207,7 @@ export async function recordResearchReductions(params: {
             !themeIdentities.has(edge.source) ||
             !themeIdentities.has(edge.target)
           ) {
-            throw new Error(
+            throw new ToolInputRejection(
               `themes[${index}] names edge ${edgeId} (${edge.source} -> ${edge.target}), but both papers must belong to the theme`,
             );
           }

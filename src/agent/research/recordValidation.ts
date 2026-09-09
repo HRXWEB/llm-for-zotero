@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { validateObject } from "../tools/shared";
 import type { ResearchCorpusItem, ResearchCriterion } from "./types";
 
@@ -114,17 +115,18 @@ export function getTerminalScreeningDecisionError(params: {
 }
 export function string(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${label} must be a non-empty string`);
+    throw new ToolInputRejection(`${label} must be a non-empty string`);
   }
   return value.trim();
 }
 export function strings(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (!Array.isArray(value))
+    throw new ToolInputRejection(`${label} must be an array`);
   return value.map((entry, index) => string(entry, `${label}[${index}]`));
 }
 export function positiveInt(value: unknown, label: string): number {
   if (!Number.isInteger(value) || Number(value) < 1) {
-    throw new Error(`${label} must be a positive integer`);
+    throw new ToolInputRejection(`${label} must be a positive integer`);
   }
   return Number(value);
 }
@@ -137,15 +139,17 @@ export function parseCriterionResults(
   label: string,
 ): Record<string, "met" | "not_met" | "unknown"> {
   if (!validateObject<Record<string, unknown>>(value)) {
-    throw new Error(`${label} must be an object`);
+    throw new ToolInputRejection(`${label} must be an object`);
   }
   const out: Record<string, "met" | "not_met" | "unknown"> = {};
   for (const [criterionId, result] of Object.entries(value)) {
     if (!allowed.has(criterionId)) {
-      throw new Error(`${label} references unknown criterion ${criterionId}`);
+      throw new ToolInputRejection(
+        `${label} references unknown criterion ${criterionId}`,
+      );
     }
     if (!new Set(["met", "not_met", "unknown"]).has(String(result))) {
-      throw new Error(`${label}.${criterionId} is invalid`);
+      throw new ToolInputRejection(`${label}.${criterionId} is invalid`);
     }
     out[criterionId] = result as "met" | "not_met" | "unknown";
   }

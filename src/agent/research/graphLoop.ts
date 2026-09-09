@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import type { TaskEvidence } from "../plans/types";
 import { validateObject } from "../tools/shared";
 import {
@@ -52,7 +53,7 @@ function requirePhase(
 ): void {
   const phase = currentPhase(job);
   if (!allowed.includes(phase)) {
-    throw new Error(
+    throw new ToolInputRejection(
       `${operation} is available in the ${allowed.join(", ")} phase${
         allowed.length > 1 ? "s" : ""
       }; the loop is in the ${phase} phase${
@@ -79,7 +80,9 @@ function identityOf(raw: Record<string, unknown>, key: string, label: string) {
   if (Number.isInteger(libraryID) && typeof itemKey === "string" && itemKey) {
     return `${libraryID}:${itemKey.trim()}`;
   }
-  throw new Error(`${label} must be a paper identity like 1:ABCD1234`);
+  throw new ToolInputRejection(
+    `${label} must be a paper identity like 1:ABCD1234`,
+  );
 }
 
 export type RecordedEdgeSummary = Pick<
@@ -132,28 +135,30 @@ export async function recordResearchEdges(params: {
   for (let index = 0; index < params.edges.length; index += 1) {
     const raw = params.edges[index];
     if (!validateObject<Record<string, unknown>>(raw)) {
-      throw new Error(`edges[${index}] must be an object`);
+      throw new ToolInputRejection(`edges[${index}] must be an object`);
     }
     const label = `edges[${index}]`;
     const source = identityOf(raw, "source", `${label}.source`);
     const target = identityOf(raw, "target", `${label}.target`);
     if (source === target) {
-      throw new Error(`${label} cannot relate ${source} to itself`);
+      throw new ToolInputRejection(
+        `${label} cannot relate ${source} to itself`,
+      );
     }
     for (const end of [source, target]) {
       if (!params.corpusByKey.has(end)) {
-        throw new Error(
+        throw new ToolInputRejection(
           `${label} names ${end}, which is outside the frozen corpus`,
         );
       }
       if (!nodeByIdentity.has(end)) {
-        throw new Error(
+        throw new ToolInputRejection(
           `${label} names ${end}, which has no durable node yet; record its node before linking it`,
         );
       }
     }
     if (!RESEARCH_EDGE_TYPES.includes(raw.type as ResearchEdgeType)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `${label}.type must be one of ${RESEARCH_EDGE_TYPES.join(", ")}`,
       );
     }
@@ -165,7 +170,9 @@ export async function recordResearchEdges(params: {
       ? (raw.confidence as ResearchFindingConfidence)
       : undefined;
     if (!confidence) {
-      throw new Error(`${label}.confidence must be low, medium, or high`);
+      throw new ToolInputRejection(
+        `${label}.confidence must be low, medium, or high`,
+      );
     }
     const claimIds = (
       value: unknown,
@@ -174,12 +181,12 @@ export async function recordResearchEdges(params: {
     ): string[] => {
       if (value === undefined) return [];
       if (!Array.isArray(value))
-        throw new Error(`${label}.${field} must be an array`);
+        throw new ToolInputRejection(`${label}.${field} must be an array`);
       const known = new Set((node.claims || []).map((claim) => claim.claimId));
       return value.map((entry) => {
         const claimId = string(entry, `${label}.${field}`);
         if (known.size && !known.has(claimId)) {
-          throw new Error(
+          throw new ToolInputRejection(
             `${label}.${field} names claim ${claimId}, which ${node.libraryID}:${node.itemKey} does not have (known: ${[...known].join(", ")})`,
           );
         }
@@ -341,15 +348,16 @@ export async function updateResearchEdges(params: {
   for (let index = 0; index < params.updates.length; index += 1) {
     const raw = params.updates[index];
     if (!validateObject<Record<string, unknown>>(raw)) {
-      throw new Error(`edges[${index}] must be an object`);
+      throw new ToolInputRejection(`edges[${index}] must be an object`);
     }
     const label = `edges[${index}]`;
     const edgeId = string(raw.edgeId, `${label}.edgeId`);
     const edge = byId.get(edgeId);
-    if (!edge) throw new Error(`${label} names unknown edge ${edgeId}`);
+    if (!edge)
+      throw new ToolInputRejection(`${label} names unknown edge ${edgeId}`);
     const status = raw.status as ResearchEdgeStatus | undefined;
     if (status !== undefined && !RESEARCH_EDGE_STATUSES.includes(status)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `${label}.status must be one of ${RESEARCH_EDGE_STATUSES.join(", ")}`,
       );
     }
@@ -373,7 +381,7 @@ export async function updateResearchEdges(params: {
         taskEvidence: params.taskEvidence,
       });
       if (!evidenceRefs.length) {
-        throw new Error(
+        throw new ToolInputRejection(
           `${label}: ${status} requires a targeted paper_read of ${edge.source} or ${edge.target} issued after the edge was recorded; read the pair with a specific query, then decide`,
         );
       }
@@ -388,7 +396,7 @@ export async function updateResearchEdges(params: {
       };
     } else if (status === "tentative") {
       if (!note) {
-        throw new Error(
+        throw new ToolInputRejection(
           `${label}: a tentative edge needs a note saying why it stays unverified`,
         );
       }
@@ -400,7 +408,9 @@ export async function updateResearchEdges(params: {
     } else if (status === "merged") {
       const mergedInto = string(raw.mergedInto, `${label}.mergedInto`);
       if (!byId.has(mergedInto) || mergedInto === edgeId) {
-        throw new Error(`${label}.mergedInto must name another existing edge`);
+        throw new ToolInputRejection(
+          `${label}.mergedInto must name another existing edge`,
+        );
       }
       next = { ...next, status, mergedInto };
     } else if (status === "candidate") {
@@ -468,7 +478,7 @@ export async function recordResearchQuestions(params: {
   for (let index = 0; index < params.questions.length; index += 1) {
     const raw = params.questions[index];
     if (!validateObject<Record<string, unknown>>(raw)) {
-      throw new Error(`questions[${index}] must be an object`);
+      throw new ToolInputRejection(`questions[${index}] must be an object`);
     }
     const label = `questions[${index}]`;
     const text = string(raw.text, `${label}.text`);
@@ -477,7 +487,7 @@ export async function recordResearchQuestions(params: {
       : { kind: "corpus" };
     const kind = scopeInput.kind as ResearchOpenQuestion["scope"]["kind"];
     if (!["subquestion", "edge", "node", "corpus"].includes(String(kind))) {
-      throw new Error(
+      throw new ToolInputRejection(
         `${label}.scope.kind must be subquestion, edge, node, or corpus`,
       );
     }
@@ -486,20 +496,28 @@ export async function recordResearchQuestions(params: {
         ? scopeInput.ref.trim()
         : undefined;
     if (kind === "edge" && (!ref || !edgeIds.has(ref))) {
-      throw new Error(`${label}.scope.ref must name an existing edge`);
+      throw new ToolInputRejection(
+        `${label}.scope.ref must name an existing edge`,
+      );
     }
     if (kind === "node" && (!ref || !params.corpusByKey.has(ref))) {
-      throw new Error(`${label}.scope.ref must name a corpus paper identity`);
+      throw new ToolInputRejection(
+        `${label}.scope.ref must name a corpus paper identity`,
+      );
     }
     if (kind === "subquestion" && (!ref || !params.subquestionIds.has(ref))) {
-      throw new Error(`${label}.scope.ref must name an approved subquestion`);
+      throw new ToolInputRejection(
+        `${label}.scope.ref must name an approved subquestion`,
+      );
     }
     const priority =
       raw.priority === undefined
         ? DEFAULT_PRIORITY[kind]
         : ([1, 2, 3] as const).find((value) => value === Number(raw.priority));
     if (!priority) {
-      throw new Error(`${label}.priority must be 1 (high), 2, or 3 (low)`);
+      throw new ToolInputRejection(
+        `${label}.priority must be 1 (high), 2, or 3 (low)`,
+      );
     }
     writes.push({
       version: 1,
@@ -543,16 +561,20 @@ export async function resolveResearchQuestions(params: {
   for (let index = 0; index < params.resolutions.length; index += 1) {
     const raw = params.resolutions[index];
     if (!validateObject<Record<string, unknown>>(raw)) {
-      throw new Error(`questions[${index}] must be an object`);
+      throw new ToolInputRejection(`questions[${index}] must be an object`);
     }
     const label = `questions[${index}]`;
     const questionId = string(raw.questionId, `${label}.questionId`);
     const question = byId.get(questionId);
     if (!question)
-      throw new Error(`${label} names unknown question ${questionId}`);
+      throw new ToolInputRejection(
+        `${label} names unknown question ${questionId}`,
+      );
     const status = raw.status;
     if (status !== "answered" && status !== "abandoned") {
-      throw new Error(`${label}.status must be answered or abandoned`);
+      throw new ToolInputRejection(
+        `${label}.status must be answered or abandoned`,
+      );
     }
     const text = string(raw.resolution, `${label}.resolution`);
     const evidenceRefs = Array.isArray(raw.evidenceRefs)
@@ -792,10 +814,10 @@ export async function advanceSynthesisPhase(params: {
 }): Promise<ResearchJob> {
   const now = params.now ?? Date.now();
   if (!RESEARCH_SYNTHESIS_PHASES.includes(params.to)) {
-    throw new Error(`Unknown phase ${String(params.to)}`);
+    throw new ToolInputRejection(`Unknown phase ${String(params.to)}`);
   }
   if (params.to === "complete") {
-    throw new Error("The complete phase is set by finalize");
+    throw new ToolInputRejection("The complete phase is set by finalize");
   }
   const [findings, edges, themes] = await Promise.all([
     listPaperFindings(params.job.researchJobId),
@@ -811,7 +833,7 @@ export async function advanceSynthesisPhase(params: {
     themes,
   });
   if (!gate.ok) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Cannot advance to ${params.to}:\n- ${gate.blockers.join("\n- ")}`,
     );
   }

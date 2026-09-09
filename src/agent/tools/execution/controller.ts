@@ -1,5 +1,5 @@
 import { recordJournalObservation } from "../../store/changeJournal";
-import { ToolExecutionFailure } from "./failure";
+import { ToolExecutionFailure, ToolInputRejection } from "./failure";
 import { buildActionCallDigest } from "../../authorization/proposal";
 import type {
   ActionContractService,
@@ -179,6 +179,9 @@ export class InvocationController {
         callId: this.call.id,
         name: this.call.name,
         ok: false,
+        ...(error instanceof ToolInputRejection
+          ? { inputRejected: true as const }
+          : {}),
         actionReceipts: this.receipts(
           {
             ok: false,

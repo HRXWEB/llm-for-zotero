@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { minimumClaimsForTier, requiredFrameSlots } from "./frame";
 import {
   decodeResearchCandidateLink,
@@ -70,7 +71,7 @@ export function buildNodeRecordFields(
           if (
             !RESEARCH_PAPER_TIERS.includes(finding.tier as ResearchPaperTier)
           ) {
-            throw new Error(
+            throw new ToolInputRejection(
               `Node for ${identity} has an invalid tier; use core, supporting, or peripheral`,
             );
           }
@@ -93,7 +94,7 @@ export function buildNodeRecordFields(
     .map((slot) => slot.slotId)
     .filter((slotId) => !frameSlots[slotId]);
   if (missingSlots.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} is missing frame slots ${missingSlots.join(", ")}; a ${tier} node fills ${
         tier === "core" ? "every frame slot" : "the identity slots"
       } (write "not_reported" when the paper is silent on one)`,
@@ -101,13 +102,13 @@ export function buildNodeRecordFields(
   }
 
   if (!Array.isArray(finding.claims) || !finding.claims.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} requires claims[]: each claim states one thing the paper shows, its kind, the subquestions it answers, and the evidence it rests on`,
     );
   }
   const minimum = minimumClaimsForTier(tier);
   if (finding.claims.length < minimum) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} needs at least ${minimum} claims for its ${tier} tier (received ${finding.claims.length})`,
     );
   }
@@ -122,7 +123,9 @@ export function buildNodeRecordFields(
         ? raw.claimId.trim()
         : `${input.itemKey}:c${index + 1}`;
     if (seenClaimIds.has(claimId)) {
-      throw new Error(`Node for ${identity} repeats claim id ${claimId}`);
+      throw new ToolInputRejection(
+        `Node for ${identity} repeats claim id ${claimId}`,
+      );
     }
     seenClaimIds.add(claimId);
     const decoded = decodeResearchClaim(
@@ -135,14 +138,14 @@ export function buildNodeRecordFields(
     );
     for (const subquestionId of decoded.subquestionIds) {
       if (!input.allowedSubquestions.has(subquestionId)) {
-        throw new Error(
+        throw new ToolInputRejection(
           `Claim ${claimId} of ${identity} references unknown subquestion ${subquestionId}`,
         );
       }
     }
     const allowedDepth = input.readDepth ? DEPTH_RANK[input.readDepth] : -1;
     if (DEPTH_RANK[decoded.evidence.sourceKind] > allowedDepth) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Claim ${claimId} of ${identity} cites ${decoded.evidence.sourceKind} evidence but the host-verified read depth of this paper is ${
           input.readDepth || "none"
         }; read the paper at that depth first or lower the claim's evidence kind`,
@@ -152,7 +155,7 @@ export function buildNodeRecordFields(
       decoded.evidence.pageIndex !== undefined &&
       decoded.evidence.sourceKind !== "body"
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Claim ${claimId} of ${identity} carries a page locator without body evidence`,
       );
     }
@@ -160,7 +163,7 @@ export function buildNodeRecordFields(
       decoded.evidence.quote !== undefined &&
       decoded.evidence.quote.length > MAX_CLAIM_QUOTE_CHARS
     ) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Claim ${claimId} of ${identity} quote exceeds ${MAX_CLAIM_QUOTE_CHARS} characters`,
       );
     }
@@ -177,7 +180,7 @@ export function buildNodeRecordFields(
     ...new Set(claims.flatMap((claim) => claim.subquestionIds)),
   ];
   if (tier === "core" && !subquestionIds.length) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} answers no approved subquestion; tag each claim with the subquestion it answers`,
     );
   }
@@ -189,12 +192,12 @@ export function buildNodeRecordFields(
       ? finding.noLinkSeen.trim()
       : undefined;
   if (hasLinks && noLinkSeen) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} must provide either candidateLinks or noLinkSeen, not both`,
     );
   }
   if (!hasLinks && !noLinkSeen) {
-    throw new Error(
+    throw new ToolInputRejection(
       `Node for ${identity} must name its relationships: provide candidateLinks with at least one link to another corpus paper, or noLinkSeen with the reason no link was found`,
     );
   }
@@ -205,10 +208,12 @@ export function buildNodeRecordFields(
           `candidateLinks[${index}]`,
         );
         if (link.target === identity) {
-          throw new Error(`Node for ${identity} cannot link to itself`);
+          throw new ToolInputRejection(
+            `Node for ${identity} cannot link to itself`,
+          );
         }
         if (!input.corpusIdentities.has(link.target)) {
-          throw new Error(
+          throw new ToolInputRejection(
             `Node for ${identity} links to ${link.target}, which is outside the frozen corpus`,
           );
         }
@@ -222,7 +227,7 @@ export function buildNodeRecordFields(
       ? undefined
       : (() => {
           if (!Array.isArray(finding.questionsRaised)) {
-            throw new Error(
+            throw new ToolInputRejection(
               `Node for ${identity} questionsRaised must be an array`,
             );
           }
@@ -236,7 +241,7 @@ export function buildNodeRecordFields(
                 ? raw.about.trim()
                 : undefined;
             if (about && !input.corpusIdentities.has(about)) {
-              throw new Error(
+              throw new ToolInputRejection(
                 `Node for ${identity} raises a question about ${about}, which is outside the frozen corpus`,
               );
             }

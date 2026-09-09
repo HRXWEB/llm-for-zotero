@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { resolveOutputReserve } from "../../utils/outputTokenPolicy";
 import type { AgentToolContext } from "../types";
 import { refineResearchFrame } from "./frame";
@@ -216,10 +217,12 @@ export async function applyFrameRevision(params: {
 }): Promise<ResearchJob> {
   const now = params.now ?? Date.now();
   if (!params.job.frame) {
-    throw new Error("This research job has no comparison frame to refine");
+    throw new ToolInputRejection(
+      "This research job has no comparison frame to refine",
+    );
   }
   if ((params.job.synthesisPhase || "nodes") !== "nodes") {
-    throw new Error(
+    throw new ToolInputRejection(
       "The comparison frame is frozen once the link pass begins; nodes already fill it",
     );
   }
@@ -266,10 +269,12 @@ export function parseTierDecisions(value: unknown[]): TierDecision[] {
           ? `${Number(raw.libraryID)}:${raw.itemKey.trim()}`
           : "";
     if (!identity) {
-      throw new Error(`tiers[${index}] requires identity (libraryID:itemKey)`);
+      throw new ToolInputRejection(
+        `tiers[${index}] requires identity (libraryID:itemKey)`,
+      );
     }
     if (!RESEARCH_PAPER_TIERS.includes(raw.tier as ResearchPaperTier)) {
-      throw new Error(
+      throw new ToolInputRejection(
         `tiers[${index}].tier must be core, supporting, or peripheral`,
       );
     }
@@ -295,7 +300,9 @@ export async function applyTierDecisions(params: {
 }): Promise<ResearchCorpusItem[]> {
   const now = params.now ?? Date.now();
   if ((params.job.synthesisPhase || "nodes") !== "nodes") {
-    throw new Error("Tiers can be revised only while nodes are being recorded");
+    throw new ToolInputRejection(
+      "Tiers can be revised only while nodes are being recorded",
+    );
   }
   const byIdentity = new Map(
     params.corpus.map((item) => [`${item.libraryID}:${item.itemKey}`, item]),
@@ -304,13 +311,13 @@ export async function applyTierDecisions(params: {
   for (const decision of params.decisions) {
     const item = byIdentity.get(decision.identity);
     if (!item) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Paper ${decision.identity} is outside the frozen corpus`,
       );
     }
     if (item.tier === decision.tier) continue;
     if (!decision.reason) {
-      throw new Error(
+      throw new ToolInputRejection(
         `Changing ${decision.identity} from ${item.tier || "core"} to ${decision.tier} requires a reason`,
       );
     }
@@ -330,7 +337,7 @@ export async function applyTierDecisions(params: {
       return next.screeningStatus !== "missing" && next.tier === "core";
     }).length;
     if (coreCount > capacity.fullNodeCapacity) {
-      throw new Error(
+      throw new ToolInputRejection(
         `At most ${capacity.fullNodeCapacity} core papers fit the link view for this model (requested ${coreCount}); keep the rest supporting or peripheral`,
       );
     }

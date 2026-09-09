@@ -1,3 +1,4 @@
+import { ToolInputRejection } from "../tools/execution/failure";
 import { RESEARCH_STAGES, type ResearchStage } from "./policy";
 import {
   listPaperFindings,
@@ -18,7 +19,7 @@ export function assertResearchTransition(state: {
 }): void {
   if (state.next === state.current) return;
   if (!state.inventoryComplete)
-    throw new Error(
+    throw new ToolInputRejection(
       "Inventory is incomplete; call inventory_scope before advancing research.",
     );
   const before = RESEARCH_STAGES.indexOf(state.current);
@@ -30,7 +31,7 @@ export function assertResearchTransition(state: {
   )
     return;
   if (after < before || after > before + 1)
-    throw new Error(
+    throw new ToolInputRejection(
       "Research stages must advance in order; adaptive synthesis requires durable findings for every paper.",
     );
   if (
@@ -38,9 +39,11 @@ export function assertResearchTransition(state: {
     after >= RESEARCH_STAGES.indexOf("recall_expansion") &&
     !state.screeningComplete
   )
-    throw new Error("Complete broad screening before advancing research.");
+    throw new ToolInputRejection(
+      "Complete broad screening before advancing research.",
+    );
   if (state.next === "hierarchical_synthesis" && !state.findingsComplete)
-    throw new Error(
+    throw new ToolInputRejection(
       "Record durable paper findings before hierarchical synthesis.",
     );
 }
