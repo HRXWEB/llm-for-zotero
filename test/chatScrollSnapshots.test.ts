@@ -176,7 +176,8 @@ function matchesSelector(element: FakeElement, selector: string): boolean {
     );
     return Boolean(element.dataset[key]);
   }
-  return false;
+  // Like the DOM, an unparseable selector is a SyntaxError, not a miss.
+  throw new SyntaxError(`'${selector}' is not a valid selector`);
 }
 
 function makeChatBox(params: {
@@ -250,6 +251,52 @@ describe("chat scroll snapshots", function () {
       1100,
       "the third card must stay at the top of the viewport",
     );
+  });
+
+  it("restores a quote card whose sync key contains a double quote", function () {
+    clearChatScrollSnapshotsForTests();
+    const chatBox = makeChatBox({
+      scrollTop: 500,
+      scrollHeight: 2000,
+      clientHeight: 100,
+    });
+    const wrapper = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 0,
+      offsetHeight: 2000,
+      dataset: {
+        messageRole: "assistant",
+        messageTimestamp: "2",
+        messageAnchorKey: "turn-2",
+      },
+    });
+    // A card with no citation id, whose inline citation carries a sync key
+    // built from the quoted prose itself — including its double quotes.
+    const card = appendElement(wrapper, "llm-quote-card", {
+      offsetTop: 500,
+      offsetHeight: 40,
+    });
+    const button = appendElement(card, "llm-citation-button", {
+      offsetTop: 510,
+      offsetHeight: 10,
+      dataset: {
+        citationSyncKey: 'source\u241fthey called it a "null result" here',
+      },
+    });
+    // The reader clicked that citation; it becomes the restore anchor.
+    persistPendingChatScrollRestoreForConversationKey(
+      11,
+      chatBox,
+      button as unknown as Element,
+    );
+    const snapshot = getChatScrollSnapshot(11);
+    assert.equal(snapshot?.anchor?.kind, "quote");
+    assert.equal(snapshot?.anchor?.quoteOrdinal, 0);
+    assert.isUndefined(snapshot?.anchor?.quoteCitationId);
+
+    card.offsetTop += 100;
+    card.children[0].offsetTop += 100;
+    assert.doesNotThrow(() => applyChatScrollSnapshot(chatBox, snapshot!));
+    assert.equal(chatBox.scrollTop, 600, "the card must stay where it was");
   });
 
   describe("settleFollowBottomIntent", function () {
