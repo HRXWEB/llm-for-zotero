@@ -24,6 +24,8 @@ export function progress(job: ResearchJob): ResearchProgress {
     deepReadCompleted: job.deepReadCompleted,
     deepReadPlanned: job.deepReadPlanned,
     coverageStatus: job.coverageStatus,
+    ...(job.synthesisPhase ? { phase: job.synthesisPhase } : {}),
+    ...(job.qualityReport ? { quality: job.qualityReport } : {}),
   };
 }
 export async function recomputeJob(params: {

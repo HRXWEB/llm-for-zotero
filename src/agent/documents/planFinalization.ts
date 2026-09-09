@@ -6,12 +6,17 @@ import {
 import { assertTaskCompletionEvidence } from "../plans/taskState";
 import type { PlanExecutionLedger, TaskEvidence } from "../plans/types";
 import { getResearchItemFingerprints } from "../research/scopeSnapshot";
+import { computeResearchQualityReport } from "../research/rubric";
 import {
   listPaperFindings,
   listResearchCorpusItems,
+  listResearchEdges,
   listResearchEvidence,
+  listResearchOpenQuestions,
   listScopeSnapshotItems,
+  listThemeFindings,
   loadResearchJobForExecution,
+  saveResearchJob,
 } from "../research/store";
 import type {
   ResearchCorpusItem,
@@ -258,12 +263,16 @@ export class PlanDocumentFinalizer {
     const corpusKeys = new Set(
       corpusSnapshot.map((entry) => `${entry.libraryID}:${entry.itemKey}`),
     );
-    const coverageItems = researchJob
-      ? (
-          await listResearchCorpusItems({
-            researchJobId: researchJob.researchJobId,
-          })
-        ).map((item) => coverageItem(item, researchEvidence))
+    const researchCorpus = researchJob
+      ? await listResearchCorpusItems({
+          researchJobId: researchJob.researchJobId,
+        })
+      : [];
+    const coverageItems = researchCorpus.map((item) =>
+      coverageItem(item, researchEvidence),
+    );
+    const researchEdges = researchJob
+      ? await listResearchEdges(researchJob.researchJobId)
       : [];
     const documentVersion = await nextPlanDocumentVersion({
       planId: artifact.planId,
@@ -296,6 +305,14 @@ export class PlanDocumentFinalizer {
         quoteCorpusKeys: corpusKeys,
         coverageItems,
         coverageStatus: researchJob?.coverageStatus,
+        ...(researchJob && artifact.contract.investigation
+          ? {
+              researchGraph: {
+                edges: researchEdges,
+                qualityReport: researchJob.qualityReport,
+              },
+            }
+          : {}),
         validateAssetProvenance: async () => {
           for (const asset of params.input.assets) {
             if (asset.provenance.origin === "generated") {
@@ -377,6 +394,39 @@ export class PlanDocumentFinalizer {
       },
     });
     const { document } = finalized;
+    // The rubric gains the document's cross-paper support numbers; it stays
+    // on the job so the flight report and the progress card read one record.
+    if (
+      researchJob &&
+      finalized.supportAudit &&
+      artifact.contract.investigation
+    ) {
+      const [findings, questions, themes] = await Promise.all([
+        listPaperFindings(researchJob.researchJobId),
+        listResearchOpenQuestions(researchJob.researchJobId),
+        listThemeFindings(
+          researchJob.researchJobId,
+          researchJob.scopeLineageDigest,
+        ),
+      ]);
+      await saveResearchJob(
+        {
+          ...researchJob,
+          qualityReport: computeResearchQualityReport({
+            corpus: researchCorpus,
+            findings,
+            edges: researchEdges,
+            questions,
+            themes,
+            subquestions: artifact.contract.investigation.subquestions,
+            audit: finalized.supportAudit,
+            now,
+          }),
+          updatedAt: Math.max(now, researchJob.updatedAt + 1),
+        },
+        ledger.conversationKey,
+      );
+    }
     const integrityEvidence: TaskEvidence = {
       version: 3,
       evidenceId: `${documentId}:integrity`,

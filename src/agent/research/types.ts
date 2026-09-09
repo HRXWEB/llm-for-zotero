@@ -487,6 +487,8 @@ export type ResearchProgress = Readonly<{
   deepReadCompleted: number;
   deepReadPlanned: number;
   coverageStatus?: ResearchCoverageStatus;
+  phase?: ResearchSynthesisPhase;
+  quality?: ResearchQualityReport;
 }>;
 
 export type ResearchMutationApprovalGrant = Readonly<{

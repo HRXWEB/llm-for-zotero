@@ -404,7 +404,15 @@ export function renderPlanProgress(
     if (research?.type === "plan_research_progress") {
       const text = doc.createElement("div");
       text.className = "llm-plan-research-progress";
-      text.textContent = `Screened ${research.progress.screenedItems.toLocaleString()}/${research.progress.totalItems.toLocaleString()}; deep-read ${research.progress.deepReadCompleted.toLocaleString()}/${research.progress.candidateItems.toLocaleString()}`;
+      const quality = research.progress.quality;
+      const phase = research.progress.phase;
+      text.textContent = `Screened ${research.progress.screenedItems.toLocaleString()}/${research.progress.totalItems.toLocaleString()}; deep-read ${research.progress.deepReadCompleted.toLocaleString()}/${research.progress.candidateItems.toLocaleString()}${
+        phase && phase !== "complete" ? `; phase ${phase}` : ""
+      }${
+        quality
+          ? `; ${quality.edges.toLocaleString()} relationships (${quality.edgesVerified.toLocaleString()} verified)`
+          : ""
+      }`;
       content.appendChild(text);
     }
     if (presentation.childNodes.length)

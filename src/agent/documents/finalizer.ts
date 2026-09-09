@@ -8,7 +8,18 @@ import {
   formatDocumentCitations,
   type DocumentCitationEvidence,
 } from "./citationService";
+import {
+  buildVerificationSummary,
+  ensureCoverageSection,
+} from "./coverageSection";
 import { assertDocumentDraftValid, collectHeadings } from "./draftValidation";
+import {
+  auditCrossPaperSupport,
+  describeUnsupportedParagraphs,
+  type SupportAuditEdge,
+  type SupportAuditResult,
+} from "./supportAudit";
+import type { ResearchQualityReport } from "../research/types";
 import {
   utf8Bytes,
   validateAssets,
@@ -43,11 +54,20 @@ type DocumentFinalizationContext = Pick<
   quoteCorpusKeys: ReadonlySet<string>;
   /** Source owners attest figures against their native observations or research ledger. */
   validateAssetProvenance: () => void | Promise<void>;
+  /**
+   * The research network behind a research-grounded document: the edges the
+   * support audit checks and the rubric the calibration paragraph reports.
+   */
+  researchGraph?: Readonly<{
+    edges: readonly SupportAuditEdge[];
+    qualityReport?: ResearchQualityReport;
+  }>;
 };
 
 type FinalizedDocument = {
   document: DocumentArtifactV2;
   outbox: PlanDocumentOutboxRecord;
+  supportAudit?: SupportAuditResult;
 };
 
 /** One integrity pipeline for every origin; source acquisition stays with its owner. */
@@ -73,8 +93,41 @@ export async function finalizeDocument(params: {
     throw new Error("The approved document spec does not allow figures");
   if (utf8Bytes(input.markdown) > PLAN_DOCUMENT_MARKDOWN_MAX_BYTES)
     throw new Error("Document Markdown exceeds the 2 MiB limit");
+  // A valid citation is not a supported claim: every synthesis paragraph that
+  // cites two or more papers must rest on recorded relationships. The repair
+  // is to record the missing edge (still allowed while the document task is
+  // active) or to rewrite the sentence as separate claims.
+  const supportAudit = context.researchGraph
+    ? auditCrossPaperSupport({
+        markdown: input.markdown,
+        clusters: input.citations,
+        edges: context.researchGraph.edges,
+      })
+    : undefined;
+  if (supportAudit?.unsupported.length) {
+    throw new Error(
+      `Document support audit failed: ${supportAudit.unsupported.length} cross-paper paragraph${
+        supportAudit.unsupported.length === 1 ? "" : "s"
+      } cite papers with no recorded relationship between them.\n${describeUnsupportedParagraphs(
+        supportAudit.unsupported,
+      )}\nRecord the relationship with research_update record_edges (source, target, type, statement, confidence) and resubmit, or rewrite those sentences as separate per-paper claims.`,
+    );
+  }
+  // Calibration is host data: what was read, how deeply, what was verified.
+  // It joins the model's scope-and-limitations section, or becomes that
+  // section when the model omitted it, instead of rejecting the document.
+  const calibratedMarkdown =
+    context.researchGraph && spec.requiresCoverageSection
+      ? ensureCoverageSection({
+          markdown: input.markdown,
+          summary: buildVerificationSummary({
+            coverageItems: context.coverageItems,
+            report: context.researchGraph?.qualityReport,
+          }),
+        })
+      : input.markdown;
   assertDocumentDraftValid({
-    markdown: input.markdown,
+    markdown: calibratedMarkdown,
     requiredSections: spec.requiredSections,
     requiresCoverageSection: spec.requiresCoverageSection,
     validateQuotes: planned,
@@ -82,10 +135,10 @@ export async function finalizeDocument(params: {
   if (
     !planned &&
     !researchGrounded &&
-    collectHeadings(input.markdown).size === 0
+    collectHeadings(calibratedMarkdown).size === 0
   )
     throw new Error("A document must contain at least one Markdown heading");
-  validateVisibleDocumentPrivacy(input.markdown);
+  validateVisibleDocumentPrivacy(calibratedMarkdown);
   validateAssets(input.assets, requireEvidence);
   if (
     input.groundingReviewed === "passed_with_limitations" &&
@@ -95,7 +148,7 @@ export async function finalizeDocument(params: {
       "A grounding review with limitations must record the detected issues",
     );
   const resolvedQuotes = await resolveVerifiedQuotes({
-    markdown: input.markdown,
+    markdown: calibratedMarkdown,
     quotes: input.quotes,
     corpusKeys: context.quoteCorpusKeys,
     evidenceByRef: new Map(
@@ -165,6 +218,7 @@ export async function finalizeDocument(params: {
   };
   return {
     document,
+    ...(supportAudit ? { supportAudit } : {}),
     outbox: {
       version: 1,
       outboxId: `${document.documentId}:message`,

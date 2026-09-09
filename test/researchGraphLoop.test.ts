@@ -538,3 +538,175 @@ describe("research structure phase", function () {
     assert.equal(finalJob.status, "completed");
   });
 });
+
+describe("document support audit in the plan finalizer", function () {
+  const originalZotero = (globalThis as any).Zotero;
+  let harness: ResearchHarness | undefined;
+  afterEach(function () {
+    harness?.close();
+    harness = undefined;
+    (globalThis as any).Zotero = originalZotero;
+  });
+
+  const spec = {
+    kind: "literature_review",
+    title: "Latent State Review",
+    requiredSections: ["Introduction", "Thematic synthesis", "References"],
+    requiresReferences: true,
+    requiresCoverageSection: true,
+    allowFigures: false,
+    citationStyle: {
+      styleId: "http://www.zotero.org/styles/apa",
+      styleTitle: "APA",
+      locale: "en-US",
+    },
+  };
+
+  async function completeResearch(h: ResearchHarness) {
+    await recordAllNodes(h);
+    const { edges } = await h.run({
+      operation: "record_edges",
+      edges: [
+        {
+          source: "1:PAPER001",
+          target: "1:PAPER002",
+          type: "extends",
+          statement: "Two extends one.",
+          confidence: "high",
+        },
+        {
+          source: "1:PAPER002",
+          target: "1:PAPER003",
+          type: "contradicts",
+          statement: "Three contradicts two.",
+          confidence: "low",
+        },
+      ],
+    });
+    await h.run({ operation: "advance_phase", phase: "verification" });
+    await h.verifiedRead(["PAPER003"], "body", {
+      pageIndex: 2,
+      mode: "targeted",
+    });
+    await h.run({
+      operation: "update_edges",
+      edges: [
+        { edgeId: edges[1].edgeId, status: "verified", note: "Table 1." },
+      ],
+    });
+    await h.run({ operation: "advance_phase", phase: "structure" });
+    await h.run({
+      operation: "record_themes",
+      themes: [
+        {
+          themeId: "T1",
+          title: "Latent state",
+          synthesis: "One story with a contradiction.",
+          limitations: [],
+          paperIdentities: ["1:PAPER001", "1:PAPER002", "1:PAPER003"],
+          edgeIds: [edges[0].edgeId, edges[1].edgeId],
+        },
+      ],
+    });
+    await h.run({ operation: "advance_phase", phase: "writing" });
+    await h.run({ operation: "finalize", outcome: "complete" });
+    return edges;
+  }
+
+  const citations = [
+    {
+      citationId: "C1",
+      sources: [{ libraryID: 1, itemKey: "PAPER001", evidenceRefs: [] }],
+    },
+    {
+      citationId: "C2",
+      sources: [{ libraryID: 1, itemKey: "PAPER002", evidenceRefs: [] }],
+    },
+    {
+      citationId: "C3",
+      sources: [{ libraryID: 1, itemKey: "PAPER003", evidenceRefs: [] }],
+    },
+  ];
+
+  it("rejects unsupported cross-paper paragraphs, then calibrates and accepts a supported document", async function () {
+    const { PlanDocumentFinalizer } =
+      await import("../src/agent/documents/planFinalization");
+    harness = installResearchHarness();
+    await harness.approve({ deliverable: { kind: "document", spec } });
+    await completeResearch(harness);
+    const ledger = await harness.ledger();
+    const documentTask = await harness.activeTask();
+    assert.equal(documentTask.expectedEffect, "artifact");
+    const finalizer = new PlanDocumentFinalizer(harness.gateway as never);
+    const submit = (markdown: string) =>
+      finalizer.finalize({
+        executionId: ledger.executionId,
+        activeTaskId: documentTask.taskId,
+        input: {
+          title: spec.title,
+          markdown,
+          citations,
+          quotes: [],
+          assets: [],
+          groundingReviewed: "passed",
+          groundingIssues: [],
+        },
+        now: 500,
+      });
+    const unsupported = await attempt(() =>
+      submit(
+        [
+          "# Latent State Review",
+          "",
+          "## Introduction",
+          "",
+          "All three papers [[cite:C1]] [[cite:C2]] [[cite:C3]].",
+          "",
+          "## Thematic synthesis",
+          "",
+          "Papers one and three converge on decoding [[cite:C1]] [[cite:C3]].",
+        ].join("\n"),
+      ),
+    );
+    assert.match(unsupported, /support audit failed/);
+    assert.match(unsupported, /record_edges/);
+    assert.match(unsupported, /1:PAPER001, 1:PAPER003/);
+    const finalized = await submit(
+      [
+        "# Latent State Review",
+        "",
+        "## Introduction",
+        "",
+        "All three papers [[cite:C1]] [[cite:C2]] [[cite:C3]].",
+        "",
+        "## Thematic synthesis",
+        "",
+        "Paper two extends paper one to humans [[cite:C1]] [[cite:C2]], and paper three contradicts two on the sign of the bias [[cite:C2]] [[cite:C3]].",
+      ].join("\n"),
+    );
+    const markdown = finalized.document.visibleMarkdown;
+    assert.match(markdown, /## Scope and limitations/);
+    assert.match(
+      markdown,
+      /Coverage: 3 papers in the approved scope \(3 at full-text depth\)/,
+    );
+    assert.match(
+      markdown,
+      /Relationships: 2 recorded between papers, 1 verified/,
+    );
+    assert.isTrue(
+      markdown.indexOf("## Scope and limitations") <
+        markdown.indexOf("## References"),
+    );
+    assert.deepEqual(finalized.supportAudit, {
+      crossPaperParagraphs: 1,
+      supported: 1,
+      unsupported: [],
+    });
+    const finalJob = await job(harness);
+    assert.equal(finalJob.synthesisPhase, "complete");
+    assert.equal(finalJob.qualityReport?.crossPaperParagraphs, 1);
+    assert.equal(finalJob.qualityReport?.crossPaperParagraphsSupported, 1);
+    assert.equal(finalJob.qualityReport?.edgesVerified, 1);
+  });
+});

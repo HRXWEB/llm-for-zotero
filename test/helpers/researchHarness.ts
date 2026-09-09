@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { initPlanDocumentStore } from "../../src/agent/documents/store";
 import { PlanExecutionCoordinator } from "../../src/agent/plans/coordinator";
 import {
   initAgentPlanStore,
@@ -205,6 +206,7 @@ export function installResearchHarness(
       get: (id: number) => items.get(Number(id)) || false,
     },
     Prefs: { get: () => undefined },
+    Libraries: { userLibraryID: libraryID },
     Promise: { delay: (ms: number) => new Promise((r) => setTimeout(r, ms)) },
   };
   const paperById = new Map(papers.map((paper) => [paper.itemId, paper]));
@@ -241,10 +243,42 @@ export function installResearchHarness(
       const paper = paperById.get(itemId);
       return paper ? target(paper).attachments : [];
     },
+    /** Minimal author-year formatter standing in for Zotero's CSL engine. */
+    formatStructuredCitations: (params: {
+      clusters: Array<{ citationId: string; items: Array<{ itemId: number }> }>;
+      styleId?: string;
+      locale?: string;
+    }) => {
+      const label = (itemId: number) => {
+        const paper = paperById.get(itemId);
+        return paper
+          ? `${paper.firstCreator}, ${paper.year}`
+          : `Item ${itemId}`;
+      };
+      const cited = new Map<number, string>();
+      for (const cluster of params.clusters)
+        for (const item of cluster.items)
+          cited.set(item.itemId, label(item.itemId));
+      return {
+        styleId: params.styleId || "apa",
+        styleTitle: "APA",
+        locale: params.locale || "en-US",
+        clusters: params.clusters.map((cluster) => ({
+          citationId: cluster.citationId,
+          text: `(${cluster.items.map((item) => label(item.itemId)).join("; ")})`,
+          html: `(${cluster.items.map((item) => label(item.itemId)).join("; ")})`,
+        })),
+        bibliographyEntries: [...cited.entries()].map(([itemId, text]) => ({
+          itemId,
+          text,
+          html: text,
+        })),
+      };
+    },
   };
   const coordinator = new PlanExecutionCoordinator();
   let executionId = "";
-  const steps = [
+  const stepsFor = (document: boolean) => [
     {
       planStepId: `${planId}:r1:read`,
       content: "Read every paper in the collection",
@@ -271,19 +305,33 @@ export function installResearchHarness(
       ],
       expectedEffect: "reasoning" as const,
     },
-    {
-      planStepId: `${planId}:r1:answer`,
-      content: "Write the answer",
-      activeForm: "Writing the answer",
-      acceptanceCriteria: [
-        {
-          criterionId: "answer",
-          description: "The answer is complete",
-          verifier: "bounded_reasoning" as const,
+    document
+      ? {
+          planStepId: `${planId}:r1:document`,
+          content: "Publish the review",
+          activeForm: "Publishing the review",
+          acceptanceCriteria: [
+            {
+              criterionId: "published",
+              description: "The review is published",
+              verifier: "document_published" as const,
+            },
+          ],
+          expectedEffect: "artifact" as const,
+        }
+      : {
+          planStepId: `${planId}:r1:answer`,
+          content: "Write the answer",
+          activeForm: "Writing the answer",
+          acceptanceCriteria: [
+            {
+              criterionId: "answer",
+              description: "The answer is complete",
+              verifier: "bounded_reasoning" as const,
+            },
+          ],
+          expectedEffect: "reasoning" as const,
         },
-      ],
-      expectedEffect: "reasoning" as const,
-    },
   ];
   const tool = createResearchUpdateTool(gateway as never);
   let readCounter = 0;
@@ -297,7 +345,15 @@ export function installResearchHarness(
     async approve(overrides = {}) {
       await initAgentPlanStore();
       await initResearchStore();
+      await initPlanDocumentStore();
       const { deliverable, ...investigationOverrides } = overrides;
+      const steps = stepsFor(
+        Boolean(
+          deliverable &&
+          typeof deliverable === "object" &&
+          (deliverable as { kind?: string }).kind === "document",
+        ),
+      );
       const contract = await resolvePlanContract({
         raw: {
           version: 1,

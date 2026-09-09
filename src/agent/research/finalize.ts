@@ -3,10 +3,13 @@ import { loadPlanExecutionLedger } from "../plans/store";
 import { type ResearchUpdateInput } from "./commands";
 import { recomputeJob } from "./progress";
 import { isCriterionCompleteScreeningDecision } from "./recordValidation";
+import { computeResearchQualityReport, summarizeQualityReport } from "./rubric";
 import {
   listPaperFindings,
   listResearchCorpusItems,
+  listResearchEdges,
   listResearchEvidence,
+  listResearchOpenQuestions,
   listThemeFindings,
 } from "./store";
 import type { ResearchJob } from "./types";
@@ -175,9 +178,19 @@ export async function finalizeResearch(params: {
         : hasLimitations
           ? "complete_with_limitations"
           : "complete";
+  const qualityReport = job.frame
+    ? computeResearchQualityReport({
+        corpus: allCorpus,
+        findings,
+        edges: await listResearchEdges(job.researchJobId),
+        questions: await listResearchOpenQuestions(job.researchJobId),
+        themes,
+        subquestions: investigation.subquestions,
+      })
+    : undefined;
   next = await recomputeJob({
-    job:
-      input.outcome === "partial" && next.exceptionGrant
+    job: {
+      ...(input.outcome === "partial" && next.exceptionGrant
         ? {
             ...next,
             exceptionGrant: {
@@ -186,7 +199,12 @@ export async function finalizeResearch(params: {
               consumedAt: Date.now(),
             },
           }
-        : next,
+        : next),
+      ...(qualityReport ? { qualityReport } : {}),
+      ...(job.frame && input.outcome !== "failed"
+        ? { synthesisPhase: "complete" as const }
+        : {}),
+    },
     conversationKey: context.request.conversationKey,
     activeStage: "hierarchical_synthesis",
     status: input.outcome === "failed" ? "failed" : "completed",
@@ -223,7 +241,9 @@ export async function finalizeResearch(params: {
       scopeLineageDigest: next.scopeLineageDigest,
     },
     reference: job.researchJobId,
-    summary: `Coverage ${coverageStatus}: screened ${next.screenedItems}/${next.totalItems}; deep-read ${next.deepReadCompleted}/${next.candidateItems}`,
+    summary: `Coverage ${coverageStatus}: screened ${next.screenedItems}/${next.totalItems}; deep-read ${next.deepReadCompleted}/${next.candidateItems}${
+      qualityReport ? `; ${summarizeQualityReport(qualityReport)}` : ""
+    }`,
     createdAt: Date.now(),
   });
   if (coverageStatus === "partial") {
