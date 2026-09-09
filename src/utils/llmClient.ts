@@ -3268,6 +3268,105 @@ type TemperaturePolicy =
 
 const temperaturePolicyCache = new Map<string, TemperaturePolicy>();
 
+type OutputCapRecovery = { mode: "omit" } | { mode: "fixed"; value: number };
+
+const OUTPUT_CAP_KEYS = [
+  "max_tokens",
+  "max_completion_tokens",
+  "max_output_tokens",
+] as const;
+type OutputCapKey = (typeof OUTPUT_CAP_KEYS)[number];
+/** Below this a "maximum" mentioned in an error is not an output limit. */
+const MIN_PLAUSIBLE_OUTPUT_CAP = 256;
+const CONTEXT_LIMIT_RECOVERY_MARGIN = 1_024;
+
+const outputCapRecoveryCache = new Map<string, OutputCapRecovery>();
+
+function findOutputCapKey(
+  payload: Record<string, unknown>,
+): OutputCapKey | null {
+  for (const key of OUTPUT_CAP_KEYS) {
+    if (typeof payload[key] === "number") return key;
+  }
+  return null;
+}
+
+function isAnthropicMessagesUrl(url: string): boolean {
+  return /\/messages(?:\?|$)/.test(url);
+}
+
+function applyOutputCapRecovery(
+  payload: Record<string, unknown>,
+  key: OutputCapKey,
+  recovery: OutputCapRecovery,
+): Record<string, unknown> {
+  const next = { ...payload };
+  if (recovery.mode === "omit") {
+    delete next[key];
+    return next;
+  }
+  const current = Number(payload[key]);
+  next[key] = Number.isFinite(current)
+    ? Math.min(current, recovery.value)
+    : recovery.value;
+  return next;
+}
+
+/**
+ * One-shot recovery for a provider rejecting the transmitted output cap.
+ * A stated maximum is adopted; otherwise the cap is dropped (OpenAI-style
+ * providers fall back to their default) or, for Anthropic Messages where the
+ * field is required, lowered to the compatibility seed.
+ */
+export function getOutputCapRecovery(params: {
+  status: number;
+  message: string;
+  url: string;
+  requested: number;
+}): OutputCapRecovery | null {
+  if (params.status !== 400 && params.status !== 422) return null;
+  const text = params.message.toLowerCase();
+  const capMention = /max[_ ]?(?:completion[_ ]?|output[_ ]?)?tokens/;
+  if (!capMention.test(text)) return null;
+
+  // Anthropic: "input length and max_tokens exceed context limit: A + B > C"
+  const sum = text.match(/(\d[\d,]*)\s*\+\s*(\d[\d,]*)\s*>\s*(\d[\d,]*)/);
+  if (sum) {
+    const input = Number(sum[1].replace(/,/g, ""));
+    const window = Number(sum[3].replace(/,/g, ""));
+    const room = window - input - CONTEXT_LIMIT_RECOVERY_MARGIN;
+    return Number.isSafeInteger(room) && room >= MIN_PLAUSIBLE_OUTPUT_CAP
+      ? { mode: "fixed", value: room }
+      : null;
+  }
+
+  // Only numbers in sentences that talk about tokens count; JSON envelopes
+  // carry status codes and ids that must not be mistaken for the limit.
+  const candidates: number[] = [];
+  for (const segment of text.split(/[.;\n"]/)) {
+    if (!/tokens/.test(segment)) continue;
+    for (const match of segment.matchAll(/\d[\d,]*/g)) {
+      const value = Number(match[0].replace(/,/g, ""));
+      if (
+        Number.isSafeInteger(value) &&
+        value >= MIN_PLAUSIBLE_OUTPUT_CAP &&
+        value < params.requested
+      ) {
+        candidates.push(value);
+      }
+    }
+  }
+  if (candidates.length) {
+    return { mode: "fixed", value: Math.max(...candidates) };
+  }
+  if (isAnthropicMessagesUrl(params.url)) {
+    return params.requested > AUTO_REQUIRED_OUTPUT_TOKEN_SEED
+      ? { mode: "fixed", value: AUTO_REQUIRED_OUTPUT_TOKEN_SEED }
+      : null;
+  }
+  return { mode: "omit" };
+}
+
 function getTemperaturePolicyKey(
   url: string,
   payload: Record<string, unknown>,
@@ -3449,6 +3548,15 @@ async function postWithTemperatureFallback(params: {
   if (hasTemperature && cachedPolicy) {
     requestPayload = applyTemperaturePolicy(params.payload, cachedPolicy);
   }
+  const outputCapKey = findOutputCapKey(requestPayload);
+  const cachedCapRecovery = outputCapRecoveryCache.get(policyKey);
+  if (outputCapKey && cachedCapRecovery) {
+    requestPayload = applyOutputCapRecovery(
+      requestPayload,
+      outputCapKey,
+      cachedCapRecovery,
+    );
+  }
 
   let authState = params.auth;
   let res = await send(requestPayload, authState);
@@ -3490,6 +3598,38 @@ async function postWithTemperatureFallback(params: {
     }
     if (res.ok) {
       temperaturePolicyCache.set(policyKey, recoveryPolicy);
+      return res;
+    }
+    const secondErr = await res.text();
+    throw new Error(
+      `${res.status} ${res.statusText} (${params.url}) - ${secondErr}`,
+    );
+  }
+  const retryCapKey = findOutputCapKey(requestPayload);
+  const capRecovery = retryCapKey
+    ? getOutputCapRecovery({
+        status: res.status,
+        message: firstErr,
+        url: params.url,
+        requested: Number(requestPayload[retryCapKey]),
+      })
+    : null;
+  if (capRecovery && retryCapKey) {
+    const fallbackPayload = applyOutputCapRecovery(
+      requestPayload,
+      retryCapKey,
+      capRecovery,
+    );
+    ztoolkit.log("LLM: Retrying after output cap rejection", {
+      url: params.url,
+      key: retryCapKey,
+      requested: requestPayload[retryCapKey],
+      recovery: capRecovery,
+      error: firstErr,
+    });
+    res = await send(fallbackPayload, authState);
+    if (res.ok) {
+      outputCapRecoveryCache.set(policyKey, capRecovery);
       return res;
     }
     const secondErr = await res.text();

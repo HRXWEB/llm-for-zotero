@@ -189,7 +189,8 @@ describe("OpenAICompatibleAgentAdapter", function () {
       tools,
     });
 
-    assert.notProperty(capturedBody, "max_tokens");
+    // The registry knows this model's output limit, so Auto sends it.
+    assert.equal(capturedBody?.max_tokens, 384_000);
     assert.notProperty(capturedBody, "max_completion_tokens");
   });
 
@@ -866,5 +867,116 @@ describe("OpenAICompatibleAgentAdapter", function () {
         "OpenAI-compatible chat cannot send unresolved PDF file_ref",
       );
     }
+  });
+});
+
+describe("OpenAICompatibleAgentAdapter output cap rejection", function () {
+  const originalToolkit = (
+    globalThis as typeof globalThis & { ztoolkit?: unknown }
+  ).ztoolkit;
+
+  afterEach(function () {
+    (
+      globalThis as typeof globalThis & { ztoolkit?: typeof originalToolkit }
+    ).ztoolkit = originalToolkit;
+  });
+
+  function installFetch(rejectionBody: string) {
+    const bodies: Array<Record<string, unknown>> = [];
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown; log: () => void };
+      }
+    ).ztoolkit = {
+      log: () => undefined,
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          bodies.push(body);
+          if (bodies.length === 1) {
+            return {
+              ok: false,
+              status: 400,
+              statusText: "Bad Request",
+              headers: { get: () => "application/json" },
+              body: undefined,
+              json: async () => ({}),
+              text: async () => rejectionBody,
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            headers: { get: () => "text/event-stream" },
+            body: makeSseStream([
+              `data: ${JSON.stringify({
+                choices: [{ delta: { content: "done" } }],
+              })}\n\n`,
+              `data: ${JSON.stringify({
+                choices: [{ delta: {}, finish_reason: "stop" }],
+              })}\n\n`,
+              "data: [DONE]\n\n",
+            ]),
+            json: async () => ({}),
+            text: async () => "",
+          };
+        };
+      },
+    };
+    return bodies;
+  }
+
+  it("retries once with the provider's stated maximum", async function () {
+    const bodies = installFetch(
+      '{"error":{"message":"Invalid max_tokens value, the valid range of max_tokens is [1, 8192]","type":"invalid_request_error","code":400}}',
+    );
+    const adapter = new OpenAICompatibleAgentAdapter();
+    const step = await adapter.runStep({
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Summarize",
+        model: "deepseek-chat",
+        apiBase: "https://api.deepseek.com/v1",
+        apiKey: "test",
+        providerProtocol: "openai_chat_compat",
+        advanced: { outputTokenLimit: { mode: "auto" }, temperature: 0.3 },
+      },
+      messages: [{ role: "user", content: "Summarize the paper." }],
+      tools: [],
+    });
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0].max_tokens, 384_000);
+    assert.equal(bodies[1].max_tokens, 8_192);
+    assert.equal(step.kind, "final");
+  });
+
+  it("retries once without the cap when the rejection names no maximum", async function () {
+    const bodies = installFetch(
+      '{"error":{"message":"Unsupported parameter: max_tokens","code":400}}',
+    );
+    const adapter = new OpenAICompatibleAgentAdapter();
+    await adapter.runStep({
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Summarize",
+        model: "deepseek-reasoner",
+        apiBase: "https://api.deepseek.com/v1",
+        apiKey: "test",
+        providerProtocol: "openai_chat_compat",
+        advanced: { outputTokenLimit: { mode: "auto" }, temperature: 0.3 },
+      },
+      messages: [{ role: "user", content: "Summarize the paper." }],
+      tools: [],
+    });
+    assert.equal(bodies.length, 2);
+    assert.property(bodies[0], "max_tokens");
+    assert.notProperty(bodies[1], "max_tokens");
   });
 });

@@ -131,6 +131,15 @@ export function resolveOutputRequestPolicy(
           source: "auto_compatibility",
         };
   }
+  if (
+    (params.protocol === "openai_chat_compat" ||
+      params.protocol === "responses_api") &&
+    knownLimit
+  ) {
+    // A registry-known limit beats the provider's undocumented default cap;
+    // a provider that rejects the value is retried once by the transport.
+    return { mode: "numeric", tokens: knownLimit, source: "auto_capability" };
+  }
   return { mode: "omit", source: "auto_provider" };
 }
 

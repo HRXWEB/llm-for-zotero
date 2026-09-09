@@ -19,9 +19,19 @@ describe("agent model limits", function () {
     };
   }
 
-  it("omits the optional wire cap for an Auto thinking model", function () {
+  it("sends the registry-known cap for an Auto thinking model", function () {
     assert.deepEqual(
       resolveAgentOutputRequestPolicy(deepSeekRequest(), "openai_chat_compat"),
+      { mode: "numeric", tokens: 384_000, source: "auto_capability" },
+    );
+  });
+
+  it("omits the optional wire cap when no capability is known", function () {
+    assert.deepEqual(
+      resolveAgentOutputRequestPolicy(
+        deepSeekRequest({ model: "unknown-future-model" }),
+        "openai_chat_compat",
+      ),
       { mode: "omit", source: "auto_provider" },
     );
   });
@@ -48,7 +58,7 @@ describe("agent model limits", function () {
         }),
         "openai_chat_compat",
       ),
-      { mode: "omit", source: "auto_provider" },
+      { mode: "numeric", tokens: 384_000, source: "auto_capability" },
     );
   });
 

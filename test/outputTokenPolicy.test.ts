@@ -29,6 +29,21 @@ describe("output token policy", function () {
     }
   });
 
+  it("sends a registry-known output limit for OpenAI-compatible providers", function () {
+    for (const protocol of ["openai_chat_compat", "responses_api"] as const) {
+      assert.deepEqual(
+        resolveOutputRequestPolicy({
+          setting: { mode: "auto" },
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          protocol,
+          authMode: "api_key",
+        }),
+        { mode: "numeric", tokens: 384_000, source: "auto_capability" },
+      );
+    }
+  });
+
   it("keeps native harness output limits runtime-managed", function () {
     for (const authMode of ["codex_auth", "codex_app_server"] as const) {
       assert.deepEqual(
