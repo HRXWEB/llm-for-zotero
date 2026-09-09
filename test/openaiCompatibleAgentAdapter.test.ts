@@ -21,6 +21,15 @@ const MOONSHOT_ANY_OF_SIBLING_CONSTRAINTS = [
   "default",
 ];
 
+// MoonshotAI/walle model.go: InvalidPropertyNames (server/ultra validation).
+const MOONSHOT_RESERVED_PROPERTY_NAMES = new Set([
+  "$defs",
+  "$ref",
+  "anyOf",
+  "required",
+  "additionalProperties",
+]);
+
 function assertMoonshotSchema(
   schema: unknown,
   path: string,
@@ -56,6 +65,10 @@ function assertMoonshotSchema(
     assert.isObject(row.properties, `${path}.properties must be an object`);
     const properties = row.properties as Record<string, unknown>;
     for (const [key, value] of Object.entries(properties)) {
+      assert.isFalse(
+        MOONSHOT_RESERVED_PROPERTY_NAMES.has(key),
+        `${path}.properties.${key} is a reserved Moonshot property name`,
+      );
       assertMoonshotSchema(value, `${path}.properties.${key}`);
     }
     if (row.required !== undefined) {
@@ -294,6 +307,22 @@ describe("OpenAICompatibleAgentAdapter", function () {
       assertMoonshotSchema(
         tool.function.parameters,
         `tools.${tool.function.name}.parameters`,
+      );
+    }
+
+    for (const name of ["library_search", "saved_search_update"]) {
+      const schema = serializedTools.find(
+        (tool) => tool.function.name === name,
+      )!.function.parameters as unknown as {
+        properties: {
+          conditions: { items: { properties: Record<string, unknown> } };
+        };
+      };
+      assert.deepInclude(
+        schema.properties.conditions.items.properties.isRequired,
+        {
+          type: "boolean",
+        },
       );
     }
 
