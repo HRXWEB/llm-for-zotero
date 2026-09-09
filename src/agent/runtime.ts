@@ -1190,6 +1190,7 @@ export class AgentRuntime {
       request.contextCache = resourceContextPlan.contextCache;
       const paperEvidenceFrontier = new PaperEvidenceFrontier({
         evidencePolicy: resolveTurnEvidencePolicy(request),
+        planExecuting: request.planContext?.phase === "executing",
       });
       const preservedTurnHandleRecords: AgentToolResultHandleRecord[] = [];
       const transcriptCompatibilityKey = buildAgentTranscriptCompatibilityKey({

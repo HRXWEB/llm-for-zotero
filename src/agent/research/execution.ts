@@ -13,6 +13,11 @@ import { type ResearchUpdateInput } from "./commands";
 import { shouldCheckpointResearchExpansion } from "./policy";
 import { progress, recomputeJob, reconcileResearchStage } from "./progress";
 import { buildReadingManifest, type ReadingManifestEntry } from "./reading";
+import {
+  PROJECTED_PAPER_RECORD_TOKENS,
+  resolveRecordBatchCap,
+} from "./readingBudget";
+import { resolveOutputReserve } from "../../utils/outputTokenPolicy";
 import { validateStoredResearchTransition } from "./stages";
 import {
   listPaperFindings,
@@ -143,6 +148,30 @@ export async function executeResearchUpdate(
   const newEvidenceRefs: Record<string, string> = {};
   const completeWorkItem = (params: Parameters<CompleteResearchWorkItem>[0]) =>
     completeResearchWorkItem(job, params);
+  const maxPapersPerRecord = adaptiveReview
+    ? resolveRecordBatchCap({
+        outputReserveTokens: resolveOutputReserve(
+          context.request.advanced?.outputTokenLimit,
+          context.request.model || context.modelName || "",
+          {
+            apiBase: context.request.apiBase,
+            protocol: context.request.providerProtocol,
+            authMode: context.request.authMode,
+            profileOverride: context.request.advanced?.profileOverride,
+          },
+        ),
+        projectedPaperTokens: PROJECTED_PAPER_RECORD_TOKENS,
+      })
+    : undefined;
+  if (
+    input.operation === "record_papers" &&
+    maxPapersPerRecord !== undefined &&
+    input.papers.length > maxPapersPerRecord
+  ) {
+    throw new Error(
+      `record_papers accepts at most ${maxPapersPerRecord} papers per call for this model (received ${input.papers.length}). Record this group in smaller calls; every accepted call is durable.`,
+    );
+  }
 
   if (input.operation === "set_stage")
     await validateStoredResearchTransition(job, input.stage, adaptiveReview);
@@ -346,6 +375,7 @@ export async function executeResearchUpdate(
     progress: progress(next),
     displayLabels: Object.fromEntries(displayLabels),
     inventoriedItems,
+    ...(maxPapersPerRecord !== undefined ? { maxPapersPerRecord } : {}),
     ...(readingManifest
       ? {
           readingManifest,

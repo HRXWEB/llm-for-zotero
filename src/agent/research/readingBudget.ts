@@ -82,3 +82,23 @@ export function resolveAdaptiveReadingBudget(params: {
     maxCharactersPerPaper: tokensPerPaper * TOKEN_ESTIMATE_CHARS_PER_TOKEN,
   };
 }
+
+/**
+ * How many paper records one `record_papers` call may carry. Derived from the
+ * provider's output allowance so one malformed argument costs seconds, not a
+ * minute; the clamp keeps a very large allowance from turning a single call
+ * back into a monolith.
+ */
+export function resolveRecordBatchCap(params: {
+  outputReserveTokens: number;
+  projectedPaperTokens: number;
+}): number {
+  const reserve = Math.max(1, Math.floor(params.outputReserveTokens));
+  const perPaper = Math.max(1, Math.floor(params.projectedPaperTokens));
+  // Reasoning-capable providers count private reasoning against the same
+  // completion allowance, so each paper reserves two projected units.
+  return Math.min(8, Math.max(1, Math.floor(reserve / (perPaper * 2))));
+}
+
+/** Projected output size of one structured paper record. */
+export const PROJECTED_PAPER_RECORD_TOKENS = 900;

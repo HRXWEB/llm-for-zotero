@@ -443,8 +443,22 @@ function progressFor(params: {
   cumulativeOccurrenceCount: number;
   stopPolicy: ReadStopPolicy;
   readsThisTurn: number;
+  planExecuting: boolean;
 }): PaperEvidenceProgress {
-  const { stopPolicy, ...progress } = params;
+  const { stopPolicy, planExecuting, ...progress } = params;
+  if (planExecuting) {
+    // An approved plan owns reading: the manifest decides what to read next
+    // and the host completes the reading task from durable records. Chat
+    // stop guidance ("answer now") would be a second, contradicting owner.
+    return {
+      ...progress,
+      recommendation: "continue_plan",
+      reason:
+        progress.frontier === "unavailable"
+          ? "This source delivered no readable text; record what the manifest allows for it and continue the approved plan."
+          : "Continue the approved plan: persist this group with research_update before reading the next manifest group.",
+    };
+  }
   const guidance = resolveReadStopGuidance(stopPolicy, {
     frontier: params.frontier,
     readsThisTurn: params.readsThisTurn,
@@ -464,10 +478,18 @@ export class PaperEvidenceFrontier {
   private readonly occurrencesByContentHash = new Map<string, Set<string>>();
   private readonly cachedCalls = new Map<string, CachedCall>();
   private readonly stopPolicy: ReadStopPolicy;
+  private readonly planExecuting: boolean;
   private readsThisTurn = 0;
 
-  constructor(options: { evidencePolicy?: ReadStopPolicy | null } = {}) {
+  constructor(
+    options: {
+      evidencePolicy?: ReadStopPolicy | null;
+      /** True while an approved plan executes; reads then never stop the turn. */
+      planExecuting?: boolean;
+    } = {},
+  ) {
     this.stopPolicy = options.evidencePolicy || EXHAUSTIVE_STOP_POLICY;
+    this.planExecuting = options.planExecuting === true;
   }
 
   async readCached(
@@ -512,6 +534,7 @@ export class PaperEvidenceFrontier {
       cumulativeOccurrenceCount: this.seenOccurrences.size,
       stopPolicy: this.stopPolicy,
       readsThisTurn: this.readsThisTurn,
+      planExecuting: this.planExecuting,
     });
     return {
       frontier,
@@ -638,6 +661,7 @@ export class PaperEvidenceFrontier {
       cumulativeOccurrenceCount: this.seenOccurrences.size,
       stopPolicy: this.stopPolicy,
       readsThisTurn: this.readsThisTurn,
+      planExecuting: this.planExecuting,
     });
     const references = [...newReferences, ...repeatedReferences];
     const processedContent = {

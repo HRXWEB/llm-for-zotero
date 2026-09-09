@@ -162,7 +162,10 @@ export async function recordResearchPapers(params: {
       ? preferredRead
         ? [
             {
-              evidenceKey: "host_verified_read",
+              // One key per read depth keeps a metadata-first node upgradeable
+              // to body evidence later; a single constant key would reject the
+              // deeper record as "already used with different provenance".
+              evidenceKey: `host_verified_read:${preferredRead.evidenceDepth}`,
               sourceKind: preferredRead.evidenceDepth,
               sourceReadRef: preferredRead.sourceReadRef,
             },

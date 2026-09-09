@@ -463,3 +463,31 @@ describe("PaperEvidenceFrontier stop guidance by requested coverage", function (
     }
   });
 });
+
+describe("PaperEvidenceFrontier inside plan execution", function () {
+  it("tells the model to continue the plan instead of chat stop guidance", async function () {
+    const { PaperEvidenceFrontier } =
+      await import("../src/agent/context/paperEvidenceFrontier");
+    const frontier = new PaperEvidenceFrontier({
+      evidencePolicy: null,
+      planExecuting: true,
+    });
+    const processed = await frontier.processResult({
+      input: { mode: "overview", targets: [{ itemId: 1 }] },
+      content: {
+        mode: "overview",
+        results: [
+          {
+            text: "Body text of the paper.",
+            paperContext: { itemId: 1, contextItemId: 2 },
+            sourceFingerprint: "fp",
+          },
+        ],
+      },
+      toolCallId: "call-1",
+    });
+    const progress = (processed.content as any).paperEvidenceProgress;
+    assert.equal(progress.recommendation, "continue_plan");
+    assert.notMatch(progress.reason, /answer/i);
+  });
+});
