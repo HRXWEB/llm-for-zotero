@@ -249,6 +249,10 @@ export type WorkflowTestTargetedQuoteRefreshResult = {
     expandedBeforeRerender: boolean;
     expandedAfterRerender: boolean;
     expandedBodyTextAfterRerender: string;
+    /** Cards in the expanded message that share the clicked card's citation id. */
+    sameCitationCards: number;
+    /** How far the card moved between the reader's scroll and the next frames, before any click. */
+    settleDrift: number;
     cardTopDelta: number;
     scrollTopDelta: number;
     diagnostics: Record<string, unknown>;

@@ -6,6 +6,12 @@ type ChatScrollAnchor = {
   kind: "quote" | "message";
   quoteCitationId?: string;
   citationSyncKey?: string;
+  /**
+   * Position of the card among its message's quote cards. A citation id is
+   * not unique — one answer can cite the same source quote several times —
+   * so identity is "the Nth card of this message", with the id as a check.
+   */
+  quoteOrdinal?: number;
   messageAnchorKey?: string;
   messageRole?: string;
   messageTimestamp?: string;
@@ -185,10 +191,15 @@ function buildQuoteAnchor(
   if (!quoteCitationId && !citationSyncKey) return null;
   const rect = getElementRect(quoteCard);
   if (!rect || !isRectVisibleInViewport(rect, viewport)) return null;
+  const wrapper = closestElement(quoteCard, ".llm-message-wrapper");
+  const ordinal = wrapper
+    ? queryElements(wrapper, ".llm-quote-card").indexOf(quoteCard)
+    : -1;
   return {
     kind: "quote",
     quoteCitationId: quoteCitationId || undefined,
     citationSyncKey: citationSyncKey || undefined,
+    quoteOrdinal: ordinal >= 0 ? ordinal : undefined,
     ...getMessageAnchorForElement(quoteCard),
     viewportOffsetTop: rect.top - viewport.top,
   };
@@ -388,6 +399,22 @@ function findQuoteElementForAnchor(
 ): Element | null {
   const messageScope = findMessageWrapperForAnchor(chatBox, anchor);
   const roots = messageScope ? [messageScope] : [chatBox];
+  if (messageScope && anchor.quoteOrdinal !== undefined) {
+    const card = queryElements(messageScope, ".llm-quote-card")[
+      anchor.quoteOrdinal
+    ];
+    const sameQuote =
+      card &&
+      (anchor.quoteCitationId
+        ? datasetValue(card, "quoteCitationId") === anchor.quoteCitationId
+        : Boolean(
+            anchor.citationSyncKey &&
+            card.querySelector?.(
+              `[data-citation-sync-key="${anchor.citationSyncKey}"]`,
+            ),
+          ));
+    if (sameQuote) return card;
+  }
   if (anchor.quoteCitationId) {
     for (const root of roots) {
       const match = queryElements(root, ".llm-quote-card").find(

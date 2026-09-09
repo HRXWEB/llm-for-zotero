@@ -211,6 +211,47 @@ function appendElement(
 }
 
 describe("chat scroll snapshots", function () {
+  it("restores the quote card the reader was on, not the first card sharing its citation id", function () {
+    clearChatScrollSnapshotsForTests();
+    const chatBox = makeChatBox({
+      scrollTop: 1000,
+      scrollHeight: 2000,
+      clientHeight: 100,
+    });
+    const wrapper = appendElement(chatBox, "llm-message-wrapper", {
+      offsetTop: 0,
+      offsetHeight: 2000,
+      dataset: {
+        messageRole: "assistant",
+        messageTimestamp: "2",
+        messageAnchorKey: "turn-2",
+      },
+    });
+    // The same source quote is cited three times in one answer.
+    const cards = [100, 500, 1000].map((offsetTop) =>
+      appendElement(wrapper, "llm-quote-card", {
+        offsetTop,
+        offsetHeight: 40,
+        dataset: { quoteCitationId: "Q_shared" },
+      }),
+    );
+    persistChatScrollSnapshotForConversationKey(9, chatBox);
+    const snapshot = getChatScrollSnapshot(9);
+    assert.equal(snapshot?.anchor?.kind, "quote");
+    assert.equal(snapshot?.anchor?.viewportOffsetTop, 0);
+
+    // Content above the reader grows by 100px (a card above expands, a
+    // message above re-renders), moving every card down.
+    for (const card of cards) card.offsetTop += 100;
+    applyChatScrollSnapshot(chatBox, snapshot!);
+
+    assert.equal(
+      chatBox.scrollTop,
+      1100,
+      "the third card must stay at the top of the viewport",
+    );
+  });
+
   describe("settleFollowBottomIntent", function () {
     function makeTwoTurnChat(scrollTop: number): FakeElement {
       const chatBox = makeChatBox({

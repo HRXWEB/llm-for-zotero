@@ -2749,14 +2749,20 @@ async function exerciseTargetedQuoteRefresh(
         contextItemId: paperContext?.contextItemId,
       };
     });
+    // Turn 6 cites its first source quote a second time at the end, the way
+    // a review re-quotes a key passage: two cards share one citation id.
+    const repeatedCitation = turn === 5 ? quoteCitations[0] : null;
     const assistantMessage: Message = {
       role: "assistant",
-      text: quoteCitations
-        .map(
+      text: [
+        ...quoteCitations.map(
           (citation, quoteIndex) =>
             `Evidence ${quoteIndex + 1}:\n\n[[quote:${citation.id}]]`,
-        )
-        .join("\n\n"),
+        ),
+        ...(repeatedCitation
+          ? [`Again, the key passage:\n\n[[quote:${repeatedCitation.id}]]`]
+          : []),
+      ].join("\n\n"),
       timestamp: baseTimestamp + turn * 2 + 1,
       modelName: "workflow-performance",
       quoteCitations,
@@ -2891,26 +2897,38 @@ async function probeTargetedRerenderScrollStability(params: {
     });
   };
   record("start");
-  // Put the reader on the later message with a little context above it.
+  // The reader is on the last card of the later message: the repeated quote,
+  // whose citation id also belongs to an earlier card in the same message.
+  const verifiedCards = Array.from(
+    expandedWrapper.querySelectorAll(
+      '.llm-quote-card[data-quote-status="verified"]',
+    ),
+  ) as HTMLElement[];
+  const card = verifiedCards[verifiedCards.length - 1];
+  if (!card) throw new Error("Expanded message rendered no verified card");
+  // The card straddles the top edge, as a card the reader has just scrolled
+  // past does; the anchor search prefers exactly that card.
   chatBox.scrollTop +=
-    expandedWrapper.getBoundingClientRect().top -
-    chatBox.getBoundingClientRect().top -
-    24;
+    card.getBoundingClientRect().top - chatBox.getBoundingClientRect().top + 12;
   record("after-scroll-write");
+  const cardTopAfterScrollWrite = card.getBoundingClientRect().top;
   await nextFrame();
   record("after-frame-1");
   await nextFrame();
   record("after-frame-2");
+  // Nothing has been clicked yet: the view must still be where the reader
+  // put it once the panel's deferred scroll work has run.
+  const settleDrift =
+    card.getBoundingClientRect().top - cardTopAfterScrollWrite;
 
-  const card = expandedWrapper.querySelector(
-    '.llm-quote-card[data-quote-status="verified"]',
-  ) as HTMLElement | null;
-  if (!card) throw new Error("Expanded message rendered no verified card");
   card.click();
   record("after-click");
   await nextFrame();
   record("after-click-frame");
-  const occurrenceId = card.dataset.quoteOccurrenceId || "";
+  const citationId = card.dataset.quoteCitationId || "";
+  const sameCitationCards = expandedWrapper.querySelectorAll(
+    `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
+  ).length;
   const expandedBeforeRerender = card.dataset.expanded === "true";
   const scrollTopBefore = chatBox.scrollTop;
   const cardTopBefore = card.getBoundingClientRect().top;
@@ -2946,11 +2964,15 @@ async function probeTargetedRerenderScrollStability(params: {
     ) as HTMLElement[],
     params.expandedMessage,
   );
-  const cardAfter = expandedWrapperAfter.querySelector(
-    `.llm-quote-card[data-quote-occurrence-id="${occurrenceId}"]`,
-  ) as HTMLElement | null;
+  const cardsAfter = Array.from(
+    expandedWrapperAfter.querySelectorAll(
+      `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
+    ),
+  ) as HTMLElement[];
+  const cardAfter = cardsAfter[cardsAfter.length - 1] || null;
   const diagnostics: Record<string, unknown> = {
     timeline,
+    sameCitationCards,
     snapshotBefore: snapshotBefore
       ? {
           mode: snapshotBefore.mode,
@@ -2979,6 +3001,8 @@ async function probeTargetedRerenderScrollStability(params: {
     expandedBodyTextAfterRerender: (
       cardAfter?.querySelector(".llm-quote-card-body")?.textContent || ""
     ).trim(),
+    sameCitationCards,
+    settleDrift,
     cardTopDelta: cardAfter
       ? cardAfter.getBoundingClientRect().top - cardTopBefore
       : Number.NaN,

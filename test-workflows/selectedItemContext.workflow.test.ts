@@ -453,7 +453,7 @@ describe("workflow: selected item context send", function () {
 
     assert.equal(result.messageCount, 16);
     assert.equal(result.assistantMessageCount, 8);
-    assert.equal(result.quoteCardCount, 64);
+    assert.equal(result.quoteCardCount, 65);
     assert.equal(result.unchangedWrapperCount, 15);
     assert.equal(result.replacedWrapperCount, 1);
     assert.isTrue(result.targetWasReplaced);
@@ -481,7 +481,17 @@ describe("workflow: selected item context send", function () {
       "earlier message must change height",
     );
     assert.isTrue(probe.expandedBeforeRerender, "card must expand on click");
+    assert.isAtLeast(
+      probe.sameCitationCards,
+      2,
+      "the clicked card must share its citation id with an earlier card",
+    );
     const detail = JSON.stringify(probe.diagnostics);
+    assert.isAtMost(
+      Math.abs(probe.settleDrift),
+      1,
+      `view drifted ${probe.settleDrift}px before the reader clicked anything ${detail}`,
+    );
 
     assert.isTrue(
       probe.expandedAfterRerender,
