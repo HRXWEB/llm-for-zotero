@@ -1737,6 +1737,93 @@ describe("transactional Plan task transitions", function () {
     assert.deepEqual(persisted?.tasks[0].evidenceIds, []);
   });
 
+  for (const attachment of ["evidence", "receipts"] as const) {
+    it(`rolls back ${attachment} when saving its task ledger fails, then retries once`, async function () {
+      const coordinator = new PlanExecutionCoordinator();
+      const attach = () =>
+        attachment === "evidence"
+          ? coordinator.attachEvidence(reasoningEvidence())
+          : coordinator.attachReceiptEvidence({
+              executionId: "execution-1",
+              taskId: "execution-1:task-1",
+              now: 2,
+              receipts: [
+                {
+                  version: 2,
+                  id: "receipt-1",
+                  obligationId: "obligation-1",
+                  proposalId: "proposal-1",
+                  proofDomain: "zotero_state",
+                  capability: "zotero.metadata",
+                  operation: "update_metadata",
+                  verification: "verified",
+                  status: "applied",
+                  requestedTargets: ["1"],
+                  appliedTargets: ["1"],
+                  alreadySatisfiedTargets: [],
+                  rejectedTargets: [],
+                  reasons: [],
+                  verifiedFacts: ["target 1 re-read"],
+                },
+              ],
+            });
+      const before = await loadPlanExecutionLedger("execution-1");
+      const originalQuery = Zotero.DB.queryAsync;
+      Zotero.DB.queryAsync = (async (sql: string, params?: unknown[]) => {
+        if (
+          sql.includes(
+            "INSERT OR REPLACE INTO llm_for_zotero_plan_execution_tasks",
+          )
+        )
+          throw new Error("injected ledger write failure");
+        return originalQuery(sql, params);
+      }) as typeof Zotero.DB.queryAsync;
+      let failure = "";
+      try {
+        await attach();
+      } catch (error) {
+        failure = String(error);
+      } finally {
+        Zotero.DB.queryAsync = originalQuery;
+      }
+      assert.match(failure, /injected ledger write failure/);
+      const rows = () =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM llm_for_zotero_plan_task_evidence",
+            )
+            .get()?.count,
+        );
+      assert.equal(rows(), 0);
+      assert.deepEqual(await loadPlanExecutionLedger("execution-1"), before);
+      await attach();
+      await attach();
+      assert.equal(rows(), 1);
+      const persisted = await loadPlanExecutionLedger("execution-1");
+      assert.lengthOf(persisted!.tasks[0].evidenceIds, 1);
+    });
+  }
+
+  it("uses the same transition state with preattached or simultaneous evidence", async function () {
+    const coordinator = new PlanExecutionCoordinator();
+    const request = {
+      executionId: "execution-1",
+      taskId: "execution-1:task-1",
+      toStatus: "completed",
+      requestedBy: "original",
+    } as const;
+    await coordinator.attachEvidence(reasoningEvidence());
+    const separate = await coordinator.requestTransition(request, 3);
+    await savePlanExecutionLedger(execution());
+    const together = await coordinator.requestTransitionWithEvidence({
+      request,
+      evidence: reasoningEvidence(),
+      now: 3,
+    });
+    assert.deepEqual(together, separate);
+  });
+
   it("reattaches the durable non-terminal execution after in-memory state is gone", async function () {
     const resumable = { ...execution(), conversationKey: 9041 };
     await savePlanExecutionLedger(resumable);
