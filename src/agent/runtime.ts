@@ -1500,6 +1500,7 @@ export class AgentRuntime {
         providerProtocol: request.providerProtocol,
         authMode: request.authMode,
         profileOverride: request.advanced?.profileOverride,
+        outputTokenLimit: request.advanced?.outputTokenLimit,
       }).softLimitTokens;
       if (budgetState.shouldCompact && transcriptMessagesForPrompt.length) {
         await emit({ type: "status", text: "Compacting context…" });
@@ -1867,6 +1868,7 @@ export class AgentRuntime {
           providerProtocol: request.providerProtocol,
           authMode: request.authMode,
           profileOverride: request.advanced?.profileOverride,
+          outputTokenLimit: request.advanced?.outputTokenLimit,
           conversationKey: request.conversationKey,
           resourceSignature: resourceContextPlan.resourceSignature,
         });

@@ -97,6 +97,7 @@ import { buildMultipartRequest } from "./multipart";
 import {
   applyModelInputTokenCap,
   estimateConversationTokens,
+  estimateWirePayloadTokens,
   resolveModelInputTokenLimit,
   type InputCapResult,
 } from "./modelInputCap";
@@ -128,8 +129,10 @@ import {
 } from "../codexAuth/modelCatalog";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+  resolveContextAllocation,
   resolveOutputRequestPolicy,
   resolveOutputReserve,
+  resolveTransmittedOutputPolicy,
   type OutputRequestPolicy,
 } from "./outputTokenPolicy";
 
@@ -1414,17 +1417,21 @@ export function estimateAvailableContextBudget(params: {
   );
   const limitTokens = resolvedInputLimit.limitTokens;
   const modelLimitTokens = limitTokens;
-  const softLimitTokens = Math.max(1, Math.floor(limitTokens * 0.9));
-  const outputReserveTokens = resolveOutputReserve(
-    params.outputTokenLimit,
-    normalizedModel,
-    {
+  // Same owner as the Agent prompt budget: the usable window and the answer
+  // reserve both come from the context allocation for the resolved policy.
+  const allocation = resolveContextAllocation({
+    contextWindow: limitTokens,
+    policy: resolveOutputRequestPolicy({
+      setting: params.outputTokenLimit,
+      model: normalizedModel,
       apiBase: params.apiBase,
-      protocol: params.providerProtocol,
+      protocol: params.providerProtocol || "openai_chat_compat",
       authMode: params.authMode,
       profileOverride: params.profileOverride,
-    },
-  );
+    }),
+  });
+  const softLimitTokens = allocation.usableTokens;
+  const outputReserveTokens = allocation.answerReserveTokens;
   const reasoningReserveTokens = getReasoningReserveTokens(params.reasoning);
 
   const baseMessages = buildMessages(
@@ -3127,6 +3134,8 @@ function createChatPayloadBuilder(params: {
   effectiveTemperature: number;
   outputPolicy: OutputRequestPolicy;
   outputReserveTokens: number;
+  /** Model context window; the transmitted cap is clamped to the room left in it. */
+  contextWindow: number;
   stream: boolean;
   contextCache?: ContextCachePlan;
   profileOverride?: ModelProfileOverride;
@@ -3143,6 +3152,7 @@ function createChatPayloadBuilder(params: {
     effectiveTemperature,
     outputPolicy,
     outputReserveTokens,
+    contextWindow,
     stream,
     contextCache,
   } = params;
@@ -3201,6 +3211,13 @@ function createChatPayloadBuilder(params: {
       : { temperature: effectiveTemperature };
     const cachePayloadHints = buildPromptCachePayloadHints(contextCache);
 
+    const transmittedPolicy = resolveTransmittedOutputPolicy({
+      policy: outputPolicy,
+      contextWindow,
+      estimatedInputTokens: estimateWirePayloadTokens(
+        useResponses ? responsesInput : chatMessages,
+      ),
+    });
     const payload = useResponses
       ? {
           model,
@@ -3212,7 +3229,7 @@ function createChatPayloadBuilder(params: {
           ...cachePayloadHints,
           ...reasoningPayload.extra,
           ...temperatureParam,
-          ...buildResponsesTokenParam(outputPolicy),
+          ...buildResponsesTokenParam(transmittedPolicy),
         }
       : {
           model,
@@ -3220,7 +3237,7 @@ function createChatPayloadBuilder(params: {
           ...cachePayloadHints,
           ...reasoningPayload.extra,
           ...temperatureParam,
-          ...buildTokenParam(model, outputPolicy),
+          ...buildTokenParam(model, transmittedPolicy),
         };
 
     if (stream) {
@@ -3755,6 +3772,8 @@ async function callNativeProtocol(params: {
   model: string;
   messages: ChatMessage[];
   outputPolicy: OutputRequestPolicy;
+  /** Model context window; a numeric cap is clamped to the room left in it. */
+  contextWindow: number;
   /** Raw request temperature; protocol-specific defaults are applied here. */
   rawTemperature?: number | string;
   signal?: AbortSignal;
@@ -3810,6 +3829,17 @@ async function callNativeProtocol(params: {
       }
     }
   }
+  const transmittedPolicy =
+    protocol === "anthropic_messages"
+      ? resolveTransmittedOutputPolicy({
+          policy: outputPolicy,
+          contextWindow: params.contextWindow,
+          estimatedInputTokens: estimateWirePayloadTokens({
+            messages,
+            pdfParts,
+          }),
+        })
+      : outputPolicy;
   const buildBody = (reasoningOverride: ReasoningSelection | undefined) =>
     protocol === "ollama_native"
       ? buildOllamaChatPayload({
@@ -3833,8 +3863,8 @@ async function callNativeProtocol(params: {
             model,
             messages,
             effectiveMaxTokens:
-              outputPolicy.mode === "numeric"
-                ? outputPolicy.tokens
+              transmittedPolicy.mode === "numeric"
+                ? transmittedPolicy.tokens
                 : AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
             effectiveTemperature: normalizeTemperature(rawTemperature),
             stream: isStreaming,
@@ -3959,6 +3989,7 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
       model,
       messages,
       outputPolicy,
+      contextWindow: inputCap.limitTokens,
       rawTemperature: params.temperature,
       signal: params.signal,
       attachments: params.attachments,
@@ -4037,6 +4068,7 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     effectiveTemperature,
     outputPolicy,
     outputReserveTokens,
+    contextWindow: inputCap.limitTokens,
     stream: false,
     contextCache: params.contextCache,
     profileOverride: params.profileOverride,
@@ -4111,6 +4143,7 @@ export async function callLLMStream(
       model,
       messages,
       outputPolicy,
+      contextWindow: inputCap.limitTokens,
       rawTemperature: params.temperature,
       signal: params.signal,
       onDelta,
@@ -4198,6 +4231,7 @@ export async function callLLMStream(
     effectiveTemperature,
     outputPolicy,
     outputReserveTokens,
+    contextWindow: inputCap.limitTokens,
     stream: true,
     contextCache: params.contextCache,
     profileOverride: params.profileOverride,

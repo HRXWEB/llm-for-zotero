@@ -2,8 +2,12 @@ import { assert } from "chai";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
   DEFAULT_OUTPUT_RESERVE_TOKENS,
+  INPUT_ESTIMATE_SAFETY_RATIO,
+  resolveContextAllocation,
   resolveOutputRequestPolicy,
   resolveOutputReserve,
+  resolveTransmittedOutputPolicy,
+  type OutputRequestPolicy,
 } from "../src/utils/outputTokenPolicy";
 
 describe("output token policy", function () {
@@ -91,5 +95,99 @@ describe("output token policy", function () {
       ),
       2_048,
     );
+  });
+});
+
+describe("context allocation", function () {
+  const opusPolicy: OutputRequestPolicy = {
+    mode: "numeric",
+    tokens: 128_000,
+    source: "auto_capability",
+  };
+
+  it("reserves answer room out of the usable window for a numeric cap", function () {
+    const allocation = resolveContextAllocation({
+      contextWindow: 200_000,
+      policy: opusPolicy,
+    });
+    assert.equal(allocation.usableTokens, 180_000);
+    assert.equal(allocation.answerReserveTokens, DEFAULT_OUTPUT_RESERVE_TOKENS);
+    assert.equal(
+      allocation.inputBudgetTokens,
+      180_000 - DEFAULT_OUTPUT_RESERVE_TOKENS,
+    );
+  });
+
+  it("never reserves more than the custom cap itself", function () {
+    const allocation = resolveContextAllocation({
+      contextWindow: 200_000,
+      policy: { mode: "numeric", tokens: 2_048, source: "custom" },
+    });
+    assert.equal(allocation.answerReserveTokens, 2_048);
+    assert.equal(allocation.inputBudgetTokens, 180_000 - 2_048);
+  });
+
+  it("scales the reserve down on tiny context windows", function () {
+    const allocation = resolveContextAllocation({
+      contextWindow: 8_000,
+      policy: { mode: "omit", source: "auto_provider" },
+    });
+    assert.equal(allocation.usableTokens, 7_200);
+    assert.equal(allocation.answerReserveTokens, 1_800);
+    assert.equal(allocation.inputBudgetTokens, 5_400);
+  });
+
+  it("clamps the transmitted cap so input plus cap fits the context window", function () {
+    const shortPrompt = resolveTransmittedOutputPolicy({
+      policy: opusPolicy,
+      contextWindow: 200_000,
+      estimatedInputTokens: 1_000,
+    });
+    assert.deepEqual(shortPrompt, opusPolicy);
+
+    const longPrompt = resolveTransmittedOutputPolicy({
+      policy: opusPolicy,
+      contextWindow: 200_000,
+      estimatedInputTokens: 100_000,
+    });
+    assert.equal(longPrompt.mode, "numeric");
+    if (longPrompt.mode !== "numeric") return;
+    assert.equal(
+      longPrompt.tokens,
+      200_000 - Math.ceil(100_000 * INPUT_ESTIMATE_SAFETY_RATIO),
+    );
+    assert.isAtMost(
+      Math.ceil(100_000 * INPUT_ESTIMATE_SAFETY_RATIO) + longPrompt.tokens,
+      200_000,
+    );
+    assert.equal(longPrompt.source, opusPolicy.source);
+  });
+
+  it("floors the transmitted cap at the answer reserve when input is over budget", function () {
+    const overBudget = resolveTransmittedOutputPolicy({
+      policy: opusPolicy,
+      contextWindow: 200_000,
+      estimatedInputTokens: 195_000,
+    });
+    assert.equal(overBudget.mode, "numeric");
+    if (overBudget.mode !== "numeric") return;
+    assert.equal(overBudget.tokens, DEFAULT_OUTPUT_RESERVE_TOKENS);
+  });
+
+  it("leaves non-numeric policies untouched", function () {
+    for (const policy of [
+      { mode: "omit", source: "auto_provider" },
+      { mode: "unlimited", source: "auto_provider" },
+      { mode: "runtime_managed", source: "runtime" },
+    ] as OutputRequestPolicy[]) {
+      assert.deepEqual(
+        resolveTransmittedOutputPolicy({
+          policy,
+          contextWindow: 200_000,
+          estimatedInputTokens: 199_000,
+        }),
+        policy,
+      );
+    }
   });
 });

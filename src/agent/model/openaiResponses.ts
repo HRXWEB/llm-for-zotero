@@ -16,7 +16,8 @@ import type {
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
-import { resolveAgentOutputRequestPolicy } from "./limits";
+import { resolveAgentTransmittedOutputPolicy } from "./limits";
+import { estimateWirePayloadTokens } from "../../utils/modelInputCap";
 import {
   buildAgentRecoveryInstruction,
   resolveAgentRecoverableCompletion,
@@ -110,16 +111,21 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       apiBase: request.apiBase || "",
       authMode: request.authMode,
     });
+    const outputPolicy = resolveAgentTransmittedOutputPolicy(
+      request,
+      "responses_api",
+      estimateWirePayloadTokens({
+        instructions,
+        input: inputItems,
+        tools: params.tools,
+      }),
+    );
     const response = await postWithReasoningFallback({
       url,
       auth,
       modelName: request.model,
       initialReasoning: request.reasoning,
       buildPayload: (reasoningOverride) => {
-        const outputPolicy = resolveAgentOutputRequestPolicy(
-          request,
-          "responses_api",
-        );
         const reasoningPayload = buildReasoningPayload(
           reasoningOverride,
           true,

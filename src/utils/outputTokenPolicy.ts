@@ -17,6 +17,18 @@ export const DEFAULT_OUTPUT_RESERVE_TOKENS = 8_192;
  */
 export const AUTO_REQUIRED_OUTPUT_TOKEN_SEED = 8_192;
 
+/** Share of the context window the plugin lets input plus the transmitted cap fill. */
+export const CONTEXT_USABLE_RATIO = 0.9;
+/**
+ * Local token estimates are heuristic. The transmitted cap leaves this much
+ * headroom over the estimated input so a provider that validates
+ * `input + max_tokens <= context window` (Anthropic, OpenAI) never rejects a
+ * prompt the budget already accepted.
+ */
+export const INPUT_ESTIMATE_SAFETY_RATIO = 1.2;
+/** Never reserve more than this share of the usable window for the answer. */
+const MAX_ANSWER_RESERVE_RATIO = 0.25;
+
 export type OutputRequestPolicy =
   | {
       mode: "omit";
@@ -120,6 +132,78 @@ export function resolveOutputRequestPolicy(
         };
   }
   return { mode: "omit", source: "auto_provider" };
+}
+
+/**
+ * How one context window is split between prompt input and the answer.
+ * This is the single owner of "room left for the prompt": the Agent prompt
+ * budget, the direct-chat budget and the transmitted cap all derive from it.
+ */
+export type ContextAllocation = {
+  contextWindow: number;
+  /** Input plus transmitted cap may fill this much of the window. */
+  usableTokens: number;
+  /** Answer room guaranteed to survive prompt planning. */
+  answerReserveTokens: number;
+  /** Largest prompt the planner may build. */
+  inputBudgetTokens: number;
+};
+
+export function resolveContextAllocation(params: {
+  contextWindow: number;
+  policy: OutputRequestPolicy;
+}): ContextAllocation {
+  const contextWindow = Math.max(1, Math.floor(Number(params.contextWindow)));
+  const usableTokens = Math.max(
+    1,
+    Math.floor(contextWindow * CONTEXT_USABLE_RATIO),
+  );
+  const requestedReserve =
+    params.policy.mode === "numeric"
+      ? Math.min(params.policy.tokens, DEFAULT_OUTPUT_RESERVE_TOKENS)
+      : DEFAULT_OUTPUT_RESERVE_TOKENS;
+  const answerReserveTokens = Math.max(
+    1,
+    Math.min(
+      requestedReserve,
+      Math.floor(usableTokens * MAX_ANSWER_RESERVE_RATIO),
+    ),
+  );
+  return {
+    contextWindow,
+    usableTokens,
+    answerReserveTokens,
+    inputBudgetTokens: Math.max(1, usableTokens - answerReserveTokens),
+  };
+}
+
+/**
+ * The cap actually sent on the wire for one request. A numeric cap shrinks to
+ * the room left beside the estimated input (never below the answer reserve);
+ * every other policy is passed through unchanged.
+ */
+export function resolveTransmittedOutputPolicy(params: {
+  policy: OutputRequestPolicy;
+  contextWindow: number;
+  estimatedInputTokens: number;
+}): OutputRequestPolicy {
+  if (params.policy.mode !== "numeric") return params.policy;
+  const allocation = resolveContextAllocation({
+    contextWindow: params.contextWindow,
+    policy: params.policy,
+  });
+  const guardedInput = Math.ceil(
+    Math.max(0, Number(params.estimatedInputTokens) || 0) *
+      INPUT_ESTIMATE_SAFETY_RATIO,
+  );
+  const roomLeft = allocation.contextWindow - guardedInput;
+  const tokens = Math.max(
+    allocation.answerReserveTokens,
+    Math.min(params.policy.tokens, roomLeft),
+  );
+  return tokens === params.policy.tokens
+    ? params.policy
+    : { ...params.policy, tokens };
 }
 
 export function resolveOutputReserve(

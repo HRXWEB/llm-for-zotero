@@ -15,8 +15,13 @@ import {
   type ModelInputTokenLimitSource,
 } from "../../utils/modelInputCap";
 import type { ModelProfileOverride } from "../../modelCapabilities";
+import type { OutputTokenLimitSetting } from "../../shared/types";
+import {
+  resolveContextAllocation,
+  resolveOutputRequestPolicy,
+} from "../../utils/outputTokenPolicy";
+import { normalizeProviderProtocol } from "../../utils/providerProtocol";
 
-const AGENT_PROMPT_SOFT_LIMIT_RATIO = 0.9;
 const HISTORY_CHECKPOINT_MAX_TOKENS = 1_200;
 const TOOL_HANDLE_MAX_TOKENS = 768;
 const MIN_CATALOG_TOOL_TOKENS = 1_024;
@@ -74,6 +79,7 @@ export function resolveAgentPromptBudgetLimits(params: {
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  outputTokenLimit?: OutputTokenLimitSetting;
 }): AgentPromptBudgetLimits {
   const resolvedLimit = resolveModelInputTokenLimit(
     params.model || "",
@@ -85,13 +91,25 @@ export function resolveAgentPromptBudgetLimits(params: {
       profileOverride: params.profileOverride,
     },
   );
+  // The soft limit is the shared context allocation's input budget, so a
+  // prompt that passes here always leaves room for the cap we transmit.
+  const allocation = resolveContextAllocation({
+    contextWindow: resolvedLimit.limitTokens,
+    policy: resolveOutputRequestPolicy({
+      setting: params.outputTokenLimit,
+      model: params.model || "",
+      apiBase: params.apiBase,
+      protocol: normalizeProviderProtocol(params.providerProtocol),
+      authMode: params.authMode as Parameters<
+        typeof resolveOutputRequestPolicy
+      >[0]["authMode"],
+      profileOverride: params.profileOverride,
+    }),
+  });
   return {
     contextWindow: resolvedLimit.limitTokens,
     inputLimitSource: resolvedLimit.source,
-    softLimitTokens: Math.max(
-      1,
-      Math.floor(resolvedLimit.limitTokens * AGENT_PROMPT_SOFT_LIMIT_RATIO),
-    ),
+    softLimitTokens: allocation.inputBudgetTokens,
   };
 }
 
@@ -1071,6 +1089,7 @@ export function enforceAgentPromptBudget(params: {
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  outputTokenLimit?: OutputTokenLimitSetting;
   conversationKey?: number;
   resourceSignature?: string;
 }): AgentPromptBudgetResult {
@@ -1081,6 +1100,7 @@ export function enforceAgentPromptBudget(params: {
     providerProtocol: params.providerProtocol,
     authMode: params.authMode,
     profileOverride: params.profileOverride,
+    outputTokenLimit: params.outputTokenLimit,
   });
   let messages = params.messages.map((message) => cloneMessage(message));
   const reductions: AgentPromptReduction[] = [];

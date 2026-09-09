@@ -37,7 +37,9 @@ describe("llmClient context budget", function () {
       },
     });
     assert.equal(plan.limitTokens, 32_000);
-    assert.equal(plan.outputReserveTokens, 12_000);
+    // The reserve is the guaranteed answer room; the transmitted cap grows to
+    // whatever fits beside the prompt at send time (up to the Custom value).
+    assert.equal(plan.outputReserveTokens, 7_200);
     assert.equal(plan.reasoningReserveTokens, 4_096);
     assert.isAtLeast(plan.contextBudgetTokens, 0);
   });
@@ -100,6 +102,6 @@ describe("llmClient context budget", function () {
       outputTokenLimit: { mode: "custom", tokens: 200_000 },
     });
     assert.equal(auto.outputReserveTokens, 8_192);
-    assert.equal(custom.outputReserveTokens, 64_000);
+    assert.equal(custom.outputReserveTokens, 8_192);
   });
 });
