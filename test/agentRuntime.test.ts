@@ -56,6 +56,7 @@ import { TAVILY_API_KEY_PREF } from "../src/webAccess/prefs";
 import type { WebAccessProvider } from "../src/webAccess/types";
 import {
   MAX_AGENT_ROUNDS,
+  MAX_ANSWER_CONTINUATIONS,
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
 } from "../src/agent/model/limits";
 import {
@@ -2572,10 +2573,7 @@ describe("AgentRuntime", function () {
     }
   });
 
-  for (const incompleteReason of [
-    "output_limit",
-    "stream_interrupted",
-  ] as const) {
+  for (const incompleteReason of ["stream_interrupted"] as const) {
     it(`rolls back ${incompleteReason} and continues from the preserved step`, async function () {
       const restoreDb = installMockDb();
       try {
@@ -2656,6 +2654,236 @@ describe("AgentRuntime", function () {
       }
     });
   }
+
+  it("keeps a truncated final answer on screen and appends its continuation", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      let continuationMessages: AgentModelMessage[] = [];
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            modelSteps += 1;
+            if (modelSteps === 1) {
+              await params.onTextDelta?.("First half of the answer ");
+              return {
+                kind: "incomplete",
+                reason: "output_limit",
+                text: "First half of the answer ",
+                recoveryInstruction: "Continue with a complete tool call.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "First half of the answer ",
+                },
+              };
+            }
+            continuationMessages = structuredClone(params.messages);
+            await params.onTextDelta?.("and the second half.");
+            return {
+              kind: "final",
+              text: "and the second half.",
+              assistantMessage: {
+                role: "assistant",
+                content: "and the second half.",
+              },
+            };
+          },
+        }),
+      });
+      const events: AgentEvent[] = [];
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1_912,
+          mode: "agent",
+          userText: "write the full review",
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      assert.equal(modelSteps, 2);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.equal(
+          outcome.text,
+          "First half of the answer and the second half.",
+        );
+      }
+      assert.isFalse(
+        events.some((event) => event.type === "message_rollback"),
+        "a truncated answer must stay visible",
+      );
+      assert.deepEqual(
+        events
+          .filter((event) => event.type === "message_delta")
+          .map((event) => (event.type === "message_delta" ? event.text : "")),
+        ["First half of the answer ", "and the second half."],
+      );
+      const serialized = JSON.stringify(continuationMessages);
+      assert.include(serialized, "First half of the answer ");
+      assert.include(serialized.toLowerCase(), "continue exactly");
+      assert.notInclude(serialized, "Continue with a complete tool call.");
+      assert.equal([...restoreDb.runs.values()][0]?.status, "completed");
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("bounds answer continuations and delivers what was written", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            modelSteps += 1;
+            const chunk = `part ${modelSteps} `;
+            await params.onTextDelta?.(chunk);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: chunk,
+              recoveryInstruction: "Continue with a complete tool call.",
+              assistantMessage: { role: "assistant", content: chunk },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1_913,
+          mode: "agent",
+          userText: "write the full review",
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+      });
+
+      assert.equal(modelSteps, MAX_ANSWER_CONTINUATIONS + 1);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.include(outcome.text, "part 1 part 2 ");
+        assert.include(outcome.text, `part ${MAX_ANSWER_CONTINUATIONS + 1} `);
+        assert.include(outcome.text.toLowerCase(), "output limit");
+      }
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("still rolls back truncated text that preceded a tool call", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            modelSteps += 1;
+            if (modelSteps === 1) {
+              await params.onTextDelta?.("Let me look that up ");
+              return {
+                kind: "incomplete",
+                reason: "output_limit",
+                text: "Let me look that up ",
+                recoveryInstruction: "Continue with a complete tool call.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Let me look that up ",
+                },
+              };
+            }
+            if (modelSteps === 2) {
+              return {
+                kind: "tool_calls",
+                calls: [
+                  {
+                    id: "call-1",
+                    name: "missing_tool",
+                    arguments: {},
+                  },
+                ],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [
+                    { id: "call-1", name: "missing_tool", arguments: {} },
+                  ],
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "Final answer.",
+              assistantMessage: { role: "assistant", content: "Final answer." },
+            };
+          },
+        }),
+      });
+      const events: AgentEvent[] = [];
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1_914,
+          mode: "agent",
+          userText: "look it up",
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.equal(outcome.text, "Final answer.");
+      }
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "message_rollback" &&
+            event.text === "Let me look that up ",
+        ),
+        "text kept for continuation must be rolled back once the model calls a tool instead",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
 
   it("bounds stream recovery to one retry instead of an endless interrupted Plan", async function () {
     const restoreDb = installMockDb();
@@ -9292,6 +9520,68 @@ describe("AgentRuntime evidence stop policy", function () {
         last.paperEvidenceProgress?.reason || "",
         "do not retrieve again",
       );
+    } finally {
+      restoreDb();
+    }
+  });
+});
+
+describe("truncated answer continuation with a non-streaming final step", function () {
+  it("does not duplicate the kept text when the continuation returns nothing new", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            modelSteps += 1;
+            if (modelSteps === 1) {
+              return {
+                kind: "incomplete",
+                reason: "output_limit",
+                text: "Everything that fits.",
+                recoveryInstruction: "Continue with a complete tool call.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Everything that fits.",
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "",
+              assistantMessage: { role: "assistant", content: "" },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1_915,
+          mode: "agent",
+          userText: "write it",
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+      });
+
+      assert.equal(modelSteps, 2);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.equal(outcome.text, "Everything that fits.");
+      }
     } finally {
       restoreDb();
     }

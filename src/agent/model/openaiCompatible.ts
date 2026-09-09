@@ -25,7 +25,8 @@ import {
   parseToolCallArguments,
 } from "./shared";
 import { resolveContentParts } from "./adapterUtils";
-import { resolveAgentOutputRequestPolicy } from "./limits";
+import { resolveAgentTransmittedOutputPolicy } from "./limits";
+import { estimateWirePayloadTokens } from "../../utils/modelInputCap";
 import {
   buildAgentRecoveryInstruction,
   resolveAgentRecoverableCompletion,
@@ -426,16 +427,20 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
           ...(await buildMessagesPayload(params.continuationMessages || [])),
         ]
       : await buildMessagesPayload(params.messages);
+    const outputPolicy = resolveAgentTransmittedOutputPolicy(
+      request,
+      "openai_chat_compat",
+      estimateWirePayloadTokens({
+        messages: resolvedMessages,
+        tools: params.tools,
+      }),
+    );
     const response = await postWithReasoningFallback({
       url,
       auth,
       modelName: request.model,
       initialReasoning: request.reasoning,
       buildPayload: (reasoningOverride) => {
-        const outputPolicy = resolveAgentOutputRequestPolicy(
-          request,
-          "openai_chat_compat",
-        );
         const reasoningPayload = buildReasoningPayload(
           reasoningOverride,
           false,

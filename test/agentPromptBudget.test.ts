@@ -96,7 +96,8 @@ describe("agent prompt budget", function () {
     });
     assert.equal(limits.contextWindow, 12_000);
     assert.equal(limits.inputLimitSource, "advanced");
-    assert.equal(limits.softLimitTokens, 10_800);
+    // 90% usable window minus the answer reserve (capped at a quarter of it).
+    assert.equal(limits.softLimitTokens, 10_800 - 2_700);
     assert.notProperty(limits, "toolResultMaxTokens");
   });
 
@@ -111,7 +112,7 @@ describe("agent prompt budget", function () {
 
     assert.equal(limits.contextWindow, 18_000);
     assert.equal(limits.inputLimitSource, "user");
-    assert.equal(limits.softLimitTokens, 16_200);
+    assert.equal(limits.softLimitTokens, 16_200 - 4_050);
   });
 
   it("leaves small prompts unchanged", function () {
@@ -633,5 +634,53 @@ describe("CJK convergence", function () {
     });
 
     assert.isAtMost(result.estimatedAfterTokens, result.softLimitTokens);
+  });
+});
+
+describe("agent prompt budget and transmitted output cap", function () {
+  it("keeps input plus the Anthropic cap inside the context window on a long transcript", async function () {
+    const { resolveAgentPromptBudgetLimits } =
+      await import("../src/agent/context/promptBudget");
+    const { resolveOutputRequestPolicy, resolveTransmittedOutputPolicy } =
+      await import("../src/utils/outputTokenPolicy");
+    const identity = {
+      model: "claude-opus-4-6",
+      apiBase: "https://api.anthropic.com",
+      protocol: "anthropic_messages" as const,
+      authMode: "api_key" as const,
+    };
+    const limits = resolveAgentPromptBudgetLimits({
+      model: identity.model,
+      apiBase: identity.apiBase,
+      providerProtocol: identity.protocol,
+      authMode: identity.authMode,
+      outputTokenLimit: { mode: "auto" },
+    });
+    const policy = resolveOutputRequestPolicy({
+      setting: { mode: "auto" },
+      ...identity,
+    });
+    assert.equal(policy.mode, "numeric");
+    // Any prompt the budget lets through must still fit next to the cap we send.
+    for (const estimatedInputTokens of [
+      1_000,
+      72_000,
+      136_000,
+      limits.softLimitTokens,
+    ]) {
+      const transmitted = resolveTransmittedOutputPolicy({
+        policy,
+        contextWindow: limits.contextWindow,
+        estimatedInputTokens,
+      });
+      assert.equal(transmitted.mode, "numeric");
+      if (transmitted.mode !== "numeric") continue;
+      assert.isAtLeast(transmitted.tokens, 8_192);
+      assert.isAtMost(
+        estimatedInputTokens + transmitted.tokens,
+        limits.contextWindow,
+        `input ${estimatedInputTokens} + cap ${transmitted.tokens} exceeds the window`,
+      );
+    }
   });
 });

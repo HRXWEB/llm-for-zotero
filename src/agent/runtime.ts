@@ -65,7 +65,8 @@ import {
   normalizeAgentContentInputs,
   resolveCapabilitiesContentInputs,
 } from "./model/contentCapabilities";
-import { resolveAgentLimits } from "./model/limits";
+import { buildAnswerContinuationInstruction } from "./model/completion";
+import { MAX_ANSWER_CONTINUATIONS, resolveAgentLimits } from "./model/limits";
 import {
   buildAgentPromptInstructionInventory,
   composeAgentModelInput,
@@ -1500,6 +1501,7 @@ export class AgentRuntime {
         providerProtocol: request.providerProtocol,
         authMode: request.authMode,
         profileOverride: request.advanced?.profileOverride,
+        outputTokenLimit: request.advanced?.outputTokenLimit,
       }).softLimitTokens;
       if (budgetState.shouldCompact && transcriptMessagesForPrompt.length) {
         await emit({ type: "status", text: "Compacting context…" });
@@ -1766,6 +1768,10 @@ export class AgentRuntime {
         step: Extract<AgentModelStep, { kind: "final" }>,
         stepStreamedText: string,
         webAttribution: WebAttributionAssessment,
+        options: {
+          /** Answer text already held by earlier transcript messages. */
+          transcriptPrefix?: string;
+        } = {},
       ): Promise<AgentRuntimeOutcome> => {
         const modelFinalText = webAttribution.cleanText;
         const receiptStatus = actionContractSession.receiptStatus();
@@ -1792,10 +1798,15 @@ export class AgentRuntime {
             currentAnswerText = finalText;
           }
         }
+        const transcriptText =
+          options.transcriptPrefix &&
+          finalText.startsWith(options.transcriptPrefix)
+            ? finalText.slice(options.transcriptPrefix.length)
+            : finalText;
         newTranscriptMessages.push(
           step.assistantMessage
-            ? { ...step.assistantMessage, content: finalText }
-            : { role: "assistant", content: finalText },
+            ? { ...step.assistantMessage, content: transcriptText }
+            : { role: "assistant", content: transcriptText },
         );
         return completeRun(finalText, "completed", { webAttribution });
       };
@@ -1867,6 +1878,7 @@ export class AgentRuntime {
           providerProtocol: request.providerProtocol,
           authMode: request.authMode,
           profileOverride: request.advanced?.profileOverride,
+          outputTokenLimit: request.advanced?.outputTokenLimit,
           conversationKey: request.conversationKey,
           resourceSignature: resourceContextPlan.resourceSignature,
         });
@@ -2961,6 +2973,29 @@ export class AgentRuntime {
           text: stepStreamedText,
         });
       };
+      // A final answer the provider cut off at its output limit stays on
+      // screen and in the transcript; the model is asked for the remainder.
+      let answerContinuations = 0;
+      let keptAnswerVisibleText = "";
+      let keptAnswerModelText = "";
+      const rollbackKeptAnswer = async (): Promise<void> => {
+        if (!keptAnswerVisibleText) {
+          keptAnswerModelText = "";
+          return;
+        }
+        const text = keptAnswerVisibleText;
+        keptAnswerVisibleText = "";
+        keptAnswerModelText = "";
+        currentAnswerText = currentAnswerText.slice(
+          0,
+          Math.max(0, currentAnswerText.length - text.length),
+        );
+        await emit({
+          type: "message_rollback",
+          length: text.length,
+          text,
+        });
+      };
       let round = 0;
       let segment = 1;
       let streamRecoveryUsed = false;
@@ -3001,6 +3036,70 @@ export class AgentRuntime {
             );
           }
           if (step.kind === "incomplete") {
+            const truncatedAnswerText = step.text || "";
+            if (
+              step.reason === "output_limit" &&
+              truncatedAnswerText.trim().length > 0
+            ) {
+              // The model was writing its answer, not a tool call: keep what
+              // it wrote visible and ask only for the remainder.
+              if (stepStreamedText) {
+                keptAnswerVisibleText += stepStreamedText;
+              } else {
+                const visible =
+                  turnPathRedactor.redactTerminalText(truncatedAnswerText);
+                currentAnswerText += visible;
+                keptAnswerVisibleText += visible;
+                await emit({ type: "message_delta", text: visible });
+              }
+              keptAnswerModelText += truncatedAnswerText;
+              const truncatedAssistantMessage: AgentAssistantMessage =
+                step.assistantMessage || {
+                  role: "assistant",
+                  content: truncatedAnswerText,
+                };
+              if (
+                answerContinuations >= MAX_ANSWER_CONTINUATIONS ||
+                segmentRound >= maxRounds
+              ) {
+                newTranscriptMessages.push(truncatedAssistantMessage);
+                const customLimit = request.advanced?.outputTokenLimit;
+                const note =
+                  customLimit?.mode === "custom"
+                    ? `\n\n[This answer was cut short by the custom per-response output limit (${customLimit.tokens} tokens) ${answerContinuations + 1} times. Raise the limit in Advanced settings, or ask to continue.]`
+                    : `\n\n[This answer was cut short by the provider's output limit ${answerContinuations + 1} times. Ask to continue if it is incomplete.]`;
+                return completeRun(
+                  `${turnPathRedactor.redactTerminalText(keptAnswerModelText)}${note}`,
+                  "completed",
+                );
+              }
+              answerContinuations += 1;
+              (
+                globalThis as typeof globalThis & {
+                  ztoolkit?: { log?: (...args: unknown[]) => void };
+                }
+              ).ztoolkit?.log?.(
+                "LLM Agent: Continuing a truncated final answer",
+                {
+                  settingMode:
+                    request.advanced?.outputTokenLimit?.mode || "auto",
+                  providerStopReason: step.providerReason,
+                  continuation: answerContinuations,
+                  keptCharacters: keptAnswerModelText.length,
+                },
+              );
+              newTranscriptMessages.push(
+                ...continuationSession.appendFinalCorrection({
+                  assistantMessage: truncatedAssistantMessage,
+                  correctionMessage: {
+                    role: "user",
+                    content: buildAnswerContinuationInstruction(),
+                  },
+                }),
+              );
+              await persistTranscriptCheckpoint();
+              continue;
+            }
             if (step.reason === "stream_interrupted") {
               if (streamRecoveryUsed) {
                 await rollbackCommittedStreamedText(stepStreamedText);
@@ -3064,15 +3163,21 @@ export class AgentRuntime {
               ? streamedTextOffset >= 0
                 ? returnedText.slice(streamedTextOffset)
                 : stepStreamedText
-              : returnedText || currentAnswerText || "No response.";
+              : keptAnswerModelText
+                ? // A kept truncated answer already holds the visible text;
+                  // falling back to it (or a placeholder) would corrupt it.
+                  returnedText
+                : returnedText || currentAnswerText || "No response.";
             const finalDecision = await finalAnswerController.evaluate({
-              candidateText:
-                turnPathRedactor.redactTerminalText(rawModelFinalText),
+              candidateText: turnPathRedactor.redactTerminalText(
+                `${keptAnswerModelText}${rawModelFinalText}`,
+              ),
               canCorrect: segmentRound < maxRounds,
               toolExecutionRecords,
             });
             if (finalDecision.kind !== "accept") {
               await rollbackCommittedStreamedText(stepStreamedText);
+              await rollbackKeptAnswer();
               if (finalDecision.kind === "correct") {
                 const assistantCorrectionMessage: AgentAssistantMessage = {
                   ...(step.assistantMessage ?? {
@@ -3112,10 +3217,14 @@ export class AgentRuntime {
               }
               return completeRun(finalDecision.userMessage, "failed");
             }
+            const answerPrefix = keptAnswerVisibleText;
+            keptAnswerVisibleText = "";
+            keptAnswerModelText = "";
             return emitFinalStep(
               step,
-              stepStreamedText,
+              `${answerPrefix}${stepStreamedText}`,
               finalDecision.webAttribution,
+              { transcriptPrefix: answerPrefix },
             );
           }
 
@@ -3124,6 +3233,7 @@ export class AgentRuntime {
           // (e.g. "Let me read more of the paper...") that should appear in
           // the agent trace but NOT in the final chat answer.  Roll it back.
           await rollbackCommittedStreamedText(stepStreamedText);
+          await rollbackKeptAnswer();
 
           if (step.calls.length > maxToolCallsPerRound) {
             const overflowMessage = `The model returned ${step.calls.length} tool calls in one step, exceeding the safe limit of ${maxToolCallsPerRound}. None of those calls were executed.`;

@@ -1484,3 +1484,77 @@ describe("AnthropicMessagesAgentAdapter", function () {
     );
   });
 });
+
+describe("AnthropicMessagesAgentAdapter output cap versus context window", function () {
+  const originalToolkit = (
+    globalThis as typeof globalThis & { ztoolkit?: unknown }
+  ).ztoolkit;
+
+  afterEach(function () {
+    (
+      globalThis as typeof globalThis & { ztoolkit?: typeof originalToolkit }
+    ).ztoolkit = originalToolkit;
+  });
+
+  async function captureMaxTokens(userText: string): Promise<number> {
+    let capturedBody: Record<string, unknown> | null = null;
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async (_url: string, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body || "{}")) as Record<
+            string,
+            unknown
+          >;
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            body: undefined,
+            json: async () => ({
+              content: [{ type: "text", text: "done" }],
+              stop_reason: "end_turn",
+            }),
+            text: async () => "",
+          };
+        };
+      },
+    };
+    const adapter = new AnthropicMessagesAgentAdapter();
+    await adapter.runStep({
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText,
+        model: "claude-opus-4-6",
+        apiBase: "https://api.anthropic.com",
+        apiKey: "test",
+        providerProtocol: "anthropic_messages",
+        advanced: { outputTokenLimit: { mode: "auto" }, temperature: 0.3 },
+      },
+      messages: [
+        { role: "system", content: "You are helpful." },
+        { role: "user", content: userText },
+      ],
+      tools: [],
+    });
+    return Number(capturedBody?.max_tokens);
+  }
+
+  it("sends the full known cap for a short prompt", async function () {
+    assert.equal(await captureMaxTokens("Summarize this paper."), 128_000);
+  });
+
+  it("shrinks max_tokens so a long prompt plus the cap still fits the 200k window", async function () {
+    // ~100k estimated input tokens of ASCII prose (4 chars per token).
+    const longText = "word ".repeat(80_000);
+    const maxTokens = await captureMaxTokens(longText);
+    assert.isAtLeast(maxTokens, 8_192);
+    assert.isAtMost(maxTokens, 80_000);
+    assert.isAtMost(100_000 + maxTokens, 200_000);
+  });
+});

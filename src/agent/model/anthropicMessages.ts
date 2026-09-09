@@ -22,7 +22,8 @@ import type {
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
-import { resolveAgentOutputRequestPolicy } from "./limits";
+import { resolveAgentTransmittedOutputPolicy } from "./limits";
+import { estimateWirePayloadTokens } from "../../utils/modelInputCap";
 import {
   buildAgentRecoveryInstruction,
   resolveAgentRecoverableCompletion,
@@ -725,9 +726,14 @@ export class AnthropicMessagesAgentAdapter implements AgentModelAdapter {
     const messages = continuation.length
       ? [...conversationBase, ...continuation]
       : conversationBase;
-    const outputPolicy = resolveAgentOutputRequestPolicy(
+    const outputPolicy = resolveAgentTransmittedOutputPolicy(
       request,
       "anthropic_messages",
+      estimateWirePayloadTokens({
+        system: this.systemBlocks,
+        messages,
+        tools: params.tools,
+      }),
     );
     if (outputPolicy.mode !== "numeric") {
       throw new Error("Anthropic Messages requires a numeric output policy.");

@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  getOutputCapRecovery,
   normalizeProviderCompletion,
   parseResponsesStream,
   parseStreamResponse,
@@ -116,5 +117,89 @@ describe("LLM terminal outcome normalization", function () {
       providerReason: "max_output_tokens",
     });
     assert.deepEqual(outcome.continuationState, { responseId: "resp_456" });
+  });
+});
+
+describe("output cap rejection recovery", function () {
+  const openaiUrl = "https://api.deepseek.com/v1/chat/completions";
+  const anthropicUrl = "https://api.anthropic.com/v1/messages";
+
+  it("takes the provider's stated maximum from several phrasings", function () {
+    for (const message of [
+      "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]",
+      "`max_tokens` must be less than or equal to `8192`",
+      "max_tokens is too large: 384000. This model supports at most 8192 completion tokens, whereas you provided 384000.",
+      "max_tokens: 384000 > 8192, which is the maximum allowed number of output tokens for this model",
+    ]) {
+      assert.deepEqual(
+        getOutputCapRecovery({
+          status: 400,
+          message: `400 Bad Request (${openaiUrl}) - {"error":{"message":"${message}","code":400}}`,
+          url: openaiUrl,
+          requested: 384_000,
+        }),
+        { mode: "fixed", value: 8_192, scope: "endpoint" },
+        message,
+      );
+    }
+  });
+
+  it("omits the cap for OpenAI-compatible providers that reject it without a number", function () {
+    assert.deepEqual(
+      getOutputCapRecovery({
+        status: 400,
+        message:
+          '{"error":{"message":"Unsupported parameter: max_tokens","code":400}}',
+        url: openaiUrl,
+        requested: 384_000,
+      }),
+      { mode: "omit", scope: "endpoint" },
+    );
+  });
+
+  it("falls back to the compatibility seed for Anthropic, which requires max_tokens", function () {
+    assert.deepEqual(
+      getOutputCapRecovery({
+        status: 400,
+        message:
+          '{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: unsupported value"}}',
+        url: anthropicUrl,
+        requested: 128_000,
+      }),
+      { mode: "fixed", value: 8_192, scope: "endpoint" },
+    );
+  });
+
+  it("derives the room left from an Anthropic context-limit rejection", function () {
+    assert.deepEqual(
+      getOutputCapRecovery({
+        status: 400,
+        message:
+          '{"error":{"message":"input length and max_tokens exceed context limit: 150000 + 64000 > 200000, decrease input length or max_tokens and try again"}}',
+        url: anthropicUrl,
+        requested: 64_000,
+      }),
+      // Derived from this prompt's size, so it must not be cached.
+      { mode: "fixed", value: 200_000 - 150_000 - 1_024, scope: "request" },
+    );
+  });
+
+  it("ignores unrelated errors and unrelated numbers", function () {
+    assert.isNull(
+      getOutputCapRecovery({
+        status: 500,
+        message: "max_tokens exploded 8192",
+        url: openaiUrl,
+        requested: 384_000,
+      }),
+    );
+    assert.isNull(
+      getOutputCapRecovery({
+        status: 400,
+        message: '{"error":{"message":"temperature must be 1","code":400}}',
+        url: openaiUrl,
+        requested: 384_000,
+      }),
+    );
   });
 });
