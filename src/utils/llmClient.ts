@@ -3192,6 +3192,13 @@ function createChatPayloadBuilder(params: {
       return codexPayload as Record<string, unknown>;
     }
 
+    const transmittedPolicy = resolveTransmittedOutputPolicy({
+      policy: outputPolicy,
+      contextWindow,
+      estimatedInputTokens: estimateWirePayloadTokens(
+        useResponses ? responsesInput : chatMessages,
+      ),
+    });
     const reasoningPayload = buildReasoningPayload(
       reasoningOverride,
       useResponses,
@@ -3200,8 +3207,8 @@ function createChatPayloadBuilder(params: {
       providerProtocol,
       {
         maxTokens:
-          outputPolicy.mode === "numeric"
-            ? outputPolicy.tokens
+          transmittedPolicy.mode === "numeric"
+            ? transmittedPolicy.tokens
             : outputReserveTokens,
         profileOverride: params.profileOverride,
       },
@@ -3211,13 +3218,6 @@ function createChatPayloadBuilder(params: {
       : { temperature: effectiveTemperature };
     const cachePayloadHints = buildPromptCachePayloadHints(contextCache);
 
-    const transmittedPolicy = resolveTransmittedOutputPolicy({
-      policy: outputPolicy,
-      contextWindow,
-      estimatedInputTokens: estimateWirePayloadTokens(
-        useResponses ? responsesInput : chatMessages,
-      ),
-    });
     const payload = useResponses
       ? {
           model,
