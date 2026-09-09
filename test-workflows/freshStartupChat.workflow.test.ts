@@ -533,7 +533,7 @@ describe("workflow: startup chat restoration", function () {
       "paper",
       diagnosticsMessage(diagnostics),
     );
-    assert.equal(diagnostics.paperTabText, "Paper chat");
+    assert.equal(diagnostics.paperTabText, "Note chat");
     assert.equal(
       diagnostics.titleText,
       "Workflow item note title",
@@ -558,7 +558,7 @@ describe("workflow: startup chat restoration", function () {
       "paper",
       diagnosticsMessage(diagnostics),
     );
-    assert.equal(diagnostics.paperTabText, "Paper chat");
+    assert.equal(diagnostics.paperTabText, "Note chat");
     assert.equal(
       diagnostics.titleText,
       "Workflow standalone note title",
