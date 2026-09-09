@@ -639,9 +639,8 @@ describe("CJK convergence", function () {
 
 describe("agent prompt budget and transmitted output cap", function () {
   it("keeps input plus the Anthropic cap inside the context window on a long transcript", async function () {
-    const { resolveAgentPromptBudgetLimits } = await import(
-      "../src/agent/context/promptBudget"
-    );
+    const { resolveAgentPromptBudgetLimits } =
+      await import("../src/agent/context/promptBudget");
     const { resolveOutputRequestPolicy, resolveTransmittedOutputPolicy } =
       await import("../src/utils/outputTokenPolicy");
     const identity = {
@@ -663,7 +662,12 @@ describe("agent prompt budget and transmitted output cap", function () {
     });
     assert.equal(policy.mode, "numeric");
     // Any prompt the budget lets through must still fit next to the cap we send.
-    for (const estimatedInputTokens of [1_000, 72_000, 136_000, limits.softLimitTokens]) {
+    for (const estimatedInputTokens of [
+      1_000,
+      72_000,
+      136_000,
+      limits.softLimitTokens,
+    ]) {
       const transmitted = resolveTransmittedOutputPolicy({
         policy,
         contextWindow: limits.contextWindow,

@@ -15,6 +15,12 @@ export const MAX_BULK_AGENT_ROUNDS = 32;
 export const MAX_BULK_TOOL_CALLS_PER_ROUND = 10;
 
 /**
+ * How many times a final answer cut off by the provider's output limit is
+ * asked to continue before the text written so far is delivered as is.
+ */
+export const MAX_ANSWER_CONTINUATIONS = 3;
+
+/**
  * Resolve one Agent inference's wire policy. Whole-run limits remain owned by
  * the runtime's rounds, progress checks, checkpoints, and context compaction.
  */

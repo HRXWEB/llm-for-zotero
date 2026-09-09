@@ -47,3 +47,12 @@ export function buildAgentRecoveryInstruction(
     ? `The provider stopped at its output limit before completing this step. Continue without repeating completed analysis, and emit the next required ${toolNoun} only after all arguments are complete.`
     : `The provider paused this step. Resume from the preserved state without repeating completed analysis, and emit the next required ${toolNoun} only after all arguments are complete.`;
 }
+
+/**
+ * Instruction for a final answer (no tool call in flight) that the provider
+ * cut off at its output limit. The text already written stays on screen and
+ * in the transcript, so the model must only supply the remainder.
+ */
+export function buildAnswerContinuationInstruction(): string {
+  return "Your previous message was cut off by the provider's output limit before the answer was complete. Continue exactly from where it stopped: do not repeat any text already written, do not restart or summarize the answer, and finish it.";
+}
