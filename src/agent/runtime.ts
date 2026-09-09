@@ -3071,7 +3071,6 @@ export class AgentRuntime {
                 return completeRun(
                   `${turnPathRedactor.redactTerminalText(keptAnswerModelText)}${note}`,
                   "completed",
-                  { emitFinalEvent: true },
                 );
               }
               answerContinuations += 1;
@@ -3164,7 +3163,11 @@ export class AgentRuntime {
               ? streamedTextOffset >= 0
                 ? returnedText.slice(streamedTextOffset)
                 : stepStreamedText
-              : returnedText || currentAnswerText || "No response.";
+              : keptAnswerModelText
+                ? // A kept truncated answer already holds the visible text;
+                  // falling back to it (or a placeholder) would corrupt it.
+                  returnedText
+                : returnedText || currentAnswerText || "No response.";
             const finalDecision = await finalAnswerController.evaluate({
               candidateText: turnPathRedactor.redactTerminalText(
                 `${keptAnswerModelText}${rawModelFinalText}`,

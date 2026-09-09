@@ -9525,3 +9525,65 @@ describe("AgentRuntime evidence stop policy", function () {
     }
   });
 });
+
+describe("truncated answer continuation with a non-streaming final step", function () {
+  it("does not duplicate the kept text when the continuation returns nothing new", async function () {
+    const restoreDb = installMockDb();
+    try {
+      let modelSteps = 0;
+      const runtime = new AgentRuntime({
+        semanticInterpreter: declaredSemanticInterpreter,
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            modelSteps += 1;
+            if (modelSteps === 1) {
+              return {
+                kind: "incomplete",
+                reason: "output_limit",
+                text: "Everything that fits.",
+                recoveryInstruction: "Continue with a complete tool call.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Everything that fits.",
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "",
+              assistantMessage: { role: "assistant", content: "" },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          classifiedIntent: classifiedFixture(),
+          conversationKey: 1_915,
+          mode: "agent",
+          userText: "write it",
+          model: "deepseek-chat",
+          apiBase: "https://api.deepseek.com/v1",
+          apiKey: "test",
+          advanced: { outputTokenLimit: { mode: "auto" } },
+        },
+      });
+
+      assert.equal(modelSteps, 2);
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed") {
+        assert.equal(outcome.text, "Everything that fits.");
+      }
+    } finally {
+      restoreDb();
+    }
+  });
+});
