@@ -20,7 +20,7 @@ import type { ZoteroGateway } from "../services/zoteroGateway";
 import {
   appendResearchCorpusItem,
   invalidateLatestResearchMutationApprovalGrant,
-  invalidateThemeFindings,
+  invalidateResearchGraph,
   listScopeSnapshotItems,
   listResearchCorpusItems,
   listResearchEvidence,
@@ -641,7 +641,7 @@ export class PlanAmendmentService {
             updatedAt: now,
           });
         }
-        await invalidateThemeFindings(job.researchJobId, now);
+        await invalidateResearchGraph(job.researchJobId, now);
         await invalidateLatestResearchMutationApprovalGrant(
           job.executionId,
           now,

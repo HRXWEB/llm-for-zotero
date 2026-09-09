@@ -9,7 +9,10 @@ import type {
   ThemeFinding,
   ResearchMutationApprovalGrant,
   ResearchRecallProbe,
+  ResearchEdge,
+  ResearchOpenQuestion,
 } from "./types";
+import { decodeResearchEdge, decodeResearchOpenQuestion } from "./graphSchema";
 import {
   decodePaperFinding,
   decodeResearchCorpusItem,
@@ -39,6 +42,9 @@ export const RESEARCH_THEME_FINDINGS_TABLE =
   "llm_for_zotero_research_theme_findings";
 export const RESEARCH_MUTATION_APPROVALS_TABLE =
   "llm_for_zotero_research_mutation_approvals";
+export const RESEARCH_EDGES_TABLE = "llm_for_zotero_research_edges";
+export const RESEARCH_OPEN_QUESTIONS_TABLE =
+  "llm_for_zotero_research_open_questions";
 
 type JsonRow = { payloadJson?: unknown };
 
@@ -208,6 +214,43 @@ export async function initResearchStore(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS llm_research_mutation_approval_execution_idx
        ON ${RESEARCH_MUTATION_APPROVALS_TABLE} (execution_id, approved_at DESC)`,
     );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_EDGES_TABLE} (
+        edge_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        target TEXT NOT NULL,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lifecycle TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_edges_job_idx
+       ON ${RESEARCH_EDGES_TABLE} (research_job_id, lifecycle, created_at)`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${RESEARCH_OPEN_QUESTIONS_TABLE} (
+        question_id TEXT PRIMARY KEY,
+        research_job_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        parent_task_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lifecycle TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS llm_research_open_questions_job_idx
+       ON ${RESEARCH_OPEN_QUESTIONS_TABLE} (research_job_id, lifecycle, created_at)`,
+    );
   });
 }
 
@@ -353,9 +396,16 @@ export async function saveResearchJob(
   conversationKey: number,
 ): Promise<void> {
   const decoded = decodeResearchJob(job);
+  // Version 3 only carries the network fields; a job without them stays
+  // readable by builds that predate the research graph.
+  const usesGraphFields =
+    decoded.frame !== undefined ||
+    decoded.synthesisPhase !== undefined ||
+    decoded.nodeCapacity !== undefined ||
+    decoded.qualityReport !== undefined;
   const stored: ResearchJob = {
     ...decoded,
-    version: 2,
+    version: usesGraphFields ? 3 : 2,
     baseSnapshotId: decoded.baseSnapshotId || decoded.snapshotId,
     scopeLineageDigest:
       decoded.scopeLineageDigest || `legacy:${decoded.snapshotId}`,
@@ -782,6 +832,113 @@ export async function invalidateThemeFindings(
   }
 }
 
+export async function saveResearchEdge(edge: ResearchEdge): Promise<void> {
+  decodeResearchEdge(edge);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_EDGES_TABLE}
+     (edge_id, research_job_id, execution_id, parent_task_id, source, target,
+      type, status, lifecycle, payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      edge.edgeId,
+      edge.researchJobId,
+      edge.executionId,
+      edge.parentTaskId,
+      edge.source,
+      edge.target,
+      edge.type,
+      edge.status,
+      edge.lifecycle,
+      JSON.stringify(edge),
+      edge.createdAt,
+      edge.updatedAt,
+    ],
+  );
+}
+
+export async function listResearchEdges(
+  researchJobId: string,
+  options: { includeInvalidated?: boolean } = {},
+): Promise<ResearchEdge[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_EDGES_TABLE}
+     WHERE research_job_id = ?${
+       options.includeInvalidated ? "" : " AND lifecycle = 'valid'"
+     } ORDER BY created_at ASC, edge_id ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchEdge))
+    .filter((edge): edge is ResearchEdge => Boolean(edge));
+}
+
+export async function saveResearchOpenQuestion(
+  question: ResearchOpenQuestion,
+): Promise<void> {
+  decodeResearchOpenQuestion(question);
+  await Zotero.DB.queryAsync(
+    `INSERT OR REPLACE INTO ${RESEARCH_OPEN_QUESTIONS_TABLE}
+     (question_id, research_job_id, execution_id, parent_task_id, status,
+      lifecycle, payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      question.questionId,
+      question.researchJobId,
+      question.executionId,
+      question.parentTaskId,
+      question.status,
+      question.lifecycle,
+      JSON.stringify(question),
+      question.createdAt,
+      question.updatedAt,
+    ],
+  );
+}
+
+export async function listResearchOpenQuestions(
+  researchJobId: string,
+  options: { includeInvalidated?: boolean } = {},
+): Promise<ResearchOpenQuestion[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT payload_json AS payloadJson FROM ${RESEARCH_OPEN_QUESTIONS_TABLE}
+     WHERE research_job_id = ?${
+       options.includeInvalidated ? "" : " AND lifecycle = 'valid'"
+     } ORDER BY created_at ASC, question_id ASC`,
+    [researchJobId],
+  )) as JsonRow[] | undefined;
+  return (rows || [])
+    .map((row) => parse(row, decodeResearchOpenQuestion))
+    .filter((question): question is ResearchOpenQuestion => Boolean(question));
+}
+
+/**
+ * A superseded scope lineage invalidates every cross-paper reduction at once:
+ * themes, edges and open questions. Per-paper nodes stay; their fingerprints
+ * are re-checked at finalization.
+ */
+export async function invalidateResearchGraph(
+  researchJobId: string,
+  now = Date.now(),
+): Promise<void> {
+  await invalidateThemeFindings(researchJobId, now);
+  for (const edge of await listResearchEdges(researchJobId)) {
+    await saveResearchEdge({
+      ...edge,
+      lifecycle: "invalidated",
+      invalidatedAt: now,
+      updatedAt: now,
+    });
+  }
+  for (const question of await listResearchOpenQuestions(researchJobId)) {
+    await saveResearchOpenQuestion({
+      ...question,
+      lifecycle: "invalidated",
+      invalidatedAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
 export async function saveResearchMutationApprovalGrant(
   grant: ResearchMutationApprovalGrant,
 ): Promise<void> {
@@ -852,6 +1009,8 @@ export async function clearResearchConversationRowsInTransaction(
   if (jobIds.length) {
     const placeholders = jobIds.map(() => "?").join(", ");
     for (const table of [
+      RESEARCH_EDGES_TABLE,
+      RESEARCH_OPEN_QUESTIONS_TABLE,
       RESEARCH_THEME_FINDINGS_TABLE,
       RESEARCH_PAPER_FINDINGS_TABLE,
       RESEARCH_RECALL_PROBES_TABLE,

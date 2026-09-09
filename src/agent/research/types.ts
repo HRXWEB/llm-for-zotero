@@ -109,7 +109,7 @@ export type ResearchWorkStatus =
   | "cancelled";
 
 export type ResearchJob = Readonly<{
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   researchJobId: string;
   executionId: string;
   parentTaskId: string;
@@ -130,9 +130,178 @@ export type ResearchJob = Readonly<{
   deepReadCompleted: number;
   deepReadPlanned: number;
   exceptionGrant?: ResearchExceptionGrant;
+  /** Comparison frame every node fills; host default, model-refinable. */
+  frame?: ResearchFrame;
+  /** Adaptive-review loop phase after inventory (version 3). */
+  synthesisPhase?: ResearchSynthesisPhase;
+  /** Capacity-derived tiering decision measured at inventory. */
+  nodeCapacity?: ResearchNodeCapacity;
+  /** Quality rubric computed at finalize and document finalization. */
+  qualityReport?: ResearchQualityReport;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
+}>;
+
+export type ResearchSynthesisPhase =
+  | "nodes"
+  | "links"
+  | "verification"
+  | "structure"
+  | "writing"
+  | "complete";
+
+export type ResearchFrameSlot = Readonly<{
+  slotId: string;
+  name: string;
+  description: string;
+  kind: "identity" | "comparison";
+}>;
+
+export type ResearchFrame = Readonly<{
+  version: 1;
+  slots: readonly ResearchFrameSlot[];
+  revisedAt: number;
+}>;
+
+export type ResearchNodeCapacity = Readonly<{
+  fullNodeCapacity: number;
+  linkViewTokens: number;
+  compactCoreTokens: number;
+  compactPeripheralTokens: number;
+  mandatoryTiering: boolean;
+  measuredAt: number;
+}>;
+
+export type ResearchQualityReport = Readonly<{
+  version: 1;
+  computedAt: number;
+  papers: number;
+  nodes: number;
+  claims: number;
+  claimsWithLocators: number;
+  nodesWithEdges: number;
+  edges: number;
+  edgesVerified: number;
+  edgesTentative: number;
+  edgesRefuted: number;
+  contradictions: number;
+  subquestionClaims: Readonly<Record<string, number>>;
+  themes: number;
+  themesWithEdges: number;
+  openQuestions: number;
+  answeredQuestions: number;
+  crossPaperParagraphs?: number;
+  crossPaperParagraphsSupported?: number;
+}>;
+
+export type ResearchPaperTier = "core" | "supporting" | "peripheral";
+
+export type ResearchEdgeType =
+  | "extends"
+  | "contradicts"
+  | "replicates"
+  | "shares_method"
+  | "shares_construct"
+  | "supplies_theory"
+  | "motivates"
+  | "applies_to"
+  | "refines";
+
+export type ResearchEdgeStatus =
+  | "candidate"
+  | "verified"
+  | "refuted"
+  | "tentative"
+  | "merged";
+
+export type ResearchEdge = Readonly<{
+  version: 1;
+  edgeId: string;
+  /** Model-supplied idempotency key; the host owns edgeId. */
+  edgeKey?: string;
+  researchJobId: string;
+  executionId: string;
+  parentTaskId: string;
+  source: string;
+  target: string;
+  type: ResearchEdgeType;
+  statement: string;
+  sourceClaimIds: readonly string[];
+  targetClaimIds: readonly string[];
+  confidence: ResearchFindingConfidence;
+  requiresVerification: boolean;
+  status: ResearchEdgeStatus;
+  verification?: Readonly<{
+    evidenceRefs: readonly string[];
+    note?: string;
+    decidedAt: number;
+  }>;
+  mergedInto?: string;
+  subquestionIds: readonly string[];
+  scopeLineageDigest?: string;
+  lifecycle: "valid" | "invalidated";
+  invalidatedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
+export type ResearchOpenQuestion = Readonly<{
+  version: 1;
+  questionId: string;
+  researchJobId: string;
+  executionId: string;
+  parentTaskId: string;
+  text: string;
+  scope: Readonly<{
+    kind: "subquestion" | "edge" | "node" | "corpus";
+    ref?: string;
+  }>;
+  priority: 1 | 2 | 3;
+  origin: "model" | "host_gap";
+  status: "open" | "answered" | "abandoned";
+  resolution?: Readonly<{ text: string; evidenceRefs: readonly string[] }>;
+  scopeLineageDigest?: string;
+  lifecycle: "valid" | "invalidated";
+  invalidatedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
+export type ResearchClaimKind =
+  | "finding"
+  | "method"
+  | "mechanism"
+  | "limitation"
+  | "theory"
+  | "context";
+
+export type ResearchClaim = Readonly<{
+  claimId: string;
+  statement: string;
+  kind: ResearchClaimKind;
+  subquestionIds: readonly string[];
+  evidence: Readonly<{
+    sourceKind: "body" | "abstract" | "metadata";
+    pageIndex?: number;
+    quote?: string;
+    /** Host-verified: the quote or locator was checked against the source. */
+    verified?: boolean;
+  }>;
+}>;
+
+export type ResearchNodeHooks = Readonly<{
+  constructs: readonly string[];
+  methods: readonly string[];
+  datasets: readonly string[];
+  populations: readonly string[];
+  keyQuantities: readonly string[];
+}>;
+
+export type ResearchCandidateLink = Readonly<{
+  target: string;
+  type: ResearchEdgeType;
+  note: string;
 }>;
 
 export type ResearchExceptionGrant = Readonly<{
@@ -152,7 +321,7 @@ export type ResearchExceptionGrant = Readonly<{
 }>;
 
 export type ResearchCorpusItem = Readonly<{
-  version: 1;
+  version: 1 | 2;
   researchJobId: string;
   executionId: string;
   parentTaskId: string;
@@ -170,6 +339,13 @@ export type ResearchCorpusItem = Readonly<{
   readable: boolean;
   indexed: boolean;
   sourceFingerprint?: string;
+  /** Version 2: capacity-derived reading tier and its provenance. */
+  tier?: ResearchPaperTier;
+  relevanceScore?: number;
+  tierSource?: "host" | "model";
+  tierReason?: string;
+  /** Host-measured size of the readable text, in tokens. */
+  textTokens?: number;
   updatedAt: number;
 }>;
 
@@ -234,7 +410,7 @@ export type ResearchRecallProbe = Readonly<{
 export type ResearchFindingConfidence = "low" | "medium" | "high";
 
 export type PaperFinding = Readonly<{
-  version: 1;
+  version: 1 | 2;
   findingId: string;
   researchJobId: string;
   executionId: string;
@@ -269,6 +445,14 @@ export type PaperFinding = Readonly<{
   mechanisms?: readonly string[];
   relevance?: string;
   relationships?: readonly string[];
+  /** Version 2 node fields: the tailored, claim-based understanding. */
+  tier?: ResearchPaperTier;
+  frameSlots?: Readonly<Record<string, string>>;
+  claims?: readonly ResearchClaim[];
+  hooks?: ResearchNodeHooks;
+  candidateLinks?: readonly ResearchCandidateLink[];
+  noLinkSeen?: string;
+  questionsRaised?: readonly Readonly<{ text: string; about?: string }>[];
   createdAt: number;
 }>;
 

@@ -1,4 +1,14 @@
 import { decodeActionContract } from "../plans/contracts";
+import {
+  decodeResearchCandidateLink,
+  decodeResearchClaim,
+  decodeResearchFrame,
+  decodeResearchNodeCapacity,
+  decodeResearchNodeHooks,
+  decodeResearchQualityReport,
+  RESEARCH_PAPER_TIERS,
+  RESEARCH_SYNTHESIS_PHASES,
+} from "./graphSchema";
 import { decodeResearchPolicySnapshot } from "./policy";
 import type {
   PaperFinding,
@@ -86,8 +96,16 @@ export function decodeScopeSnapshotItem(
 
 export function decodeResearchJob(value: unknown): ResearchJob {
   const input = object(value, "research job");
-  if (input.version !== 1 && input.version !== 2) {
+  if (input.version !== 1 && input.version !== 2 && input.version !== 3) {
     throw new Error("Unsupported research job version");
+  }
+  if (
+    input.synthesisPhase !== undefined &&
+    !RESEARCH_SYNTHESIS_PHASES.includes(
+      input.synthesisPhase as ResearchJob["synthesisPhase"] & string,
+    )
+  ) {
+    throw new Error("Invalid research synthesis phase");
   }
   const policy = decodeResearchPolicySnapshot(input.policy);
   const statuses = new Set([
@@ -136,12 +154,12 @@ export function decodeResearchJob(value: unknown): ResearchJob {
     parentTaskId: string(input.parentTaskId, "parentTaskId"),
     contractDigest: string(input.contractDigest, "contractDigest"),
     baseSnapshotId:
-      input.version === 2
+      input.version >= 2
         ? string(input.baseSnapshotId, "baseSnapshotId")
         : string(input.snapshotId, "snapshotId"),
     snapshotId: string(input.snapshotId, "snapshotId"),
     scopeLineageDigest:
-      input.version === 2
+      input.version >= 2
         ? string(input.scopeLineageDigest, "scopeLineageDigest")
         : `legacy:${string(input.snapshotId, "snapshotId")}`,
     policy,
@@ -203,6 +221,20 @@ export function decodeResearchJob(value: unknown): ResearchJob {
               : number(grantInput.consumedAt, "exceptionGrant.consumedAt"),
         }
       : undefined,
+    ...(input.frame === undefined
+      ? {}
+      : { frame: decodeResearchFrame(input.frame) }),
+    ...(input.synthesisPhase === undefined
+      ? {}
+      : {
+          synthesisPhase: input.synthesisPhase as ResearchJob["synthesisPhase"],
+        }),
+    ...(input.nodeCapacity === undefined
+      ? {}
+      : { nodeCapacity: decodeResearchNodeCapacity(input.nodeCapacity) }),
+    ...(input.qualityReport === undefined
+      ? {}
+      : { qualityReport: decodeResearchQualityReport(input.qualityReport) }),
     createdAt: number(input.createdAt, "createdAt"),
     updatedAt: number(input.updatedAt, "updatedAt"),
     completedAt:
@@ -214,7 +246,24 @@ export function decodeResearchJob(value: unknown): ResearchJob {
 
 export function decodeResearchCorpusItem(value: unknown): ResearchCorpusItem {
   const input = object(value, "research corpus item");
-  if (input.version !== 1) throw new Error("Unsupported corpus item version");
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error("Unsupported corpus item version");
+  }
+  if (
+    input.tier !== undefined &&
+    !RESEARCH_PAPER_TIERS.includes(
+      input.tier as ResearchCorpusItem["tier"] & string,
+    )
+  ) {
+    throw new Error("Invalid corpus item tier");
+  }
+  if (
+    input.tierSource !== undefined &&
+    input.tierSource !== "host" &&
+    input.tierSource !== "model"
+  ) {
+    throw new Error("Invalid corpus item tier source");
+  }
   const statuses = new Set([
     "pending",
     "candidate",
@@ -257,7 +306,7 @@ export function decodeResearchCorpusItem(value: unknown): ResearchCorpusItem {
     throw new Error("Corpus attachment inventory is invalid");
   }
   return {
-    version: 1,
+    version: input.version,
     researchJobId: string(input.researchJobId, "researchJobId"),
     executionId: string(input.executionId, "executionId"),
     parentTaskId: string(input.parentTaskId, "parentTaskId"),
@@ -285,6 +334,21 @@ export function decodeResearchCorpusItem(value: unknown): ResearchCorpusItem {
       typeof input.sourceFingerprint === "string"
         ? input.sourceFingerprint
         : undefined,
+    ...(input.tier === undefined
+      ? {}
+      : { tier: input.tier as ResearchCorpusItem["tier"] }),
+    ...(input.relevanceScore === undefined
+      ? {}
+      : { relevanceScore: number(input.relevanceScore, "relevanceScore") }),
+    ...(input.tierSource === undefined
+      ? {}
+      : { tierSource: input.tierSource as "host" | "model" }),
+    ...(typeof input.tierReason === "string"
+      ? { tierReason: input.tierReason }
+      : {}),
+    ...(input.textTokens === undefined
+      ? {}
+      : { textTokens: nonNegativeInteger(input.textTokens, "textTokens") }),
     updatedAt: number(input.updatedAt, "updatedAt"),
   };
 }
@@ -433,7 +497,67 @@ export function decodeResearchRecallProbe(value: unknown): ResearchRecallProbe {
 
 export function decodePaperFinding(value: unknown): PaperFinding {
   const input = object(value, "paper finding");
-  if (input.version !== 1) throw new Error("Unsupported paper finding version");
+  if (input.version !== 1 && input.version !== 2) {
+    throw new Error("Unsupported paper finding version");
+  }
+  if (
+    input.tier !== undefined &&
+    !RESEARCH_PAPER_TIERS.includes(input.tier as PaperFinding["tier"] & string)
+  ) {
+    throw new Error("Invalid paper-finding tier");
+  }
+  const frameSlots =
+    input.frameSlots === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(object(input.frameSlots, "frameSlots")).map(
+            ([slotId, slotValue]) => [
+              slotId,
+              typeof slotValue === "string"
+                ? slotValue
+                : String(slotValue ?? ""),
+            ],
+          ),
+        );
+  const claims =
+    input.claims === undefined
+      ? undefined
+      : (() => {
+          if (!Array.isArray(input.claims)) {
+            throw new Error("claims must be an array");
+          }
+          return input.claims.map((entry, index) =>
+            decodeResearchClaim(entry, `claims[${index}]`),
+          );
+        })();
+  const candidateLinks =
+    input.candidateLinks === undefined
+      ? undefined
+      : (() => {
+          if (!Array.isArray(input.candidateLinks)) {
+            throw new Error("candidateLinks must be an array");
+          }
+          return input.candidateLinks.map((entry, index) =>
+            decodeResearchCandidateLink(entry, `candidateLinks[${index}]`),
+          );
+        })();
+  const questionsRaised =
+    input.questionsRaised === undefined
+      ? undefined
+      : (() => {
+          if (!Array.isArray(input.questionsRaised)) {
+            throw new Error("questionsRaised must be an array");
+          }
+          return input.questionsRaised.map((entry, index) => {
+            const question = object(entry, `questionsRaised[${index}]`);
+            return {
+              text: string(question.text, `questionsRaised[${index}].text`),
+              ...(typeof question.about === "string" && question.about
+                ? { about: question.about }
+                : {}),
+            };
+          });
+        })();
   if (
     !new Set(["include", "exclude", "unresolved"]).has(
       String(input.inclusionDecision),
@@ -460,7 +584,7 @@ export function decodePaperFinding(value: unknown): PaperFinding {
     throw new Error("Invalid paper-finding role");
   }
   return {
-    version: 1,
+    version: input.version,
     findingId: string(input.findingId, "findingId"),
     researchJobId: string(input.researchJobId, "researchJobId"),
     executionId: string(input.executionId, "executionId"),
@@ -503,6 +627,19 @@ export function decodePaperFinding(value: unknown): PaperFinding {
     ...(input.relationships === undefined
       ? {}
       : { relationships: strings(input.relationships, "relationships") }),
+    ...(input.tier === undefined
+      ? {}
+      : { tier: input.tier as PaperFinding["tier"] }),
+    ...(frameSlots ? { frameSlots } : {}),
+    ...(claims ? { claims } : {}),
+    ...(input.hooks === undefined
+      ? {}
+      : { hooks: decodeResearchNodeHooks(input.hooks) }),
+    ...(candidateLinks ? { candidateLinks } : {}),
+    ...(typeof input.noLinkSeen === "string" && input.noLinkSeen.trim()
+      ? { noLinkSeen: input.noLinkSeen.trim() }
+      : {}),
+    ...(questionsRaised ? { questionsRaised } : {}),
     createdAt: number(input.createdAt, "createdAt"),
   };
 }
@@ -593,3 +730,5 @@ export function decodeResearchMutationApprovalGrant(
         : number(input.invalidatedAt, "invalidatedAt"),
   };
 }
+
+export { decodeResearchEdge, decodeResearchOpenQuestion } from "./graphSchema";
