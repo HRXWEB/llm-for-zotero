@@ -668,6 +668,7 @@ export function decodeTaskEvidence(value: unknown): TaskEvidence {
                 sourceFingerprint: optionalString(
                   observation.sourceFingerprint,
                 ),
+                readMode: optionalString(observation.readMode),
                 quoteCertificate: optionalString(observation.quoteCertificate),
                 certificateDigest: requiredString(
                   observation.certificateDigest,

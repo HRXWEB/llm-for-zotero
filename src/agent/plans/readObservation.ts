@@ -291,6 +291,11 @@ export async function createTrustedReadObservations(params: {
 }): Promise<TrustedReadObservation[]> {
   const seeds = observationSeeds(params.toolName, params.input, params.result);
   if (!seeds.length) return [];
+  const args = record(params.input) || {};
+  const readMode =
+    params.toolName === "paper_read"
+      ? text(args.mode) || text(record(params.result)?.mode) || "overview"
+      : undefined;
   const inputDigest = `sha256:${await sha256Text(canonicalJson(params.input))}`;
   const resultDigest = `sha256:${await sha256Text(canonicalJson(params.result))}`;
   const callDigest = `sha256:${await sha256Text(
@@ -340,6 +345,7 @@ export async function createTrustedReadObservations(params: {
       capabilities: [...entry.capabilities],
       pageIndex: entry.source.pageIndex,
       sourceFingerprint: entry.source.sourceFingerprint,
+      ...(readMode ? { readMode } : {}),
     };
     observations.push({
       ...unsigned,

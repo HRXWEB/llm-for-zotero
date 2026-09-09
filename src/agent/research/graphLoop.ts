@@ -299,8 +299,9 @@ export async function recordResearchEdges(params: {
 }
 
 /**
- * Body observations with a page locator issued after the edge was recorded,
- * for either paper of the pair: the only evidence that verifies or refutes.
+ * Body observations from a targeted read of either paper of the pair issued
+ * after the edge was recorded: the only evidence that verifies or refutes. A
+ * page locator counts as targeted evidence too (page reads name their page).
  */
 export function verificationObservations(params: {
   edge: ResearchEdge;
@@ -321,7 +322,8 @@ export function verificationObservations(params: {
       if (
         (identity === params.edge.source || identity === params.edge.target) &&
         observation.capabilities.includes("body") &&
-        observation.pageIndex !== undefined
+        (observation.readMode === "targeted" ||
+          observation.pageIndex !== undefined)
       ) {
         ids.push(observation.observationId);
       }

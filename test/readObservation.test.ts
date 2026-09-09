@@ -161,3 +161,51 @@ describe("trusted read observations", function () {
     assert.equal(full[0].sourceFingerprint, "pdfjs:full");
   });
 });
+
+describe("trusted read observations carry the paper_read mode", function () {
+  const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;
+  before(function () {
+    const items = new Map<number, Record<string, unknown>>([
+      [10, { id: 10, key: "AAAA1111", libraryID: 1 }],
+      [20, { id: 20, key: "PDFP1111", libraryID: 1, parentID: 10 }],
+    ]);
+    (globalThis as { Zotero?: unknown }).Zotero = {
+      Items: { get: (itemId: number) => items.get(itemId) || null },
+    };
+  });
+  after(function () {
+    (globalThis as { Zotero?: unknown }).Zotero = priorZotero;
+  });
+
+  it("records targeted and overview modes so edge verification can tell them apart", async function () {
+    const targeted = await createTrustedReadObservations({
+      toolName: "paper_read",
+      callId: "targeted",
+      input: { mode: "targeted", target: { itemId: 10, contextItemId: 20 } },
+      result: {
+        mode: "targeted",
+        results: [
+          {
+            paperContext: { itemId: 10, contextItemId: 20 },
+            text: "passage",
+            chunkIndex: 3,
+          },
+        ],
+      },
+    });
+    assert.equal(targeted[0]?.readMode, "targeted");
+    assert.include(targeted[0]?.capabilities || [], "body");
+    const overview = await createTrustedReadObservations({
+      toolName: "paper_read",
+      callId: "overview",
+      input: { mode: "overview", target: { itemId: 10, contextItemId: 20 } },
+      result: {
+        mode: "overview",
+        results: [
+          { paperContext: { itemId: 10, contextItemId: 20 }, text: "body" },
+        ],
+      },
+    });
+    assert.equal(overview[0]?.readMode, "overview");
+  });
+});

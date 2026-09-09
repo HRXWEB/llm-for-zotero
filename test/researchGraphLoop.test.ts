@@ -236,10 +236,17 @@ describe("research graph loop", function () {
       }),
     );
     assert.match(noRead, /targeted paper_read/);
-    await harness!.verifiedRead(["PAPER003"], "body", {
-      pageIndex: 4,
-      mode: "targeted",
-    });
+    // An overview re-read is not verification, even after the edge exists.
+    await harness!.verifiedRead(["PAPER003"], "body");
+    const overviewOnly = await attempt(() =>
+      harness!.run({
+        operation: "update_edges",
+        edges: [{ edgeId: contradiction, status: "verified" }],
+      }),
+    );
+    assert.match(overviewOnly, /targeted paper_read/);
+    // A targeted read of either paper verifies, with or without a page locator.
+    await harness!.verifiedRead(["PAPER003"], "body", { mode: "targeted" });
     const decided = await harness!.run({
       operation: "update_edges",
       edges: [
@@ -256,6 +263,11 @@ describe("research graph loop", function () {
     ).find((edge) => edge.edgeId === contradiction)!;
     assert.lengthOf(stored.verification!.evidenceRefs, 1);
     assert.match(stored.verification!.evidenceRefs[0], /:obs:1$/);
+    assert.match(
+      stored.verification!.evidenceRefs[0],
+      /read-\d+:obs:1$/,
+      "the targeted read, not the earlier overview, is the evidence",
+    );
     const tentative = await attempt(() =>
       harness!.run({
         operation: "update_edges",

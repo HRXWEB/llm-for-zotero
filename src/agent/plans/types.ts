@@ -255,6 +255,8 @@ export type TrustedReadObservation = Readonly<{
   attachmentItemKey?: string;
   pageIndex?: number;
   sourceFingerprint?: string;
+  /** The paper_read mode that issued this observation (overview, targeted, full, ...). */
+  readMode?: string;
   quoteCertificate?: string;
   certificateDigest: string;
 }>;

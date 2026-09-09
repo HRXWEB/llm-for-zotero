@@ -482,6 +482,7 @@ export function installResearchHarness(
           libraryID,
           itemKey: key,
           capabilities: [...capabilities],
+          readMode: readOptions.mode || "overview",
           ...(depth === "body"
             ? {
                 attachmentItemKey: paper.attachmentKey,
