@@ -680,12 +680,13 @@ describe("Plan Mode research architecture v3", function () {
       .papers.items;
     assert.deepEqual(paperSchema.required, ["libraryID", "itemKey"]);
     const findingSchema = paperSchema.properties.finding;
-    assert.includeMembers(findingSchema.required, [
+    assert.deepEqual(findingSchema.required, [
       "mainMessage",
-      "researchQuestion",
-      "method",
       "relevance",
+      "confidence",
     ]);
+    assert.property(findingSchema.properties, "claims");
+    assert.property(findingSchema.properties, "candidateLinks");
     assert.notProperty(
       findingSchema.properties,
       "evidenceKeys",

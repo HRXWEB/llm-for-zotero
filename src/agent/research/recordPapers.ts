@@ -3,6 +3,7 @@ import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { validateObject } from "../tools/shared";
 import { type ResearchUpdateInput } from "./commands";
+import { buildNodeRecordFields, isNodeShapedFinding } from "./nodeRecords";
 import { recordPaperExample } from "./recordDecoding";
 import {
   resolveTrustedPdfLocator,
@@ -73,6 +74,18 @@ export async function recordResearchPapers(params: {
     taskEvidence,
     new Set(corpusByKey.keys()),
   );
+  // Page indexes issued by trusted reads, per paper: the only locators a claim
+  // may carry as host-verified.
+  const observedPages = new Map<string, Set<number>>();
+  for (const observations of verifiedReads.values()) {
+    for (const observation of observations) {
+      if (observation.pageIndex === undefined) continue;
+      const key = `${observation.libraryID}:${observation.itemKey}`;
+      const pages = observedPages.get(key) || new Set<number>();
+      pages.add(observation.pageIndex);
+      observedPages.set(key, pages);
+    }
+  }
   const writes: Array<() => Promise<unknown>> = [];
   for (let index = 0; index < (input.papers || []).length; index += 1) {
     // Identity and finding placement are normalized by `normalizeRecordPaperInput`
@@ -308,12 +321,38 @@ export async function recordResearchPapers(params: {
         liveFingerprints.metadataFingerprint,
       updatedAt: Date.now(),
     };
-    writes.push(async () => saveResearchCorpusItem(next));
     let workSubquestions: string[] = [];
     if (validateObject<Record<string, unknown>>(raw.finding)) {
       const finding = raw.finding;
-      const subquestionIds =
-        adaptiveReview && finding.subquestionIds === undefined
+      // Jobs with a comparison frame record claim-based nodes; an included
+      // paper of such a job must be written in that shape.
+      const nodeFields =
+        adaptiveReview &&
+        job.frame &&
+        (status === "included" || isNodeShapedFinding(finding))
+          ? buildNodeRecordFields({
+              identity,
+              itemKey,
+              finding,
+              frame: job.frame,
+              tier: current.tier || "core",
+              readDepth: preferredRead?.evidenceDepth,
+              observedPageIndexes: observedPages.get(identity) || new Set(),
+              corpusIdentities: new Set(corpusByKey.keys()),
+              allowedSubquestions,
+            })
+          : undefined;
+      if (nodeFields && nodeFields.tier !== current.tier) {
+        Object.assign(next, {
+          version: 2,
+          tier: nodeFields.tier,
+          tierSource: "model",
+        });
+      }
+      writes.push(async () => saveResearchCorpusItem(next));
+      const subquestionIds = nodeFields
+        ? [...nodeFields.subquestionIds]
+        : adaptiveReview && finding.subquestionIds === undefined
           ? [...allowedSubquestions]
           : strings(finding.subquestionIds, "finding.subquestionIds");
       workSubquestions = subquestionIds;
@@ -384,17 +423,19 @@ export async function recordResearchPapers(params: {
         );
       }
       if (adaptiveReview && status === "included") {
-        for (const field of [
-          "mainMessage",
-          "researchQuestion",
-          "method",
-          "relevance",
-        ] as const) {
+        for (const field of nodeFields
+          ? (["mainMessage", "relevance"] as const)
+          : ([
+              "mainMessage",
+              "researchQuestion",
+              "method",
+              "relevance",
+            ] as const)) {
           string(finding[field], `finding.${field}`);
         }
       }
       const record: PaperFinding = {
-        version: 1,
+        version: nodeFields ? 2 : 1,
         findingId: `${job.researchJobId}:paper:${libraryID}:${itemKey}`,
         researchJobId: job.researchJobId,
         executionId: job.executionId,
@@ -403,7 +444,9 @@ export async function recordResearchPapers(params: {
         itemKey,
         subquestionIds,
         criterionIds,
-        findings: strings(finding.findings || [], "finding.findings"),
+        findings: nodeFields
+          ? [...nodeFields.findings]
+          : strings(finding.findings || [], "finding.findings"),
         contradictions: strings(
           finding.contradictions || [],
           "finding.contradictions",
@@ -412,7 +455,9 @@ export async function recordResearchPapers(params: {
           finding.negativeEvidence || [],
           "finding.negativeEvidence",
         ),
-        limitations: strings(finding.limitations || [], "finding.limitations"),
+        limitations: nodeFields
+          ? [...nodeFields.limitations]
+          : strings(finding.limitations || [], "finding.limitations"),
         evidenceRefs: mappedEvidence,
         sourceFingerprint: next.sourceFingerprint || "missing",
         inclusionDecision,
@@ -431,22 +476,28 @@ export async function recordResearchPapers(params: {
           : {
               mainMessage: string(finding.mainMessage, "finding.mainMessage"),
             }),
-        ...(finding.researchQuestion === undefined
-          ? {}
-          : {
-              researchQuestion: string(
-                finding.researchQuestion,
-                "finding.researchQuestion",
-              ),
-            }),
-        ...(finding.method === undefined
-          ? {}
-          : { method: string(finding.method, "finding.method") }),
-        ...(finding.mechanisms === undefined
-          ? {}
-          : {
-              mechanisms: strings(finding.mechanisms, "finding.mechanisms"),
-            }),
+        ...(nodeFields?.researchQuestion
+          ? { researchQuestion: nodeFields.researchQuestion }
+          : finding.researchQuestion === undefined
+            ? {}
+            : {
+                researchQuestion: string(
+                  finding.researchQuestion,
+                  "finding.researchQuestion",
+                ),
+              }),
+        ...(nodeFields?.method
+          ? { method: nodeFields.method }
+          : finding.method === undefined
+            ? {}
+            : { method: string(finding.method, "finding.method") }),
+        ...(nodeFields
+          ? { mechanisms: [...nodeFields.mechanisms] }
+          : finding.mechanisms === undefined
+            ? {}
+            : {
+                mechanisms: strings(finding.mechanisms, "finding.mechanisms"),
+              }),
         ...(finding.relevance === undefined
           ? {}
           : {
@@ -460,6 +511,23 @@ export async function recordResearchPapers(params: {
                 "finding.relationships",
               ),
             }),
+        ...(nodeFields
+          ? {
+              tier: nodeFields.tier,
+              frameSlots: nodeFields.frameSlots,
+              claims: nodeFields.claims,
+              hooks: nodeFields.hooks,
+              ...(nodeFields.candidateLinks
+                ? { candidateLinks: nodeFields.candidateLinks }
+                : {}),
+              ...(nodeFields.noLinkSeen
+                ? { noLinkSeen: nodeFields.noLinkSeen }
+                : {}),
+              ...(nodeFields.questionsRaised
+                ? { questionsRaised: nodeFields.questionsRaised }
+                : {}),
+            }
+          : {}),
         createdAt: Date.now(),
       };
       writes.push(async () => savePaperFinding(record));
@@ -468,6 +536,7 @@ export async function recordResearchPapers(params: {
         `Adaptive review paper ${identity} requires a durable finding\n${recordPaperExample()}`,
       );
     } else if (recordStage === "broad_screening" && status === "excluded") {
+      writes.push(async () => saveResearchCorpusItem(next));
       writes.push(async () =>
         savePaperFinding(
           buildExcludedScreeningFinding({
@@ -482,6 +551,8 @@ export async function recordResearchPapers(params: {
           }),
         ),
       );
+    } else {
+      writes.push(async () => saveResearchCorpusItem(next));
     }
     writes.push(async () =>
       completeWorkItem({

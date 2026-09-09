@@ -4,6 +4,11 @@ import {
   type ResearchUpdateInput,
 } from "../../research/commands";
 import { executeResearchUpdate } from "../../research/execution";
+import {
+  RESEARCH_CLAIM_KINDS,
+  RESEARCH_EDGE_TYPES,
+  RESEARCH_PAPER_TIERS,
+} from "../../research/graphSchema";
 import { RESEARCH_STAGES as STAGES } from "../../research/policy";
 import { NARRATIVE_ROLES } from "../../research/recordValidation";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
@@ -97,16 +102,111 @@ export function createResearchUpdateTool(
                 finding: {
                   type: "object",
                   additionalProperties: false,
-                  required: [
-                    "mainMessage",
-                    "researchQuestion",
-                    "method",
-                    "findings",
-                    "limitations",
-                    "relevance",
-                    "confidence",
-                  ],
+                  description:
+                    "The paper's tailored understanding. Adaptive reviews record a claim-based node: frameSlots (every slot of the host frame for a core paper, identity slots for others), claims[] bound to evidence no deeper than the verified read, hooks, and either candidateLinks[] to other corpus papers or noLinkSeen with a reason. Legacy fields (researchQuestion, method, findings, limitations, mechanisms) are derived from the frame and claims when omitted.",
+                  required: ["mainMessage", "relevance", "confidence"],
                   properties: {
+                    tier: {
+                      type: "string",
+                      enum: RESEARCH_PAPER_TIERS,
+                      description:
+                        "Revise the host-proposed tier only with a reason in relevance; core needs at least three claims and every frame slot.",
+                    },
+                    frameSlots: {
+                      type: "object",
+                      description:
+                        "slotId -> text for the host comparison frame; write not_reported when the paper is silent.",
+                      additionalProperties: { type: "string" },
+                    },
+                    claims: {
+                      type: "array",
+                      minItems: 1,
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: [
+                          "statement",
+                          "kind",
+                          "subquestionIds",
+                          "evidence",
+                        ],
+                        properties: {
+                          claimId: { type: "string" },
+                          statement: { type: "string" },
+                          kind: { type: "string", enum: RESEARCH_CLAIM_KINDS },
+                          subquestionIds: {
+                            type: "array",
+                            items: { type: "string" },
+                          },
+                          evidence: {
+                            type: "object",
+                            additionalProperties: false,
+                            required: ["sourceKind"],
+                            properties: {
+                              sourceKind: {
+                                type: "string",
+                                enum: ["body", "abstract", "metadata"],
+                              },
+                              pageIndex: { type: "integer", minimum: 0 },
+                              quote: { type: "string" },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    hooks: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        constructs: {
+                          type: "array",
+                          items: { type: "string" },
+                        },
+                        methods: { type: "array", items: { type: "string" } },
+                        datasets: { type: "array", items: { type: "string" } },
+                        populations: {
+                          type: "array",
+                          items: { type: "string" },
+                        },
+                        keyQuantities: {
+                          type: "array",
+                          items: { type: "string" },
+                        },
+                      },
+                    },
+                    candidateLinks: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: ["target", "type", "note"],
+                        properties: {
+                          target: {
+                            type: "string",
+                            description: "Corpus identity such as 1:ABCD1234",
+                          },
+                          type: { type: "string", enum: RESEARCH_EDGE_TYPES },
+                          note: { type: "string" },
+                        },
+                      },
+                    },
+                    noLinkSeen: {
+                      type: "string",
+                      description:
+                        "Reason no relationship to another corpus paper was seen; exclusive with candidateLinks.",
+                    },
+                    questionsRaised: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        additionalProperties: false,
+                        required: ["text"],
+                        properties: {
+                          text: { type: "string" },
+                          about: { type: "string" },
+                        },
+                      },
+                    },
                     roles: {
                       type: "array",
                       minItems: 1,

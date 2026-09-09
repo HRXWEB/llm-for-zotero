@@ -29,6 +29,13 @@ export const FINDING_KEYS = new Set([
   "inclusionDecision",
   "confidence",
   "unresolvedQuestions",
+  "tier",
+  "frameSlots",
+  "claims",
+  "hooks",
+  "candidateLinks",
+  "noLinkSeen",
+  "questionsRaised",
 ]);
 
 export const RECORD_PAPER_EXAMPLE = Object.freeze({
@@ -36,13 +43,26 @@ export const RECORD_PAPER_EXAMPLE = Object.freeze({
   itemKey: "ABCD1234",
   finding: {
     mainMessage: "One sentence stating the paper's central claim.",
-    researchQuestion: "What the paper asks.",
-    method: "How the paper answers it.",
-    findings: ["A concrete result."],
-    limitations: ["A stated limitation."],
     relevance: "Why it matters for the review question.",
     confidence: "medium",
-    roles: ["supporting_evidence"],
+    frameSlots: {
+      question: "What the paper asks.",
+      approach: "How the paper answers it (method, evidence type).",
+      system: "Population, model system, task or dataset.",
+      sq1: "What it contributes to subquestion sq1, or not_reported.",
+    },
+    claims: [
+      {
+        statement: "One concrete thing the paper shows.",
+        kind: "finding",
+        subquestionIds: ["sq1"],
+        evidence: { sourceKind: "body", quote: "short supporting phrase" },
+      },
+    ],
+    hooks: { constructs: ["construct"], methods: ["method"] },
+    candidateLinks: [
+      { target: "1:WXYZ5678", type: "extends", note: "why they relate" },
+    ],
   },
 });
 
