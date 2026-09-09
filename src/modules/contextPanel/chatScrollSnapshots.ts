@@ -219,16 +219,90 @@ function scoreVisibleAnchor(element: Element, viewport: DOMRect): number {
   return Math.abs(rect.top - viewport.top) + 1;
 }
 
+function isEmptyRect(rect: DOMRect): boolean {
+  return rect.top === rect.bottom && rect.width === 0;
+}
+
+/**
+ * Message wrappers are the chat box's vertical sequence, so the ones that
+ * intersect the viewport form one contiguous run. Find that run with a binary
+ * search over wrapper geometry instead of measuring every message: a long
+ * conversation is scrolled many times a second, and each scroll must stay
+ * cheap. Hidden wrappers measure as empty rects and are stepped over.
+ */
+function findVisibleMessageWrappers(
+  chatBox: HTMLDivElement,
+  viewport: DOMRect,
+): { wrappers: Element[]; visible: Element[] } {
+  const wrappers = queryElements(chatBox, ".llm-message-wrapper");
+  if (!wrappers.length) return { wrappers, visible: [] };
+  const measuredRects = new Map<number, DOMRect | null>();
+  const rectAt = (index: number): DOMRect | null => {
+    if (measuredRects.has(index)) return measuredRects.get(index) || null;
+    const rect = getElementRect(wrappers[index]);
+    const usable = rect && !isEmptyRect(rect) ? rect : null;
+    measuredRects.set(index, usable);
+    return usable;
+  };
+  // Probe the nearest measurable wrapper at or after `index`, staying within
+  // [index, limit].
+  const probeForward = (
+    index: number,
+    limit: number,
+  ): { index: number; rect: DOMRect } | null => {
+    for (let cursor = index; cursor <= limit; cursor += 1) {
+      const rect = rectAt(cursor);
+      if (rect) return { index: cursor, rect };
+    }
+    return null;
+  };
+
+  // First wrapper whose bottom edge lies below the viewport top.
+  let low = 0;
+  let high = wrappers.length - 1;
+  let first = wrappers.length;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const probe = probeForward(mid, high);
+    if (!probe) {
+      high = mid - 1;
+      continue;
+    }
+    if (probe.rect.bottom > viewport.top) {
+      first = probe.index;
+      high = mid - 1;
+    } else {
+      low = probe.index + 1;
+    }
+  }
+
+  const visible: Element[] = [];
+  for (let index = first; index < wrappers.length; index += 1) {
+    const rect = rectAt(index);
+    if (!rect) continue;
+    if (rect.top >= viewport.bottom) break;
+    if (isRectVisibleInViewport(rect, viewport)) visible.push(wrappers[index]);
+  }
+  return { wrappers, visible };
+}
+
 function findBestVisibleChatAnchor(
   chatBox: HTMLDivElement,
 ): ChatScrollAnchor | undefined {
   const viewport = getElementRect(chatBox);
   if (!viewport) return undefined;
 
-  const quoteCandidates = [
-    ...queryElements(chatBox, ".llm-quote-card"),
-    ...queryElements(chatBox, "[data-citation-sync-key]"),
-  ];
+  const { wrappers, visible: visibleWrappers } = findVisibleMessageWrappers(
+    chatBox,
+    viewport,
+  );
+  // Quote cards live inside message wrappers; content without wrappers keeps
+  // the chat-wide scan.
+  const quoteScopes: Element[] = wrappers.length ? visibleWrappers : [chatBox];
+  const quoteCandidates = quoteScopes.flatMap((scope) => [
+    ...queryElements(scope, ".llm-quote-card"),
+    ...queryElements(scope, "[data-citation-sync-key]"),
+  ]);
   let bestQuote: {
     element: Element;
     anchor: ChatScrollAnchor;
@@ -249,7 +323,7 @@ function findBestVisibleChatAnchor(
   if (bestQuote) return bestQuote.anchor;
 
   let bestMessage: { anchor: ChatScrollAnchor; score: number } | null = null;
-  for (const candidate of queryElements(chatBox, ".llm-message-wrapper")) {
+  for (const candidate of visibleWrappers) {
     const anchor = buildMessageAnchor(candidate, viewport);
     if (!anchor) continue;
     const score = scoreVisibleAnchor(candidate, viewport);

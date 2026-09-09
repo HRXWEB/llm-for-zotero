@@ -45,6 +45,9 @@ class FakeClassList {
   }
 }
 
+/** Layout reads made through the fake DOM; the anchor search must stay small. */
+let rectReads = 0;
+
 class FakeElement {
   readonly dataset: Record<string, string | undefined> = {};
   readonly children: FakeElement[] = [];
@@ -135,6 +138,7 @@ class FakeElement {
     left: number;
     right: number;
   } {
+    rectReads += 1;
     const chatBox = this.closest("#llm-chat-box");
     if (this === chatBox) {
       return {
@@ -206,6 +210,45 @@ function appendElement(
 }
 
 describe("chat scroll snapshots", function () {
+  it("locates the visible anchor without measuring every message of a long conversation", function () {
+    clearChatScrollSnapshotsForTests();
+    const chatBox = makeChatBox({
+      scrollTop: 20_000,
+      scrollHeight: 40_000,
+      clientHeight: 100,
+    });
+    for (let index = 0; index < 400; index += 1) {
+      const wrapper = appendElement(chatBox, "llm-message-wrapper", {
+        offsetTop: index * 100,
+        offsetHeight: 100,
+        dataset: {
+          messageRole: "assistant",
+          messageTimestamp: `${index}`,
+          messageAnchorKey: `message-${index}`,
+        },
+      });
+      appendElement(wrapper, "llm-quote-card", {
+        offsetTop: index * 100 + 10,
+        offsetHeight: 40,
+        dataset: { quoteCitationId: `quote-${index}` },
+      });
+    }
+
+    rectReads = 0;
+    persistChatScrollSnapshotForConversationKey(7, chatBox);
+
+    const snapshot = getChatScrollSnapshot(7);
+    assert.equal(snapshot?.mode, "manual");
+    assert.equal(snapshot?.anchor?.kind, "quote");
+    assert.equal(snapshot?.anchor?.quoteCitationId, "quote-200");
+    assert.equal(snapshot?.anchor?.viewportOffsetTop, 10);
+    assert.isBelow(
+      rectReads,
+      60,
+      `anchor search measured ${rectReads} rects for 400 messages`,
+    );
+  });
+
   it("preserves follow intent when text grows before a pending scroll event", function () {
     clearChatScrollSnapshotsForTests();
     const element = makeChatBox({
