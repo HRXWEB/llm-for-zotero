@@ -1,7 +1,7 @@
 ---
 id: literature-review
 description: Structured scientific review with thematic synthesis and citations
-version: 7
+version: 8
 contexts: paper-set,library-corpus
 activation: auto
 ---
@@ -78,7 +78,7 @@ Do not invent a paper cap or tool-call budget here.
 - Structure phase: `advance_phase` to `structure`, call `list_graph`, and record themes with `record_themes` naming the `edgeIds` and `communityId` each theme rests on.
   Themes are communities in the graph; synthesize from the edges, not from juxtaposed summaries.
   Turn the host's structural gaps (isolated nodes, thin subquestions, unresolved contradictions, tentative edges, open questions) into the gaps section.
-- Then `advance_phase` to `writing` and `finalize` research.
+- Then `advance_phase` to `writing` and call `finalize` with `outcome:'complete'` (`partial` when accessible papers stayed unread).
   Use targeted reads at any phase only to resolve an important uncertainty, check a decisive claim, or obtain a precise location.
 
 ### Evidence-based quality checks

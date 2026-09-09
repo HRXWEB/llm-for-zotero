@@ -137,6 +137,21 @@ describe("narrative literature-review strategy", function () {
       "When a checkpoint supplies the remaining manifest, do not call inventory_scope again",
     );
     assert.include(skill, "SANRA");
+    assert.include(
+      skill,
+      "`finalize` with `outcome:'complete'`",
+      "finalize needs an explicit outcome; a bare finalize costs a rejected round",
+    );
+  });
+
+  it("names the finalize outcome in the research_update guidance", async function () {
+    const { createResearchUpdateTool } =
+      await import("../src/agent/tools/plan/researchUpdate");
+    const tool = createResearchUpdateTool({} as never);
+    assert.include(
+      tool.guidance?.instruction ?? "",
+      "then finalize with outcome complete",
+    );
   });
 
   it("binds durable evidence to citations by paper identity without model-visible IDs", function () {
