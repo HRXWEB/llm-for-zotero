@@ -293,6 +293,19 @@ reviewable and undoable.
 
 #### Find related papers
 
+Use `/discover_related` while viewing a paper to run the direct OpenAlex action.
+It opens Recommendations, References, and Citations tabs with up to 20 papers per mode by default.
+Use `/discover_related 30` to change the initial retrieval limit, **Load more** to retrieve 20 more per mode while preserving your selections, and **Import selected** to save the papers you choose.
+This shortcut does not require a model.
+
+Ask “find relevant papers” in chat to start model-assisted discovery.
+The agent assesses retrieved candidates and presents a ranked card with relevance reasons.
+An explicit count, such as “find 15 relevant papers,” sets the batch size; otherwise it starts with five.
+Use **Find more** to add another batch of the same size while preserving your selections, then **Import selected** to save the papers you choose.
+Requests for references, citing papers, or a specific search source constrain discovery to that request.
+If fewer relevant matches are available, the card explains the shortfall instead of padding the list.
+A configured model is required for model-assisted discovery; literature search used to answer a question remains a separate flow that can finish with a cited answer without an import card.
+
 <p align="center">
   <img src="./assets/agent/related_papers.gif" alt="Animation showing agent finding related papers in the library" width="1024" />
 </p>
@@ -811,17 +824,38 @@ PR.
 
 ### Model capability registry
 
-Model context limits and provider-defined reasoning options are maintained in
-[`registry/model-capabilities.v1.json`](./registry/model-capabilities.v1.json).
+Model context limits and provider-defined reasoning options are maintained in [`registry/model-capabilities.v1.json`](./registry/model-capabilities.v1.json).
+The plugin refreshes this schema-validated registry and configured provider catalogs in the background, with a bounded first-use refresh when needed.
 
-The plugin refreshes this schema-validated registry and each configured
-provider's model catalog in the background, and performs a bounded first-use
-refresh when needed.
+**Auto — provider default** leaves reasoning controls to the endpoint.
+An unfamiliar model offers Auto until capability information is available; missing metadata never means reasoning is off.
+Explicit levels, including Off, come from the applicable profile or endpoint capabilities.
+Saved choices are checked again when the model or endpoint changes, and unavailable choices resolve to Auto.
+Explicit advanced request-body parameters retain their existing precedence.
 
-Adding a model to the registry does not require a plugin release; increment the
-registry revision, run `npm run validate:model-registry`, and publish the JSON
-change.
+User profile overrides take priority over endpoint metadata, followed by the remote/bundled registry and established model profiles.
+A catalog's `supports_reasoning` boolean does not establish an effort list.
+The standard OpenAI `/models` API does not publish supported efforts.
+Custom endpoints may opt into the plugin's structured catalog extension: a model row's `reasoning` object uses the registry's validated `kind`, `options`, and optional `defaultOptionId` contract.
+An option can declare a portable `effort` string for OpenAI-compatible protocols or an existing declarative `controls` patch for its endpoint.
+Capability data is cached per endpoint, protocol, authentication mode, and runtime scope.
 
-When a provider does not expose reasoning controls or context metadata through
-its model catalog, the registry remains the authoritative provider-maintained
-fallback.
+Adding a verified model or effort to the remote registry does not require another plugin release once the client supports its encoding.
+Increment the registry revision, run `npm run validate:model-registry`, and publish the JSON change through the normal reviewed update process.
+This does not infer undocumented future API contracts or automatically publish model settings.
+
+### External MCP write access
+
+Standalone MCP clients can use the existing bearer-authenticated `/llm-for-zotero/mcp` endpoint while Zotero is running.
+In **Settings → llm-for-zotero → Agent → External MCP clients**, enable **Allow writes from external MCP clients** to authorize write access.
+This setting is off by default and trusts any client holding the connection credential to use the exposed write tools, including deletion and Zotero scripts.
+The connected assistant owns approval through its own permission settings; the plugin does not apply Original Agent Safe/Auto/YOLO or display a second permission prompt.
+Integrated Codex and Claude Code use their existing MCP enablement controls and the same delegated approval rule.
+
+Use ordinary `tools/call` requests; no Zotero chat, private turn token, or additional session handshake is required for standalone clients.
+Specify `libraryID` for predictable targeting, or omit it to resolve the currently selected library once for that call.
+Invalid arguments, unavailable targets, native read-only restrictions, and execution or verification failures remain errors.
+Writes retain durable recovery records and native Zotero verification; preserve returned action IDs for recovery.
+Standalone `undo_last_action` requires `actionId`, and `revert_changes` requires `actionIds` (which cannot be combined with `count`).
+Do not blindly repeat a write after a timeout or uncertain outcome: inspect native state and the returned recovery information first.
+This interface does not promise exactly-once execution across repeated HTTP requests.

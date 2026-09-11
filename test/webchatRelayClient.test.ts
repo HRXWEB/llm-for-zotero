@@ -566,6 +566,7 @@ describe("webchat relay/client", function () {
       "temperature",
       "maxTokens",
       "maxTokensExplicit",
+      "outputTokenLimit",
       "inputTokenCap",
       "inputMode",
       "providerProtocol",
